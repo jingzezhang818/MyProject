@@ -30,7 +30,10 @@
 #include <thread>
 #include <include/CameraModels/Pinhole.h>
 #include <include/CameraModels/KannalaBrandt8.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <string>
 
 namespace ORB_SLAM3
@@ -48,6 +51,35 @@ namespace
             return !(v.empty() || v == "0" || v == "false" || v == "FALSE");
         }();
         return enabled;
+    }
+
+    float GetXFeatStereoDescThreshold()
+    {
+        static const float threshold = []() {
+            float value = 1.10f;
+            const char* env = std::getenv("XFEAT_STEREO_DESC_TH");
+            if(env && env[0] != '\0')
+            {
+                char* end = nullptr;
+                const float parsed = std::strtof(env, &end);
+                if(end != env && std::isfinite(parsed))
+                    value = parsed;
+            }
+            return std::max(0.05f, std::min(2.0f, value));
+        }();
+        return threshold;
+    }
+
+    bool IsFloatDescriptorMat(const cv::Mat& descriptors)
+    {
+        return !descriptors.empty() && descriptors.type() == CV_32F;
+    }
+
+    float StereoDescriptorDistance(const cv::Mat& a, const cv::Mat& b, const bool bFloatDescriptors)
+    {
+        if(bFloatDescriptors)
+            return static_cast<float>(cv::norm(a, b, cv::NORM_L2));
+        return static_cast<float>(ORBmatcher::DescriptorDistance(a, b));
     }
 }
 
@@ -204,6 +236,103 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     mpMutexImu = new std::mutex();
 
     //Set no stereo fisheye information
+    Nleft = -1;
+    Nright = -1;
+    mvLeftToRightMatch = vector<int>(0);
+    mvRightToLeftMatch = vector<int>(0);
+    mvStereo3Dpoints = vector<Eigen::Vector3f>(0);
+    monoLeft = -1;
+    monoRight = -1;
+
+    AssignFeaturesToGrid();
+}
+
+Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeStamp, XFextractor* extractorLeft, XFextractor* extractorRight, ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera, Frame* pPrevF, const IMU::Calib &ImuCalib)
+    :mpcpi(NULL), mpORBvocabulary(voc), mpXFextractor(extractorLeft), mpORBextractorLeft(static_cast<ORBextractor*>(NULL)), mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
+     mTimeStamp(timeStamp), mK(K.clone()), mK_(Converter::toMatrix3f(K)), mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
+     mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF), mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false),
+     mpCamera(pCamera), mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
+{
+    mnId=nNextId++;
+
+    XFextractor* pRightExtractor = extractorRight ? extractorRight : extractorLeft;
+
+    mnScaleLevels = extractorLeft->GetLevels();
+    mfScaleFactor = extractorLeft->GetScaleFactor();
+    mfLogScaleFactor = log(mfScaleFactor);
+    mvScaleFactors = extractorLeft->GetScaleFactors();
+    mvInvScaleFactors = extractorLeft->GetInverseScaleFactors();
+    mvLevelSigma2 = extractorLeft->GetScaleSigmaSquares();
+    mvInvLevelSigma2 = extractorLeft->GetInverseScaleSigmaSquares();
+
+#ifdef REGISTER_TIMES
+    std::chrono::steady_clock::time_point time_StartExtORB = std::chrono::steady_clock::now();
+#endif
+    // XFeat extraction is run sequentially to avoid sharing a mutable Torch
+    // module from two threads when both cameras reuse one extractor.
+    {
+        vector<int> vLapping = {0,0};
+        monoLeft = (*extractorLeft)(imLeft,cv::Mat(),mvKeys,mDescriptors,vLapping);
+        monoRight = (*pRightExtractor)(imRight,cv::Mat(),mvKeysRight,mDescriptorsRight,vLapping);
+    }
+#ifdef REGISTER_TIMES
+    std::chrono::steady_clock::time_point time_EndExtORB = std::chrono::steady_clock::now();
+
+    mTimeORB_Ext = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndExtORB - time_StartExtORB).count();
+#endif
+
+    N = mvKeys.size();
+    if(mvKeys.empty())
+        return;
+
+    UndistortKeyPoints();
+
+#ifdef REGISTER_TIMES
+    std::chrono::steady_clock::time_point time_StartStereoMatches = std::chrono::steady_clock::now();
+#endif
+    ComputeStereoMatches();
+#ifdef REGISTER_TIMES
+    std::chrono::steady_clock::time_point time_EndStereoMatches = std::chrono::steady_clock::now();
+
+    mTimeStereoMatch = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndStereoMatches - time_StartStereoMatches).count();
+#endif
+
+    mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
+    mvbOutlier = vector<bool>(N,false);
+    mmProjectPoints.clear();
+    mmMatchedInImage.clear();
+
+    if(mbInitialComputations)
+    {
+        ComputeImageBounds(imLeft);
+
+        mfGridElementWidthInv=static_cast<float>(FRAME_GRID_COLS)/(mnMaxX-mnMinX);
+        mfGridElementHeightInv=static_cast<float>(FRAME_GRID_ROWS)/(mnMaxY-mnMinY);
+
+        fx = K.at<float>(0,0);
+        fy = K.at<float>(1,1);
+        cx = K.at<float>(0,2);
+        cy = K.at<float>(1,2);
+        invfx = 1.0f/fx;
+        invfy = 1.0f/fy;
+
+        mbInitialComputations=false;
+    }
+
+    mb = mbf/fx;
+
+    if(pPrevF)
+    {
+        if(pPrevF->HasVelocity())
+            SetVelocity(pPrevF->GetVelocity());
+    }
+    else
+    {
+        mVw.setZero();
+    }
+
+    mpMutexImu = new std::mutex();
+
     Nleft = -1;
     Nright = -1;
     mvLeftToRightMatch = vector<int>(0);
@@ -1034,9 +1163,17 @@ void Frame::ComputeStereoMatches()
     mvuRight = vector<float>(N,-1.0f);
     mvDepth = vector<float>(N,-1.0f);
 
-    const int thOrbDist = (ORBmatcher::TH_HIGH+ORBmatcher::TH_LOW)/2;
+    const bool bFloatDescriptors = IsFloatDescriptorMat(mDescriptors) || IsFloatDescriptorMat(mDescriptorsRight);
+    const float thDescDist = bFloatDescriptors ? GetXFeatStereoDescThreshold()
+                                               : static_cast<float>((ORBmatcher::TH_HIGH+ORBmatcher::TH_LOW)/2);
 
-    const int nRows = mpORBextractorLeft->mvImagePyramid[0].rows;
+    int nRows = 0;
+    if(mpORBextractorLeft && !mpORBextractorLeft->mvImagePyramid.empty() && !mpORBextractorLeft->mvImagePyramid[0].empty())
+        nRows = mpORBextractorLeft->mvImagePyramid[0].rows;
+    else if(mpXFextractor && !mpXFextractor->mvImagePyramid.empty() && !mpXFextractor->mvImagePyramid[0].empty())
+        nRows = mpXFextractor->mvImagePyramid[0].rows;
+    else
+        nRows = std::max(1, static_cast<int>(std::ceil(mnMaxY - mnMinY)));
 
     //Assign keypoints to row table
     vector<vector<size_t> > vRowIndices(nRows,vector<size_t>());
@@ -1051,8 +1188,8 @@ void Frame::ComputeStereoMatches()
         const cv::KeyPoint &kp = mvKeysRight[iR];
         const float &kpY = kp.pt.y;
         const float r = 2.0f*mvScaleFactors[mvKeysRight[iR].octave];
-        const int maxr = ceil(kpY+r);
-        const int minr = floor(kpY-r);
+        const int maxr = std::min(nRows - 1, static_cast<int>(ceil(kpY+r)));
+        const int minr = std::max(0, static_cast<int>(floor(kpY-r)));
 
         for(int yi=minr;yi<=maxr;yi++)
             vRowIndices[yi].push_back(iR);
@@ -1064,7 +1201,7 @@ void Frame::ComputeStereoMatches()
     const float maxD = mbf/minZ;
 
     // For each left keypoint search a match in the right image
-    vector<pair<int, int> > vDistIdx;
+    vector<pair<float, int> > vDistIdx;
     vDistIdx.reserve(N);
 
     for(int iL=0; iL<N; iL++)
@@ -1074,7 +1211,8 @@ void Frame::ComputeStereoMatches()
         const float &vL = kpL.pt.y;
         const float &uL = kpL.pt.x;
 
-        const vector<size_t> &vCandidates = vRowIndices[vL];
+        const int rowL = std::max(0, std::min(nRows - 1, cvRound(vL)));
+        const vector<size_t> &vCandidates = vRowIndices[rowL];
 
         if(vCandidates.empty())
             continue;
@@ -1085,7 +1223,7 @@ void Frame::ComputeStereoMatches()
         if(maxU<0)
             continue;
 
-        int bestDist = ORBmatcher::TH_HIGH;
+        float bestDist = std::numeric_limits<float>::infinity();
         size_t bestIdxR = 0;
 
         const cv::Mat &dL = mDescriptors.row(iL);
@@ -1104,7 +1242,7 @@ void Frame::ComputeStereoMatches()
             if(uR>=minU && uR<=maxU)
             {
                 const cv::Mat &dR = mDescriptorsRight.row(iR);
-                const int dist = ORBmatcher::DescriptorDistance(dL,dR);
+                const float dist = StereoDescriptorDistance(dL,dR,bFloatDescriptors);
 
                 if(dist<bestDist)
                 {
@@ -1115,8 +1253,26 @@ void Frame::ComputeStereoMatches()
         }
 
         // Subpixel match by correlation
-        if(bestDist<thOrbDist)
+        if(bestDist<thDescDist)
         {
+            if(bFloatDescriptors)
+            {
+                const float bestuR = mvKeysRight[bestIdxR].pt.x;
+                float disparity = (uL-bestuR);
+
+                if(disparity>=minD && disparity<maxD)
+                {
+                    if(disparity<=0)
+                    {
+                        disparity=0.01f;
+                    }
+                    mvDepth[iL]=mbf/disparity;
+                    mvuRight[iL] = uL-disparity;
+                    vDistIdx.push_back(pair<float,int>(bestDist,iL));
+                }
+                continue;
+            }
+
             // coordinates in image pyramid at keypoint scale
             const float uR0 = mvKeysRight[bestIdxR].pt.x;
             const float scaleFactor = mvInvScaleFactors[kpL.octave];
@@ -1128,7 +1284,7 @@ void Frame::ComputeStereoMatches()
             const int w = 5;
             cv::Mat IL = mpORBextractorLeft->mvImagePyramid[kpL.octave].rowRange(scaledvL-w,scaledvL+w+1).colRange(scaleduL-w,scaleduL+w+1);
 
-            int bestDist = INT_MAX;
+            int bestPatchDist = INT_MAX;
             int bestincR = 0;
             const int L = 5;
             vector<float> vDists;
@@ -1144,9 +1300,9 @@ void Frame::ComputeStereoMatches()
                 cv::Mat IR = mpORBextractorRight->mvImagePyramid[kpL.octave].rowRange(scaledvL-w,scaledvL+w+1).colRange(scaleduR0+incR-w,scaleduR0+incR+w+1);
 
                 float dist = cv::norm(IL,IR,cv::NORM_L1);
-                if(dist<bestDist)
+                if(dist<bestPatchDist)
                 {
-                    bestDist =  dist;
+                    bestPatchDist =  dist;
                     bestincR = incR;
                 }
 
@@ -1180,16 +1336,19 @@ void Frame::ComputeStereoMatches()
                 }
                 mvDepth[iL]=mbf/disparity;
                 mvuRight[iL] = bestuR;
-                vDistIdx.push_back(pair<int,int>(bestDist,iL));
+                vDistIdx.push_back(pair<float,int>(static_cast<float>(bestPatchDist),iL));
             }
         }
     }
+
+    if(vDistIdx.empty())
+        return;
 
     sort(vDistIdx.begin(),vDistIdx.end());
     const float median = vDistIdx[vDistIdx.size()/2].first;
     const float thDist = 1.5f*1.4f*median;
 
-    for(int i=vDistIdx.size()-1;i>=0;i--)
+    for(int i=static_cast<int>(vDistIdx.size())-1;i>=0;i--)
     {
         if(vDistIdx[i].first<thDist)
             break;

@@ -32,6 +32,7 @@
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/xml_iarchive.hpp>
 #include <boost/archive/xml_oarchive.hpp>
+#include "thirdparty/DBoW2/DUtils/Random.h"
 
 namespace ORB_SLAM3
 {
@@ -72,6 +73,15 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     {
        cerr << "Failed to open settings file at: " << strSettingsFile << endl;
        exit(-1);
+    }
+
+    cv::FileNode randomSeedNode = fsSettings["System.RandomSeed"];
+    if(!randomSeedNode.empty())
+    {
+        const int randomSeed = static_cast<int>(randomSeedNode);
+        DUtils::Random::SeedRandOnce(randomSeed);
+        cv::setRNGSeed(randomSeed);
+        cout << "System.RandomSeed set to: " << randomSeed << endl;
     }
 
     cv::FileNode node = fsSettings["File.version"];
@@ -1546,4 +1556,3 @@ string System::CalculateCheckSum(string filename, int type)
 }
 
 } //namespace ORB_SLAM
-

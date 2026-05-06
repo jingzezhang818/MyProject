@@ -194,28 +194,6 @@ borrar/*
 
 */ExecMean.txt
 
-build-asan/
-
-# ASAN outputs
-asan*.log
-
-# Image outputs
-img.png
-
-# Output trajectories
-camera_traj_tum*.txt
-ground_truth_tum*.txt
-sept01_*.txt
-
-# RPE results
-*_rpe_summary.csv
-*_rpe_rot*.csv
-*_rpe_trans*.csv
-
-# Temporary files
-*.tmp
-*.temp
-
 # CodeX
 .codex
 # Log files
@@ -226,3 +204,12 @@ rpe_*.log
 # SePT dataset files
 examples/Monocular/SePT01_*.txt
 examples/Monocular/SePT01_*.yaml
+
+# Windows Zone.Identifier
+*Zone.Identifier*
+
+# Claude Code
+.claude/
+
+# Experiment logs
+experiment_logs/
