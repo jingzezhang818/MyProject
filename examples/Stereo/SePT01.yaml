@@ -51,7 +51,7 @@ Stereo.T_c1_c2: !!opencv-matrix
          0.0, 0.0, 1.0, 0.0,
          0.0, 0.0, 0.0, 1.0]
 
-Stereo.ThDepth: 31.0
+Stereo.ThDepth: 60.0
 
 #--------------------------------------------------------------------------------------------
 # ORB/XFeat extractor parameters

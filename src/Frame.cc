@@ -1258,13 +1258,8 @@ void Frame::ComputeStereoMatches()
     const float minD = bFloatDescriptors ? GetXFeatStereoMinDisparity() : 0.0f;
     const float maxD = mbf/minZ;
 
-    //诊断: XFeat立体匹配各阶段统计
+    //诊断: XFeat立体匹配描述子通过统计
     int nDescPass = 0;
-    int nSubpixelSuccess = 0;
-    int nSubpixelBoundarySkip = 0;
-    int nSubpixelCorrBoundarySkip = 0;
-    int nSubpixelCorrPeakSkip = 0;
-    int nSubpixelParabolaSkip = 0;
 
     // For each left keypoint search a match in the right image
     vector<pair<float, int> > vDistIdx;
@@ -1323,144 +1318,16 @@ void Frame::ComputeStereoMatches()
         {
             if(bFloatDescriptors)
             {
-                // XFeat sub-pixel refinement: sliding window correlation + parabola fitting.
-                // On any refinement failure, fall back to raw keypoint disparity.
-                const int octaveL = kpL.octave;
-                const float uR0 = mvKeysRight[bestIdxR].pt.x;
+                // XFeat: use raw keypoint disparity directly (skip sub-pixel refinement).
                 nDescPass++;
-
-                if(octaveL < 0 || octaveL >= static_cast<int>(mvImagePyramidLeft.size()) ||
-                   !pRightXFeatPyramid ||
-                   octaveL >= static_cast<int>(pRightXFeatPyramid->size()))
-                {
-                    goto xfeat_stereo_fallback;
-                }
-
-                {
-                const float scaleFactor = mvInvScaleFactors[octaveL];
-                const float scaleduL = round(kpL.pt.x*scaleFactor);
-                const float scaledvL = round(kpL.pt.y*scaleFactor);
-                const float scaleduR0 = round(uR0*scaleFactor);
-
-                const cv::Mat& imgLeftLevel = mvImagePyramidLeft[octaveL];
-                const cv::Mat& imgRightLevel = (*pRightXFeatPyramid)[octaveL];
-                if(imgLeftLevel.empty() || imgRightLevel.empty())
-                    goto xfeat_stereo_fallback;
-
-                // sliding window search
-                const int w = 5;
-                const int patchTop = scaledvL-w;
-                const int patchBottom = scaledvL+w+1;
-                const int patchLeft = scaleduL-w;
-                const int patchRight = scaleduL+w+1;
-
-                if(patchTop < 0 || patchBottom > imgLeftLevel.rows || patchLeft < 0 || patchRight > imgLeftLevel.cols)
-                {
-                    nSubpixelBoundarySkip++;
-                    goto xfeat_stereo_fallback;
-                }
-
-                cv::Mat IL = imgLeftLevel.rowRange(patchTop, patchBottom).colRange(patchLeft, patchRight);
-
-                int bestPatchDist = INT_MAX;
-                int bestincR = 0;
-                const int L = 5;
-                vector<float> vDists;
-                vDists.resize(2*L+1);
-
-                const float iniu = scaleduR0+L-w;
-                const float endu = scaleduR0+L+w+1;
-                if(iniu<0 || endu > imgRightLevel.cols)
-                {
-                    nSubpixelCorrBoundarySkip++;
-                    goto xfeat_stereo_fallback;
-                }
-
-                for(int incR=-L; incR<=+L; incR++)
-                {
-                    const int searchLeft = scaleduR0+incR-w;
-                    const int searchRight = scaleduR0+incR+w+1;
-
-                    if(searchLeft < 0 || searchRight > imgRightLevel.cols)
-                    {
-                        vDists[L+incR] = std::numeric_limits<float>::infinity();
-                        continue;
-                    }
-
-                    cv::Mat IR = imgRightLevel.rowRange(patchTop, patchBottom).colRange(searchLeft, searchRight);
-
-                    float dist = cv::norm(IL,IR,cv::NORM_L1);
-                    if(dist<bestPatchDist)
-                    {
-                        bestPatchDist = dist;
-                        bestincR = incR;
-                    }
-
-                    vDists[L+incR] = dist;
-                }
-
-                if(bestincR==-L || bestincR==L)
-                {
-                    nSubpixelCorrPeakSkip++;
-                    goto xfeat_stereo_fallback;
-                }
-
-                // Sub-pixel match (Parabola fitting)
-                const float dist1 = vDists[L+bestincR-1];
-                const float dist2 = vDists[L+bestincR];
-                const float dist3 = vDists[L+bestincR+1];
-
-                if(!std::isfinite(dist1) || !std::isfinite(dist2) || !std::isfinite(dist3))
-                {
-                    nSubpixelParabolaSkip++;
-                    goto xfeat_stereo_fallback;
-                }
-
-                const float denom = 2.0f*(dist1+dist3-2.0f*dist2);
-                if(std::fabs(denom) < 1e-8f)
-                {
-                    nSubpixelParabolaSkip++;
-                    goto xfeat_stereo_fallback;
-                }
-
-                const float deltaR = (dist1-dist3)/denom;
-
-                if(deltaR<-1 || deltaR>1)
-                {
-                    nSubpixelParabolaSkip++;
-                    goto xfeat_stereo_fallback;
-                }
-
-                // Re-scaled coordinate
-                float bestuR = mvScaleFactors[octaveL]*((float)scaleduR0+(float)bestincR+deltaR);
-
-                float disparity = (uL-bestuR);
-
+                const float uR0 = mvKeysRight[bestIdxR].pt.x;
+                float disparity = (uL - uR0);
                 if(disparity>=minD && disparity<maxD)
                 {
-                    if(disparity<=0)
-                    {
-                        disparity=0.01;
-                        bestuR = uL-0.01;
-                    }
+                    if(disparity<=0) disparity=0.01f;
                     mvDepth[iL]=mbf/disparity;
-                    mvuRight[iL] = bestuR;
+                    mvuRight[iL] = uL-disparity;
                     vDistIdx.push_back(pair<float,int>(bestDist,iL));
-                    nSubpixelSuccess++;
-                }
-                continue;
-                } // end sub-pixel scope
-
-xfeat_stereo_fallback:
-                {
-                    float disparity = (uL - uR0);
-                    if(disparity>=minD && disparity<maxD)
-                    {
-                        if(disparity<=0) disparity=0.01f;
-                        mvDepth[iL]=mbf/disparity;
-                        mvuRight[iL] = uL-disparity;
-                        vDistIdx.push_back(pair<float,int>(bestDist,iL));
-                    }
                 }
                 continue;
             }
@@ -1553,16 +1420,11 @@ xfeat_stereo_fallback:
 
     if(IsXFeatFrameDebugEnabled() && bFloatDescriptors)
     {
+        int nDepthBeforeMedian = static_cast<int>(vDistIdx.size());
         std::cout << "[ComputeStereoMatches] frame=" << mnId
                   << " N=" << N
                   << " desc_pass=" << nDescPass
-                  << " subpixel_ok=" << nSubpixelSuccess
-                  << " subpixel_skip(boundary=" << nSubpixelBoundarySkip
-                  << " corr_boundary=" << nSubpixelCorrBoundarySkip
-                  << " corr_peak=" << nSubpixelCorrPeakSkip
-                  << " parabola=" << nSubpixelParabolaSkip
-                  << ")"
-                  << " final_before_median=" << vDistIdx.size()
+                  << " depth_before_median=" << nDepthBeforeMedian
                   << " median_dist=" << median
                   << " th_dist=" << thDist
                   << std::endl;

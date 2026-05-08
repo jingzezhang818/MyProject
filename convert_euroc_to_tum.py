@@ -547,15 +547,18 @@ def main() -> None:
         print("No conversion performed. Provide --est-traj and/or --gt.")
     print("Run evo example:")
     if est_converted and gt_for_right_rot is not None:
-        print(f"evo_ape tum {gt_for_right_rot} {out_est} -r full -a -p")
+        print(f"evo_ape tum {gt_for_right_rot} {out_est} -r trans_part -a -p")
+        print(f"evo_traj tum {out_est} --ref={gt_for_right_rot} -a -p")
     elif gt_converted:
-        print(f"evo_traj tum {out_gt} -p")
+        print(f"evo_traj tum {out_gt} -a -p")
     elif gt_input_tum:
-        print(f"evo_traj tum {gt_for_right_rot} -p")
+        print(f"evo_traj tum {gt_for_right_rot} -a -p")
     elif est_converted:
-        print(f"evo_ape tum <gt_tum.txt> {out_est} -r full -a -p")
+        print(f"evo_ape tum <gt_tum.txt> {out_est} -r trans_part -a -p")
+        print(f"evo_traj tum {out_est} --ref=<gt_tum.txt> -a -p")
     else:
-        print("evo_ape tum <gt_tum.txt> <est_tum.txt> -r full -a -p")
+        print("evo_ape tum <gt_tum.txt> <est_tum.txt> -r trans_part -a -p")
+        print("evo_traj tum <est_tum.txt> --ref=<gt_tum.txt> -a -p")
     print("If timestamps still mismatch, tune with: --t_max_diff 0.02 or --t_offset <sec>")
 
 
