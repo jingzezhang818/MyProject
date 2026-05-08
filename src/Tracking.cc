@@ -145,6 +145,94 @@ namespace
         return rows;
     }
 
+    bool IsRuntimeFpsEnabled()
+    {
+        static const bool enabled = IsEnvFlagEnabled("XFEAT_FPS") || IsEnvFlagEnabled("SLAM_FPS");
+        return enabled;
+    }
+
+    int GetRuntimeFpsInterval()
+    {
+        static int interval = -1;
+        if(interval > 0)
+            return interval;
+
+        interval = 30;
+        const char* env = std::getenv("XFEAT_FPS_INTERVAL");
+        if(!env)
+            env = std::getenv("SLAM_FPS_INTERVAL");
+        if(env)
+        {
+            try
+            {
+                interval = std::max(1, std::min(1000, std::stoi(std::string(env))));
+            }
+            catch(...)
+            {
+                interval = 30;
+            }
+        }
+        return interval;
+    }
+
+    void LogRuntimeFps(const char* mode,
+                       const std::chrono::steady_clock::time_point& start,
+                       const long unsigned int frameId,
+                       const double timestamp,
+                       const int nFeatures,
+                       const int state)
+    {
+        if(!IsRuntimeFpsEnabled())
+            return;
+
+        const auto end = std::chrono::steady_clock::now();
+        const double totalMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(end - start).count();
+        const double procFps = totalMs > 0.0 ? 1000.0 / totalMs : 0.0;
+
+        static bool hasLastEnd = false;
+        static std::chrono::steady_clock::time_point lastEnd;
+        static double sumMs = 0.0;
+        static long unsigned int sampleCount = 0;
+
+        double wallFps = 0.0;
+        if(hasLastEnd)
+        {
+            const double wallMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(end - lastEnd).count();
+            wallFps = wallMs > 0.0 ? 1000.0 / wallMs : 0.0;
+        }
+
+        lastEnd = end;
+        hasLastEnd = true;
+        sumMs += totalMs;
+        ++sampleCount;
+
+        const int interval = GetRuntimeFpsInterval();
+        if(sampleCount % static_cast<long unsigned int>(interval) != 0)
+            return;
+
+        const double avgMs = sumMs / static_cast<double>(sampleCount);
+        const double avgProcFps = avgMs > 0.0 ? 1000.0 / avgMs : 0.0;
+        const char* frontend = std::getenv("USE_ORB") ? "ORB" : "XFeat";
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(2)
+                  << "[RuntimeFPS] sample=" << sampleCount
+                  << " frame=" << frameId
+                  << " mode=" << mode
+                  << " frontend=" << frontend
+                  << " state=" << state
+                  << " features=" << nFeatures
+                  << " total_ms=" << totalMs
+                  << " proc_fps=" << procFps
+                  << " avg_proc_fps=" << avgProcFps
+                  << " wall_fps=" << wallFps
+                  << " ts=" << std::setprecision(6) << timestamp
+                  << std::endl;
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
     bool ShouldRunFeatureDiagForFrame(const unsigned long frameId)
     {
         if(!IsXFeatFeatureDiagEnabled())
@@ -2199,6 +2287,7 @@ bool Tracking::GetStepByStep()
 
 Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat &imRectRight, const double &timestamp, string filename)
 {
+    const auto fpsStart = std::chrono::steady_clock::now();
     //cout << "GrabImageStereo" << endl;
 
     mImGray = imRectLeft;
@@ -2274,6 +2363,7 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
 
     //cout << "Tracking start" << endl;
     Track();
+    LogRuntimeFps("stereo", fpsStart, mCurrentFrame.mnId, mCurrentFrame.mTimeStamp, mCurrentFrame.N, mState);
     //cout << "Tracking end" << endl;
 
     return mCurrentFrame.GetPose();
@@ -2282,6 +2372,7 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
 
 Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, string filename)
 {
+    const auto fpsStart = std::chrono::steady_clock::now();
     mImGray = imRGB;
     cv::Mat imDepth = imD;
 
@@ -2331,6 +2422,7 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
 #endif
 
     Track();
+    LogRuntimeFps("rgbd", fpsStart, mCurrentFrame.mnId, mCurrentFrame.mTimeStamp, mCurrentFrame.N, mState);
 
     return mCurrentFrame.GetPose();
 }
@@ -2338,6 +2430,7 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
 
 Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
 {
+    const auto fpsStart = std::chrono::steady_clock::now();
     // 这里是原版代码，把输入图像统一转换成灰度图，供后续特征提取和跟踪使用。考虑到XFeat是输入的原版图像信息，rgb先做平均再输入，故做修改
     // mImGray = im;
     // if(mImGray.channels()==3)
@@ -2429,6 +2522,7 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
 
     lastID = mCurrentFrame.mnId;
     Track();
+    LogRuntimeFps("mono", fpsStart, mCurrentFrame.mnId, mCurrentFrame.mTimeStamp, mCurrentFrame.N, mState);
 
     return mCurrentFrame.GetPose();
 }

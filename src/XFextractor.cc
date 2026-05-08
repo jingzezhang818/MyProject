@@ -67,6 +67,8 @@
 #include <string>
 #include <list>
 #include <cmath>
+#include <chrono>
+#include <iomanip>
 
 #include "XFextractor.h"
 
@@ -125,6 +127,24 @@ namespace ORB_SLAM3
             {
             }
             return fallback;
+        }
+
+        bool IsXFeatProfileEnabled()
+        {
+            static const bool enabled = IsEnvFlagEnabled("XFEAT_PROFILE");
+            return enabled;
+        }
+
+        int GetXFeatFixedNMSCandidateFactor()
+        {
+            static const int factor = GetEnvIntWithRange("XFEAT_FIXED_NMS_CANDIDATE_FACTOR", 8, 1, 16);
+            return factor;
+        }
+
+        int GetXFeatFixedNMSCandidateMin()
+        {
+            static const int minCandidates = GetEnvIntWithRange("XFEAT_FIXED_NMS_CANDIDATE_MIN", 1024, 64, 8192);
+            return minCandidates;
         }
 
         //调试: XFeat关键点空间均匀化开关，默认开启；设 XFEAT_UNIFORM_DISABLE=1 可关闭。
@@ -970,20 +990,30 @@ namespace ORB_SLAM3
         return static_cast<std::string>(full_path);   
     }
 
-    torch::Tensor XFextractor::parseInput(cv::Mat &img)
+    torch::Tensor XFextractor::parseInput(cv::Mat &img, const torch::Device& device)
     {   
+        cv::Mat continuousImg = img;
+        if(!continuousImg.isContinuous())
+            continuousImg = img.clone();
+
         // if the image is grayscale
-        if (img.channels() == 1)
+        if (continuousImg.channels() == 1)
         {
-            torch::Tensor tensor = torch::from_blob(img.data, {1, img.rows, img.cols, 1}, torch::kByte);
-            tensor = tensor.permute({0, 3, 1, 2}).to(torch::kFloat) / 255.0;
+            torch::Tensor tensor = torch::from_blob(continuousImg.data,
+                                                    {1, continuousImg.rows, continuousImg.cols, 1},
+                                                    torch::kByte);
+            tensor = tensor.to(torch::TensorOptions().device(device).dtype(torch::kByte), true, false);
+            tensor = tensor.permute({0, 3, 1, 2}).contiguous().to(torch::kFloat).div_(255.0);
             return tensor;
         }
 
         // if image is in RGB format
-        if (img.channels() == 3) {
-            torch::Tensor tensor = torch::from_blob(img.data, {1, img.rows, img.cols, 3}, torch::kByte);
-            tensor = tensor.permute({0, 3, 1, 2}).to(torch::kFloat) / 255.0;
+        if (continuousImg.channels() == 3) {
+            torch::Tensor tensor = torch::from_blob(continuousImg.data,
+                                                    {1, continuousImg.rows, continuousImg.cols, 3},
+                                                    torch::kByte);
+            tensor = tensor.to(torch::TensorOptions().device(device).dtype(torch::kByte), true, false);
+            tensor = tensor.permute({0, 3, 1, 2}).contiguous().to(torch::kFloat).div_(255.0);
             return tensor;
         }
 
@@ -1059,6 +1089,39 @@ namespace ORB_SLAM3
         return pos_tensor;
     }
 
+    std::tuple<torch::Tensor, torch::Tensor> XFextractor::NMSFixedTopK(torch::Tensor& x, torch::Tensor& rankingScores, int topk, float threshold, int kernel_size)
+    {
+        const int B = x.size(0);
+        const int H = x.size(2);
+        const int W = x.size(3);
+        const int pad = kernel_size / 2;
+
+        if(topk <= 0 || H <= 0 || W <= 0)
+        {
+            torch::Tensor emptyScores = torch::empty({B, 0}, x.options());
+            torch::Tensor emptyKpts = torch::empty({B, 0, 2}, torch::TensorOptions().dtype(torch::kLong).device(x.device()));
+            return std::make_tuple(emptyKpts, emptyScores);
+        }
+
+        auto local_max = torch::nn::functional::max_pool2d(
+            x,
+            torch::nn::functional::MaxPool2dFuncOptions(kernel_size).stride(1).padding(pad));
+        auto keep = (x == local_max) & (x > threshold);
+        auto low = torch::full_like(x, -1.0f);
+        auto nms_scores = torch::where(keep, rankingScores, low);
+        auto flat = nms_scores.flatten(2).squeeze(1);
+
+        const int candidateK = std::min(topk, static_cast<int>(flat.size(1)));
+        auto topkResult = flat.topk(candidateK, -1, true, true);
+        torch::Tensor scores = std::get<0>(topkResult);
+        torch::Tensor indices = std::get<1>(topkResult);
+
+        torch::Tensor xs = indices.remainder(W);
+        torch::Tensor ys = torch::floor_divide(indices, W);
+        torch::Tensor mkpts = torch::stack({xs, ys}, -1);
+        return std::make_tuple(mkpts, scores);
+    }
+
     // [MultiScale-XFeat] True pyramid construction: each level scales from original image.
     void XFextractor::ComputePyramid(cv::Mat image)
     {
@@ -1082,11 +1145,41 @@ namespace ORB_SLAM3
     // [MultiScale-XFeat] Per-level XFeat inference and semantic keypoint/descriptor generation.
     void XFextractor::ComputeKeyPointsMultiScale(std::vector<std::vector<cv::KeyPoint>>& allKeypoints, cv::Mat& desc)
     {
+        c10::InferenceMode inferenceGuard(true);
+
         allKeypoints.clear();
         allKeypoints.resize(nlevels);
 
         std::vector<cv::Mat> vDescPerLevel;
         torch::Device device(device_type);
+        const bool profile = IsXFeatProfileEnabled();
+        double tParseH2D = 0.0;
+        double tPreprocess = 0.0;
+        double tForward = 0.0;
+        double tNmsTopk = 0.0;
+        double tSamplePackD2H = 0.0;
+        double tCpuSelect = 0.0;
+        int profileLevels = 0;
+        int profileCandidates = 0;
+        int profileValidCandidates = 0;
+
+        auto now = []() {
+            return std::chrono::steady_clock::now();
+        };
+
+        auto syncIfProfile = [&]() {
+            if(profile && device_type == torch::kCUDA)
+                torch::cuda::synchronize();
+        };
+
+        auto markStage = [&](std::chrono::steady_clock::time_point& stageStart, double& bucket) {
+            if(!profile)
+                return;
+            syncIfProfile();
+            const auto stageEnd = now();
+            bucket += std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(stageEnd - stageStart).count();
+            stageStart = stageEnd;
+        };
 
         const float maxX = static_cast<float>(mvImagePyramid[0].cols - 1);
         const float maxY = static_cast<float>(mvImagePyramid[0].rows - 1);
@@ -1096,12 +1189,15 @@ namespace ORB_SLAM3
             if(mvImagePyramid[level].empty())
                 continue;
 
+            auto stageStart = now();
             cv::Mat levelImage = mvImagePyramid[level];
-            torch::Tensor x = parseInput(levelImage).to(device);
+            torch::Tensor x = parseInput(levelImage, device);
+            markStage(stageStart, tParseH2D);
 
             double rh = 1.0;
             double rw = 1.0;
             std::tie(x, rh, rw) = preprocessTensor(x);
+            markStage(stageStart, tPreprocess);
 
             const int64_t H = x.size(2);
             const int64_t W = x.size(3);
@@ -1109,52 +1205,84 @@ namespace ORB_SLAM3
             torch::Tensor M1, K1, H1;
             std::tie(M1, K1, H1) = model->forward(x);
             M1 = torch::nn::functional::normalize(M1, torch::nn::functional::NormalizeFuncOptions().dim(1));
+            markStage(stageStart, tForward);
 
             torch::Tensor K1h = getKptsHeatmap(K1);
-            torch::Tensor mkpts = NMS(K1h, 0.05f, 5);
-            if(mkpts.size(1) == 0)
+            const int levelFeatureBudget = mnFeaturesPerLevel[level];
+            if(levelFeatureBudget <= 0)
                 continue;
 
-            torch::Tensor scores = (nearest->forward(K1h, mkpts, H, W) * bilinear->forward(H1, mkpts, H, W)).squeeze(-1);
-            torch::Tensor mask = torch::all(mkpts == 0, -1);
-            scores.masked_fill_(mask, -1);
+            const int nPixels = static_cast<int>(std::max<int64_t>(1, H * W));
+            const int requestedCandidates = std::max(levelFeatureBudget * GetXFeatFixedNMSCandidateFactor(),
+                                                     GetXFeatFixedNMSCandidateMin());
+            const int fixedCandidateK = std::min(nPixels, std::max(levelFeatureBudget, requestedCandidates));
 
-            torch::Tensor idxs = scores.neg().argsort(-1, false);
-            const int topk = std::min(mnFeaturesPerLevel[level], static_cast<int>(scores.size(1)));
+            std::vector<int64_t> fullSize = {H, W};
+            torch::Tensor H1Full = torch::nn::functional::interpolate(
+                H1,
+                torch::nn::functional::InterpolateFuncOptions().size(fullSize)
+                                                               .mode(torch::kBilinear)
+                                                               .align_corners(false));
+            torch::Tensor rankingScores = K1h * H1Full;
+
+            torch::Tensor mkpts, nmsScores;
+            std::tie(mkpts, nmsScores) = NMSFixedTopK(K1h, rankingScores, fixedCandidateK, 0.05f, 5);
+            if(mkpts.size(1) == 0)
+                continue;
+            markStage(stageStart, tNmsTopk);
+
+            torch::Tensor scores = (nearest->forward(K1h, mkpts, H, W) * bilinear->forward(H1, mkpts, H, W)).squeeze(-1);
+            scores.masked_fill_(nmsScores <= 0, -1);
+
+            const int topk = std::min(levelFeatureBudget, static_cast<int>(scores.size(1)));
             if(topk <= 0)
                 continue;
 
-            torch::Tensor mkpts_x = mkpts.index({torch::indexing::Ellipsis, 0})
-                                        .gather(-1, idxs)
-                                        .index({torch::indexing::Slice(), torch::indexing::Slice(0, topk)});
-            torch::Tensor mkpts_y = mkpts.index({torch::indexing::Ellipsis, 1})
-                                        .gather(-1, idxs)
-                                        .index({torch::indexing::Slice(), torch::indexing::Slice(0, topk)});
-            mkpts = torch::cat({mkpts_x.unsqueeze(-1), mkpts_y.unsqueeze(-1)}, -1);
-            scores = scores.gather(-1, idxs).index({torch::indexing::Slice(), torch::indexing::Slice(0, topk)});
+            auto finalTopk = scores.topk(topk, -1, true, true);
+            scores = std::get<0>(finalTopk);
+            torch::Tensor idxs = std::get<1>(finalTopk);
+            torch::Tensor gatherIdx = idxs.unsqueeze(-1).expand({-1, -1, 2});
+            mkpts = mkpts.gather(1, gatherIdx);
 
             torch::Tensor feats = bilinear->forward(M1, mkpts, H, W);
             feats = torch::nn::functional::normalize(feats, torch::nn::functional::NormalizeFuncOptions().dim(-1));
 
-            // [MultiScale-XFeat] Recover coordinates from 32-aligned tensor space back to current level image space.
-            torch::Tensor scaling_factors = torch::tensor({rw, rh},
-                                                          torch::TensorOptions().dtype(torch::kFloat).device(mkpts.device()))
-                                                .view({1, 1, -1});
-            mkpts = mkpts.to(torch::kFloat) * scaling_factors;
+            torch::Tensor packed = torch::cat({mkpts[0].to(torch::kFloat), scores[0].unsqueeze(1), feats[0]}, 1);
+            // Fixed-size transfer: invalid candidates keep score <= 0 and are filtered on CPU.
+            torch::Tensor packedCpu = packed.to(torch::kCPU).contiguous();
+            markStage(stageStart, tSamplePackD2H);
 
-            torch::Tensor valid = scores[0] > 0;
-            // [XFEAT_PERF_20260414] Batch transfer to CPU once per level to avoid per-point CUDA sync in .item().
-            torch::Tensor valid_keypoints = mkpts[0].index({valid}).to(torch::kCPU).contiguous();
-            torch::Tensor valid_scores = scores[0].index({valid}).to(torch::kCPU).contiguous();
-            torch::Tensor valid_descriptors = feats[0].index({valid}).to(torch::kCPU).contiguous();
+            const int packedRows = static_cast<int>(packedCpu.size(0));
+            const float* packedPtr = packedCpu.data_ptr<float>();
+            std::vector<float> validKeypoints;
+            std::vector<float> validScores;
+            std::vector<int> validPackedRows;
+            validKeypoints.reserve(static_cast<size_t>(packedRows) * 2);
+            validScores.reserve(static_cast<size_t>(packedRows));
+            validPackedRows.reserve(static_cast<size_t>(packedRows));
 
-            const int valid_cnt = static_cast<int>(valid_keypoints.size(0));
+            for(int i = 0; i < packedRows; ++i)
+            {
+                const float* row = packedPtr + i * 67;
+                const float score = row[2];
+                if(score <= 0.0f)
+                    continue;
+
+                validKeypoints.push_back(row[0]);
+                validKeypoints.push_back(row[1]);
+                validScores.push_back(score);
+                validPackedRows.push_back(i);
+            }
+
+            const int valid_cnt = static_cast<int>(validScores.size());
             if(valid_cnt == 0)
+            {
+                markStage(stageStart, tCpuSelect);
                 continue;
+            }
 
-            const float* kptPtr = valid_keypoints.data_ptr<float>();      // [valid_cnt, 2]
-            const float* scorePtr = valid_scores.data_ptr<float>();       // [valid_cnt]
-            const float* descPtr = valid_descriptors.data_ptr<float>();   // [valid_cnt, 64]
+            const float* kptPtr = validKeypoints.data();      // [valid_cnt, 2]
+            const float* scorePtr = validScores.data();       // [valid_cnt]
 
             //调试: 每层做空间均匀化重排，减少高纹理区域“扎堆”导致的几何退化。
             const std::vector<int> selectedIdx = SelectUniformTopKIndices(kptPtr,
@@ -1177,8 +1305,8 @@ namespace ORB_SLAM3
             for (int i = 0; i < selected_cnt; ++i)
             {
                 const int srcIdx = selectedIdx[i];
-                const float xScaled = kptPtr[srcIdx * 2];
-                const float yScaled = kptPtr[srcIdx * 2 + 1];
+                const float xScaled = kptPtr[srcIdx * 2] * static_cast<float>(rw);
+                const float yScaled = kptPtr[srcIdx * 2 + 1] * static_cast<float>(rh);
                 const float score = scorePtr[srcIdx];
 
                 float xOriginal = std::max(0.0f, std::min(xScaled * levelScale, maxX));
@@ -1187,10 +1315,18 @@ namespace ORB_SLAM3
                 cv::KeyPoint kp(xOriginal, yOriginal, keypointSize, -1.0f, score, level);
                 levelKpts.push_back(kp);
 
-                std::memcpy(levelDesc.ptr<float>(i), descPtr + srcIdx * 64, 64 * sizeof(float));
+                const int packedRow = validPackedRows[srcIdx];
+                std::memcpy(levelDesc.ptr<float>(i), packedPtr + packedRow * 67 + 3, 64 * sizeof(float));
             }
 
             vDescPerLevel.push_back(levelDesc);
+            markStage(stageStart, tCpuSelect);
+            if(profile)
+            {
+                ++profileLevels;
+                profileCandidates += packedRows;
+                profileValidCandidates += valid_cnt;
+            }
         }
 
         if(vDescPerLevel.empty())
@@ -1200,6 +1336,22 @@ namespace ORB_SLAM3
         else
         {
             cv::vconcat(vDescPerLevel, desc);
+        }
+
+        if(profile)
+        {
+            std::cout << std::fixed << std::setprecision(3)
+                      << "[XFeatProfile] levels=" << profileLevels
+                      << " candidates=" << profileCandidates
+                      << " valid=" << profileValidCandidates
+                      << " out_desc_rows=" << desc.rows
+                      << " parse_h2d_ms=" << tParseH2D
+                      << " preprocess_ms=" << tPreprocess
+                      << " forward_ms=" << tForward
+                      << " nms_topk_ms=" << tNmsTopk
+                      << " sample_pack_d2h_ms=" << tSamplePackD2H
+                      << " cpu_select_ms=" << tCpuSelect
+                      << std::endl;
         }
     }
 

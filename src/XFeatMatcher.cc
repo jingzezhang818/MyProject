@@ -497,59 +497,33 @@ const cv::Mat& EnsureFloatDescriptors(const cv::Mat& in, cv::Mat& buffer)
     return buffer;
 }
 
-std::vector<cv::Mat> BuildMapPointFloatDescriptorSet(MapPoint* pMP)
+float DescriptorDistanceFloatPtr(const float* pa, const float* pb, const int length)
 {
-    std::vector<cv::Mat> result;
-    if(!pMP)
-        return result;
-
-    if(!UseXFeatDescriptorBank())
+    float dist2 = 0.0f;
+    for(int i = 0; i < length; ++i)
     {
-        // XFeat稳态路径: 默认仅使用单描述子，避免多原型策略引入不稳定匹配。
-        const cv::Mat fallback = pMP->GetDescriptor();
-        if(!fallback.empty())
-        {
-            cv::Mat buffer;
-            const cv::Mat& df = EnsureFloatDescriptors(fallback, buffer);
-            if(!df.empty())
-                result.push_back(df.clone());
-        }
-        return result;
+        const float d = pa[i] - pb[i];
+        dist2 += d * d;
     }
-
-    // XFeat路径: 优先使用MapPoint维护的多原型描述子库。
-    std::vector<cv::Mat> raw = pMP->GetXFeatDescriptorBank();
-    if(raw.empty())
-    {
-        // 兼容旧路径: bank为空时回退到单描述子。
-        const cv::Mat fallback = pMP->GetDescriptor();
-        if(!fallback.empty())
-            raw.push_back(fallback);
-    }
-
-    result.reserve(raw.size());
-    for(const cv::Mat& d : raw)
-    {
-        if(d.empty())
-            continue;
-        cv::Mat buffer;
-        const cv::Mat& df = EnsureFloatDescriptors(d, buffer);
-        if(!df.empty())
-            result.push_back(df.clone());
-    }
-    return result;
+    return std::sqrt(dist2);
 }
 
-float DescriptorDistanceToSet(const std::vector<cv::Mat>& descriptorSet, const cv::Mat& queryDesc)
+float DescriptorDistanceFloatMat(const cv::Mat& a, const cv::Mat& b)
 {
-    float bestDist = std::numeric_limits<float>::infinity();
-    for(const cv::Mat& d : descriptorSet)
-    {
-        const float dist = XFeatMatcher::DescriptorDistance(d, queryDesc);
-        if(dist < bestDist)
-            bestDist = dist;
-    }
-    return bestDist;
+    if(a.empty() || b.empty())
+        return std::numeric_limits<float>::infinity();
+    if(a.type() != CV_32F || b.type() != CV_32F)
+        return std::numeric_limits<float>::infinity();
+
+    const int lenA = static_cast<int>(a.total() * a.channels());
+    const int lenB = static_cast<int>(b.total() * b.channels());
+    if(lenA <= 0 || lenA != lenB)
+        return std::numeric_limits<float>::infinity();
+
+    if(a.isContinuous() && b.isContinuous())
+        return DescriptorDistanceFloatPtr(a.ptr<float>(0), b.ptr<float>(0), lenA);
+
+    return static_cast<float>(cv::norm(a, b, cv::NORM_L2));
 }
 
 int SelectBestCandidatePerFeature(const std::vector<CandidateMatch>& candidates,
@@ -690,12 +664,12 @@ float XFeatMatcher::DescriptorDistance(const cv::Mat &a, const cv::Mat &b)
         return std::numeric_limits<float>::infinity();
 
     if(a.type() == CV_32F && b.type() == CV_32F)
-        return static_cast<float>(cv::norm(a, b, cv::NORM_L2));
+        return DescriptorDistanceFloatMat(a, b);
 
     cv::Mat af, bf;
     a.convertTo(af, CV_32F);
     b.convertTo(bf, CV_32F);
-    return static_cast<float>(cv::norm(af, bf, cv::NORM_L2));
+    return DescriptorDistanceFloatMat(af, bf);
 }
 
 float XFeatMatcher::RadiusByViewingCos(const float &viewCos)
@@ -1580,6 +1554,9 @@ int XFeatMatcher::SearchByProjection(Frame &F,
     candidates.reserve(vpMapPoints.size() * 2);
 
     const bool bFactor = th != 1.0f;
+    const bool useDescriptorBank = UseXFeatDescriptorBank();
+    std::vector<float> candidateDistances;
+    std::vector<float> candidateDistancesRight;
 
     for(size_t iMP = 0; iMP < vpMapPoints.size(); ++iMP)
     {
@@ -1605,9 +1582,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             continue;
         }
 
-        // XFeat路径: 对每个MapPoint获取多原型描述子集合，后续匹配取最小L2距离。
-        const std::vector<cv::Mat> mpDescSet = BuildMapPointFloatDescriptorSet(pMP);
-        if(mpDescSet.empty())
+        if(!pMP->HasXFeatDescriptor(useDescriptorBank))
         {
             ++skippedNoDescriptor;
             continue;
@@ -1642,6 +1617,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 maxLevel);
             if(vIndices.empty())
                 ++emptyAreaRejectMatches;
+            pMP->GetBestXFeatDescriptorDistances(descF, vIndices, candidateDistances, useDescriptorBank);
 
             float bestDist = std::numeric_limits<float>::infinity();
             float bestDist2 = std::numeric_limits<float>::infinity();
@@ -1649,8 +1625,9 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             int bestLevel2 = -1;
             int bestIdx = -1;
 
-            for(size_t idx : vIndices)
+            for(size_t iC = 0; iC < vIndices.size(); ++iC)
             {
+                const size_t idx = vIndices[iC];
                 if(idx >= static_cast<size_t>(F.N) || idx >= static_cast<size_t>(descF.rows))
                     continue;
 
@@ -1664,7 +1641,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                         continue;
                 }
 
-                const float dist = DescriptorDistanceToSet(mpDescSet, descF.row(static_cast<int>(idx)));
+                const float dist = candidateDistances[iC];
 
                 if(dist < bestDist)
                 {
@@ -1741,6 +1718,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 true);
             if(vIndices.empty())
                 ++emptyAreaRejectMatches;
+            pMP->GetBestXFeatDescriptorDistances(descF, vIndices, candidateDistancesRight, useDescriptorBank, F.Nleft);
 
             float bestDist = std::numeric_limits<float>::infinity();
             float bestDist2 = std::numeric_limits<float>::infinity();
@@ -1748,8 +1726,9 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             int bestLevel2 = -1;
             int bestIdx = -1;
 
-            for(size_t idx : vIndices)
+            for(size_t iC = 0; iC < vIndices.size(); ++iC)
             {
+                const size_t idx = vIndices[iC];
                 const int featIdx = static_cast<int>(idx) + F.Nleft;
                 if(featIdx < 0 || featIdx >= F.N || featIdx >= descF.rows)
                     continue;
@@ -1757,7 +1736,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 if(F.mvpMapPoints[featIdx] && F.mvpMapPoints[featIdx]->Observations() > 0)
                     continue;
 
-                const float dist = DescriptorDistanceToSet(mpDescSet, descF.row(featIdx));
+                const float dist = candidateDistancesRight[iC];
 
                 if(dist < bestDist)
                 {
@@ -1962,6 +1941,9 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
 
     std::vector<CandidateMatch> candidates;
     candidates.reserve(static_cast<size_t>(LastFrame.N) * 2);
+    const bool useDescriptorBank = UseXFeatDescriptorBank();
+    std::vector<float> candidateDistances;
+    std::vector<float> candidateDistancesRight;
 
     for(int i = 0; i < LastFrame.N; ++i)
     {
@@ -1980,9 +1962,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
             continue;
         }
 
-        // XFeat路径: 使用MapPoint多原型描述子集合提升跨视角匹配稳定性。
-        const std::vector<cv::Mat> mpDescSet = BuildMapPointFloatDescriptorSet(pMP);
-        if(mpDescSet.empty())
+        if(!pMP->HasXFeatDescriptor(useDescriptorBank))
         {
             ++skippedNoDescriptor;
             continue;
@@ -2055,6 +2035,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
         vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0), uv(1), radius, minLevel, maxLevel);
         if(vIndices2.empty())
             ++emptyAreaRejectMatches;
+        pMP->GetBestXFeatDescriptorDistances(descCurrent, vIndices2, candidateDistances, useDescriptorBank);
 
         float bestDist = std::numeric_limits<float>::infinity();
         float bestDist2 = std::numeric_limits<float>::infinity();
@@ -2062,8 +2043,9 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
         int bestLevel = -1;
         int bestLevel2 = -1;
 
-        for(size_t i2 : vIndices2)
+        for(size_t iC = 0; iC < vIndices2.size(); ++iC)
         {
+            const size_t i2 = vIndices2[iC];
             if(i2 >= static_cast<size_t>(CurrentFrame.N) || i2 >= static_cast<size_t>(descCurrent.rows))
                 continue;
 
@@ -2078,7 +2060,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
                     continue;
             }
 
-            const float dist = DescriptorDistanceToSet(mpDescSet, descCurrent.row(static_cast<int>(i2)));
+            const float dist = candidateDistances[iC];
             if(dist < bestDist)
             {
                 bestDist2 = bestDist;
@@ -2140,6 +2122,11 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
             vIndicesRight = CurrentFrame.GetFeaturesInArea(uvR(0), uvR(1), radius, minLevel, maxLevel, true);
             if(vIndicesRight.empty())
                 ++emptyAreaRejectMatches;
+            pMP->GetBestXFeatDescriptorDistances(descCurrent,
+                                                 vIndicesRight,
+                                                 candidateDistancesRight,
+                                                 useDescriptorBank,
+                                                 CurrentFrame.Nleft);
 
             float bestDistR = std::numeric_limits<float>::infinity();
             float bestDist2R = std::numeric_limits<float>::infinity();
@@ -2147,8 +2134,9 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
             int bestLevelR = -1;
             int bestLevel2R = -1;
 
-            for(size_t i2 : vIndicesRight)
+            for(size_t iC = 0; iC < vIndicesRight.size(); ++iC)
             {
+                const size_t i2 = vIndicesRight[iC];
                 const int featIdx = static_cast<int>(i2) + CurrentFrame.Nleft;
                 if(featIdx < 0 || featIdx >= CurrentFrame.N || featIdx >= descCurrent.rows)
                     continue;
@@ -2156,7 +2144,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
                 if(CurrentFrame.mvpMapPoints[featIdx] && CurrentFrame.mvpMapPoints[featIdx]->Observations() > 0)
                     continue;
 
-                const float dist = DescriptorDistanceToSet(mpDescSet, descCurrent.row(featIdx));
+                const float dist = candidateDistancesRight[iC];
                 if(dist < bestDistR)
                 {
                     bestDist2R = bestDistR;

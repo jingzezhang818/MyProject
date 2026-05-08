@@ -75,10 +75,37 @@ namespace
         return !descriptors.empty() && descriptors.type() == CV_32F;
     }
 
+    float DescriptorDistanceFloatPtr(const float* pa, const float* pb, const int length)
+    {
+        float dist2 = 0.0f;
+        for(int i = 0; i < length; ++i)
+        {
+            const float d = pa[i] - pb[i];
+            dist2 += d * d;
+        }
+        return std::sqrt(dist2);
+    }
+
+    float DescriptorDistanceFloatMat(const cv::Mat& a, const cv::Mat& b)
+    {
+        if(a.empty() || b.empty() || a.type() != CV_32F || b.type() != CV_32F)
+            return std::numeric_limits<float>::infinity();
+
+        const int lenA = static_cast<int>(a.total() * a.channels());
+        const int lenB = static_cast<int>(b.total() * b.channels());
+        if(lenA <= 0 || lenA != lenB)
+            return std::numeric_limits<float>::infinity();
+
+        if(a.isContinuous() && b.isContinuous())
+            return DescriptorDistanceFloatPtr(a.ptr<float>(0), b.ptr<float>(0), lenA);
+
+        return static_cast<float>(cv::norm(a, b, cv::NORM_L2));
+    }
+
     float StereoDescriptorDistance(const cv::Mat& a, const cv::Mat& b, const bool bFloatDescriptors)
     {
         if(bFloatDescriptors)
-            return static_cast<float>(cv::norm(a, b, cv::NORM_L2));
+            return DescriptorDistanceFloatMat(a, b);
         return static_cast<float>(ORBmatcher::DescriptorDistance(a, b));
     }
 }
@@ -104,6 +131,8 @@ Frame::Frame(): mpcpi(NULL), mpImuPreintegrated(NULL), mpPrevFrame(NULL), mpImuP
 //Copy Constructor
 Frame::Frame(const Frame &frame)
     :mpcpi(frame.mpcpi),mpORBvocabulary(frame.mpORBvocabulary), mpORBextractorLeft(frame.mpORBextractorLeft), mpORBextractorRight(frame.mpORBextractorRight),
+     mpXFextractor(frame.mpXFextractor),
+     mpXFextractorRight(frame.mpXFextractorRight),
      mTimeStamp(frame.mTimeStamp), mK(frame.mK.clone()), mK_(Converter::toMatrix3f(frame.mK)), mDistCoef(frame.mDistCoef.clone()),
      mbf(frame.mbf), mb(frame.mb), mThDepth(frame.mThDepth), N(frame.N), mvKeys(frame.mvKeys),
      mvKeysRight(frame.mvKeysRight), mvKeysUn(frame.mvKeysUn), mvuRight(frame.mvuRight),
@@ -120,6 +149,7 @@ Frame::Frame(const Frame &frame)
      monoLeft(frame.monoLeft), monoRight(frame.monoRight), mvLeftToRightMatch(frame.mvLeftToRightMatch),
      mvRightToLeftMatch(frame.mvRightToLeftMatch), mvStereo3Dpoints(frame.mvStereo3Dpoints),
      mTlr(frame.mTlr), mRlr(frame.mRlr), mtlr(frame.mtlr), mTrl(frame.mTrl),
+     mvImagePyramidLeft(frame.mvImagePyramidLeft),
      mTcw(frame.mTcw), mbHasPose(false), mbHasVelocity(false)
 {
     for(int i=0;i<FRAME_GRID_COLS;i++)
@@ -248,14 +278,14 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
 }
 
 Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeStamp, XFextractor* extractorLeft, XFextractor* extractorRight, ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera, Frame* pPrevF, const IMU::Calib &ImuCalib)
-    :mpcpi(NULL), mpORBvocabulary(voc), mpXFextractor(extractorLeft), mpORBextractorLeft(static_cast<ORBextractor*>(NULL)), mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
+    :mpcpi(NULL), mpORBvocabulary(voc), mpXFextractor(extractorLeft), mpXFextractorRight(extractorRight ? extractorRight : extractorLeft), mpORBextractorLeft(static_cast<ORBextractor*>(NULL)), mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
      mTimeStamp(timeStamp), mK(K.clone()), mK_(Converter::toMatrix3f(K)), mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
      mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF), mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false),
      mpCamera(pCamera), mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
 {
     mnId=nNextId++;
 
-    XFextractor* pRightExtractor = extractorRight ? extractorRight : extractorLeft;
+    XFextractor* pRightExtractor = mpXFextractorRight;
 
     mnScaleLevels = extractorLeft->GetLevels();
     mfScaleFactor = extractorLeft->GetScaleFactor();
@@ -273,6 +303,9 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     {
         vector<int> vLapping = {0,0};
         monoLeft = (*extractorLeft)(imLeft,cv::Mat(),mvKeys,mDescriptors,vLapping);
+        // Cache left image pyramid before right extraction overwrites it, needed for
+        // sub-pixel stereo refinement.
+        mvImagePyramidLeft = extractorLeft->mvImagePyramid;
         monoRight = (*pRightExtractor)(imRight,cv::Mat(),mvKeysRight,mDescriptorsRight,vLapping);
     }
 #ifdef REGISTER_TIMES
@@ -433,7 +466,7 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
 }
 
 Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeStamp, XFextractor* extractor,ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF, const IMU::Calib &ImuCalib)
-    :mpcpi(NULL),mpORBvocabulary(voc),mpXFextractor(extractor),mpORBextractorLeft(static_cast<ORBextractor*>(NULL)), mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
+    :mpcpi(NULL),mpORBvocabulary(voc),mpXFextractor(extractor),mpXFextractorRight(extractor),mpORBextractorLeft(static_cast<ORBextractor*>(NULL)), mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
      mTimeStamp(timeStamp), mK(K.clone()), mK_(Converter::toMatrix3f(K)),mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
      mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF), mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false),
      mpCamera(pCamera),mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
@@ -617,7 +650,7 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
 }
 
 Frame::Frame(const cv::Mat &imGray, const double &timeStamp, XFextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF, const IMU::Calib &ImuCalib)
-    :mpcpi(NULL),mpORBvocabulary(voc),mpXFextractor(extractor),mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
+    :mpcpi(NULL),mpORBvocabulary(voc),mpXFextractor(extractor),mpXFextractorRight(extractor),mpORBextractorLeft(static_cast<ORBextractor*>(NULL)),mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
      mTimeStamp(timeStamp), mK(static_cast<Pinhole*>(pCamera)->toK()), mK_(static_cast<Pinhole*>(pCamera)->toK_()), mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
      mImuCalib(ImuCalib), mpImuPreintegrated(NULL),mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mpCamera(pCamera),
      mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
@@ -771,7 +804,7 @@ void Frame::ExtractXF(int flag, const cv::Mat &im, const int x0, const int x1)
     if(flag==0)
         monoLeft = (*mpXFextractor)(im,cv::Mat(),mvKeys,mDescriptors,vLapping);
     else
-        monoRight = (*mpXFextractor)(im,cv::Mat(),mvKeysRight,mDescriptorsRight,vLapping);
+        monoRight = (*mpXFextractorRight)(im,cv::Mat(),mvKeysRight,mDescriptorsRight,vLapping);
 }
 
 bool Frame::isSet() const {
@@ -1166,12 +1199,17 @@ void Frame::ComputeStereoMatches()
     const bool bFloatDescriptors = IsFloatDescriptorMat(mDescriptors) || IsFloatDescriptorMat(mDescriptorsRight);
     const float thDescDist = bFloatDescriptors ? GetXFeatStereoDescThreshold()
                                                : static_cast<float>((ORBmatcher::TH_HIGH+ORBmatcher::TH_LOW)/2);
+    const std::vector<cv::Mat>* pRightXFeatPyramid = nullptr;
+    if(mpXFextractorRight && !mpXFextractorRight->mvImagePyramid.empty() && !mpXFextractorRight->mvImagePyramid[0].empty())
+        pRightXFeatPyramid = &mpXFextractorRight->mvImagePyramid;
+    else if(mpXFextractor && !mpXFextractor->mvImagePyramid.empty() && !mpXFextractor->mvImagePyramid[0].empty())
+        pRightXFeatPyramid = &mpXFextractor->mvImagePyramid;
 
     int nRows = 0;
     if(mpORBextractorLeft && !mpORBextractorLeft->mvImagePyramid.empty() && !mpORBextractorLeft->mvImagePyramid[0].empty())
         nRows = mpORBextractorLeft->mvImagePyramid[0].rows;
-    else if(mpXFextractor && !mpXFextractor->mvImagePyramid.empty() && !mpXFextractor->mvImagePyramid[0].empty())
-        nRows = mpXFextractor->mvImagePyramid[0].rows;
+    else if(pRightXFeatPyramid)
+        nRows = (*pRightXFeatPyramid)[0].rows;
     else
         nRows = std::max(1, static_cast<int>(std::ceil(mnMaxY - mnMinY)));
 
@@ -1257,17 +1295,128 @@ void Frame::ComputeStereoMatches()
         {
             if(bFloatDescriptors)
             {
-                const float bestuR = mvKeysRight[bestIdxR].pt.x;
+                // XFeat sub-pixel refinement: sliding window correlation + parabola fitting.
+                // Uses cached left image pyramid and right image pyramid.
+                const int octaveL = kpL.octave;
+                if(octaveL < 0 || octaveL >= static_cast<int>(mvImagePyramidLeft.size()) ||
+                   !pRightXFeatPyramid ||
+                   octaveL >= static_cast<int>(pRightXFeatPyramid->size()))
+                {
+                    // Fallback: no pyramid available for this octave, use raw pixel disparity.
+                    const float bestuR = mvKeysRight[bestIdxR].pt.x;
+                    float disparity = (uL-bestuR);
+                    if(disparity>=minD && disparity<maxD)
+                    {
+                        if(disparity<=0) disparity=0.01f;
+                        mvDepth[iL]=mbf/disparity;
+                        mvuRight[iL] = uL-disparity;
+                        vDistIdx.push_back(pair<float,int>(bestDist,iL));
+                    }
+                    continue;
+                }
+
+                const float uR0 = mvKeysRight[bestIdxR].pt.x;
+                const float scaleFactor = mvInvScaleFactors[octaveL];
+                const float scaleduL = round(kpL.pt.x*scaleFactor);
+                const float scaledvL = round(kpL.pt.y*scaleFactor);
+                const float scaleduR0 = round(uR0*scaleFactor);
+
+                const cv::Mat& imgLeftLevel = mvImagePyramidLeft[octaveL];
+                const cv::Mat& imgRightLevel = (*pRightXFeatPyramid)[octaveL];
+                if(imgLeftLevel.empty() || imgRightLevel.empty())
+                {
+                    const float bestuR = mvKeysRight[bestIdxR].pt.x;
+                    float disparity = (uL-bestuR);
+                    if(disparity>=minD && disparity<maxD)
+                    {
+                        if(disparity<=0) disparity=0.01f;
+                        mvDepth[iL]=mbf/disparity;
+                        mvuRight[iL] = uL-disparity;
+                        vDistIdx.push_back(pair<float,int>(bestDist,iL));
+                    }
+                    continue;
+                }
+
+                // sliding window search
+                const int w = 5;
+                const int patchTop = scaledvL-w;
+                const int patchBottom = scaledvL+w+1;
+                const int patchLeft = scaleduL-w;
+                const int patchRight = scaleduL+w+1;
+
+                if(patchTop < 0 || patchBottom > imgLeftLevel.rows || patchLeft < 0 || patchRight > imgLeftLevel.cols)
+                    continue;
+
+                cv::Mat IL = imgLeftLevel.rowRange(patchTop, patchBottom).colRange(patchLeft, patchRight);
+
+                int bestPatchDist = INT_MAX;
+                int bestincR = 0;
+                const int L = 5;
+                vector<float> vDists;
+                vDists.resize(2*L+1);
+
+                const float iniu = scaleduR0+L-w;
+                const float endu = scaleduR0+L+w+1;
+                if(iniu<0 || endu > imgRightLevel.cols)
+                    continue;
+
+                for(int incR=-L; incR<=+L; incR++)
+                {
+                    const int searchLeft = scaleduR0+incR-w;
+                    const int searchRight = scaleduR0+incR+w+1;
+
+                    if(searchLeft < 0 || searchRight > imgRightLevel.cols)
+                    {
+                        vDists[L+incR] = std::numeric_limits<float>::infinity();
+                        continue;
+                    }
+
+                    cv::Mat IR = imgRightLevel.rowRange(patchTop, patchBottom).colRange(searchLeft, searchRight);
+
+                    float dist = cv::norm(IL,IR,cv::NORM_L1);
+                    if(dist<bestPatchDist)
+                    {
+                        bestPatchDist = dist;
+                        bestincR = incR;
+                    }
+
+                    vDists[L+incR] = dist;
+                }
+
+                if(bestincR==-L || bestincR==L)
+                    continue;
+
+                // Sub-pixel match (Parabola fitting)
+                const float dist1 = vDists[L+bestincR-1];
+                const float dist2 = vDists[L+bestincR];
+                const float dist3 = vDists[L+bestincR+1];
+
+                if(!std::isfinite(dist1) || !std::isfinite(dist2) || !std::isfinite(dist3))
+                    continue;
+
+                const float denom = 2.0f*(dist1+dist3-2.0f*dist2);
+                if(std::fabs(denom) < 1e-8f)
+                    continue;
+
+                const float deltaR = (dist1-dist3)/denom;
+
+                if(deltaR<-1 || deltaR>1)
+                    continue;
+
+                // Re-scaled coordinate
+                float bestuR = mvScaleFactors[octaveL]*((float)scaleduR0+(float)bestincR+deltaR);
+
                 float disparity = (uL-bestuR);
 
                 if(disparity>=minD && disparity<maxD)
                 {
                     if(disparity<=0)
                     {
-                        disparity=0.01f;
+                        disparity=0.01;
+                        bestuR = uL-0.01;
                     }
                     mvDepth[iL]=mbf/disparity;
-                    mvuRight[iL] = uL-disparity;
+                    mvuRight[iL] = bestuR;
                     vDistIdx.push_back(pair<float,int>(bestDist,iL));
                 }
                 continue;
@@ -1413,7 +1562,7 @@ void Frame::setIntegrated()
 
 Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeStamp, ORBextractor* extractorLeft, ORBextractor* extractorRight, ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera, GeometricCamera* pCamera2, Sophus::SE3f& Tlr,Frame* pPrevF, const IMU::Calib &ImuCalib)
         :mpcpi(NULL), mpORBvocabulary(voc),mpORBextractorLeft(extractorLeft),mpORBextractorRight(extractorRight), mTimeStamp(timeStamp), mK(K.clone()), mK_(Converter::toMatrix3f(K)),  mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
-         mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbImuPreintegrated(false), mpCamera(pCamera), mpCamera2(pCamera2),
+         mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mpCamera(pCamera), mpCamera2(pCamera2),
          mbHasPose(false), mbHasVelocity(false)
 
 {

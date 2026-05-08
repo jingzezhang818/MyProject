@@ -203,10 +203,13 @@ public:
     ORBVocabulary* mpORBvocabulary;
 
     // ORB Feature extractor. The right is used only in the stereo case.
-    ORBextractor* mpORBextractorLeft, *mpORBextractorRight;
+    ORBextractor* mpORBextractorLeft = nullptr;
+    ORBextractor* mpORBextractorRight = nullptr;
 
-    // Accelerated Feature (XFeat) extractor. 
-    XFextractor* mpXFextractor;
+    // Accelerated Feature (XFeat) extractors.
+    // For stereo, left/right extractors can differ.
+    XFextractor* mpXFextractor = nullptr;
+    XFextractor* mpXFextractorRight = nullptr;
 
     // Frame timestamp.
     double mTimeStamp;
@@ -253,6 +256,9 @@ public:
 
     // ORB descriptor, each row associated to a keypoint.
     cv::Mat mDescriptors, mDescriptorsRight;
+
+    // XFeat: Cached left image pyramid for sub-pixel stereo refinement.
+    std::vector<cv::Mat> mvImagePyramidLeft;
 
     // MapPoints associated to keypoints, NULL pointer if no association.
     // Flag to identify outlier associations.

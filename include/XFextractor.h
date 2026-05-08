@@ -73,10 +73,11 @@ protected:
     void ComputeKeyPointsMultiScale(std::vector<std::vector<cv::KeyPoint>>& allKeypoints, cv::Mat& desc);
 
     std::string getModelWeightsPath(std::string weights);
-    torch::Tensor parseInput(cv::Mat& img);
+    torch::Tensor parseInput(cv::Mat& img, const torch::Device& device);
     std::tuple<torch::Tensor, double, double> preprocessTensor(torch::Tensor& x);
     torch::Tensor getKptsHeatmap(torch::Tensor& kpts, float softmax_temp=1.0);
     torch::Tensor NMS(torch::Tensor& x, float threshold = 0.05, int kernel_size = 5);
+    std::tuple<torch::Tensor, torch::Tensor> NMSFixedTopK(torch::Tensor& x, torch::Tensor& rankingScores, int topk, float threshold = 0.05, int kernel_size = 5);
 
     int nfeatures;
     double scaleFactor;

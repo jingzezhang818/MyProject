@@ -4,16 +4,16 @@
 # System config
 #--------------------------------------------------------------------------------------------
 
+#--------------------------------------------------------------------------------------------
+# Camera Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
 File.version: "1.0"
-
-#--------------------------------------------------------------------------------------------
-# Camera Parameters. Stereo: Camera1=left(cam0), Camera2=right(cam1)
-#--------------------------------------------------------------------------------------------
 
 Camera.type: "PinHole"
 
-Camera1.fx: 610.17
-Camera1.fy: 610.17
+# Camera calibration and distortion parameters (OpenCV)
+Camera1.fx: 535.4
+Camera1.fy: 539.2
 Camera1.cx: 512.0
 Camera1.cy: 512.0
 
@@ -21,52 +21,39 @@ Camera1.k1: 0.0
 Camera1.k2: 0.0
 Camera1.p1: 0.0
 Camera1.p2: 0.0
-Camera1.k3: 0.0
-
-Camera2.fx: 610.17
-Camera2.fy: 610.17
-Camera2.cx: 512.0
-Camera2.cy: 512.0
-
-Camera2.k1: 0.0
-Camera2.k2: 0.0
-Camera2.p1: 0.0
-Camera2.p2: 0.0
-Camera2.k3: 0.0
 
 Camera.width: 1024
 Camera.height: 1024
 
-Camera.fps: 10
+Camera.newWidth: 1024
+Camera.newHeight: 1024
+
+# Camera frames per second
+Camera.fps: 20
+
+# Color order of the images (0: BGR, 1: RGB. It is ignored if images are grayscale)
 Camera.RGB: 1
 
-# T_c1_c2: transform from camera 2 (cam1/right) to camera 1 (cam0/left).
-# Baseline 150mm = 0.15m
-Stereo.T_c1_c2: !!opencv-matrix
-  rows: 4
-  cols: 4
-  dt: f
-  data: [1.0, 0.0, 0.0, -0.15,
-         0.0, 1.0, 0.0, 0.0,
-         0.0, 0.0, 1.0, 0.0,
-         0.0, 0.0, 0.0, 1.0]
-
-Stereo.ThDepth: 31.0
-
 #--------------------------------------------------------------------------------------------
-# ORB/XFeat extractor parameters
+# ORB Parameters
 #--------------------------------------------------------------------------------------------
 
+# ORB Extractor: Number of features per image
 ORBextractor.nFeatures: 2000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
 ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
 ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold
 ORBextractor.iniThFAST: 20
 ORBextractor.minThFAST: 7
 
 #--------------------------------------------------------------------------------------------
 # Viewer Parameters
-#--------------------------------------------------------------------------------------------
-
+#---------------------------------------------------------------------------------------------
 Viewer.KeyFrameSize: 0.05
 Viewer.KeyFrameLineWidth: 1.0
 Viewer.GraphLineWidth: 0.9
@@ -77,6 +64,5 @@ Viewer.ViewpointX: 0.0
 Viewer.ViewpointY: -0.7
 Viewer.ViewpointZ: -1.8
 Viewer.ViewpointF: 500.0
-Viewer.imageViewScale: 1.0
 
-System.RandomSeed: 0
+System.SaveAtlasToFile: "moon_1_mono"

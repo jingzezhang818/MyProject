@@ -28,6 +28,7 @@
 #include "SerializationUtils.h"
 
 #include <opencv2/core/core.hpp>
+#include <cstddef>
 #include <mutex>
 #include <vector>
 
@@ -147,6 +148,13 @@ public:
     cv::Mat GetDescriptor();
     // XFeat路径: 返回用于匹配的描述子集合（可能包含多个视角原型）。
     std::vector<cv::Mat> GetXFeatDescriptorBank();
+    bool HasXFeatDescriptor(bool useDescriptorBank);
+    float GetBestXFeatDescriptorDistance(const cv::Mat& query, bool useDescriptorBank);
+    void GetBestXFeatDescriptorDistances(const cv::Mat& queries,
+                                         const std::vector<size_t>& queryRows,
+                                         std::vector<float>& distances,
+                                         bool useDescriptorBank,
+                                         int rowOffset = 0);
     // XFeat路径: 针对查询描述子，返回当前MapPoint最优的描述子原型。
     cv::Mat GetBestDescriptorForQuery(const cv::Mat& query);
 

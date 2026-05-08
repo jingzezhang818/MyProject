@@ -20,6 +20,7 @@
 #include "ORBmatcher.h"
 
 #include <algorithm>
+#include <cmath>
 #include<mutex>
 #include <limits>
 #include <utility>
@@ -35,6 +36,33 @@ constexpr int kXFeatDescriptorBankSize = 4;
 bool IsFloatDescriptorType(const cv::Mat& d)
 {
     return !d.empty() && d.type() == CV_32F;
+}
+
+float DescriptorDistanceFloatPtr(const float* pa, const float* pb, const int length)
+{
+    float dist2 = 0.0f;
+    for(int i = 0; i < length; ++i)
+    {
+        const float d = pa[i] - pb[i];
+        dist2 += d * d;
+    }
+    return std::sqrt(dist2);
+}
+
+float DescriptorDistanceFloatMat(const cv::Mat& a, const cv::Mat& b)
+{
+    if(a.empty() || b.empty() || a.type() != CV_32F || b.type() != CV_32F)
+        return std::numeric_limits<float>::infinity();
+
+    const int lenA = static_cast<int>(a.total() * a.channels());
+    const int lenB = static_cast<int>(b.total() * b.channels());
+    if(lenA <= 0 || lenA != lenB)
+        return std::numeric_limits<float>::infinity();
+
+    if(a.isContinuous() && b.isContinuous())
+        return DescriptorDistanceFloatPtr(a.ptr<float>(0), b.ptr<float>(0), lenA);
+
+    return static_cast<float>(cv::norm(a, b, cv::NORM_L2));
 }
 
 float DescriptorDistanceAdaptive(const cv::Mat& a, const cv::Mat& b)
@@ -56,7 +84,33 @@ float DescriptorDistanceAdaptive(const cv::Mat& a, const cv::Mat& b)
     else
         b.convertTo(bf, CV_32F);
 
-    return static_cast<float>(cv::norm(af, bf, cv::NORM_L2));
+    return DescriptorDistanceFloatMat(af, bf);
+}
+
+float BestXFeatDescriptorDistanceNoLock(const cv::Mat& descriptor,
+                                        const std::vector<cv::Mat>& descriptorBank,
+                                        const cv::Mat& query,
+                                        const bool useDescriptorBank)
+{
+    if(query.empty())
+        return std::numeric_limits<float>::infinity();
+
+    float bestDist = std::numeric_limits<float>::infinity();
+    if(useDescriptorBank)
+    {
+        for(const cv::Mat& d : descriptorBank)
+        {
+            if(d.empty())
+                continue;
+            const float dist = DescriptorDistanceAdaptive(d, query);
+            if(dist < bestDist)
+                bestDist = dist;
+        }
+    }
+
+    if(std::isfinite(bestDist))
+        return bestDist;
+    return DescriptorDistanceAdaptive(descriptor, query);
 }
 }
 
@@ -505,6 +559,49 @@ std::vector<cv::Mat> MapPoint::GetXFeatDescriptorBank()
             out.push_back(d.clone());
     }
     return out;
+}
+
+bool MapPoint::HasXFeatDescriptor(bool useDescriptorBank)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(useDescriptorBank)
+    {
+        for(const cv::Mat& d : mXFeatDescriptorBank)
+        {
+            if(!d.empty())
+                return true;
+        }
+    }
+    return !mDescriptor.empty();
+}
+
+float MapPoint::GetBestXFeatDescriptorDistance(const cv::Mat& query, bool useDescriptorBank)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    return BestXFeatDescriptorDistanceNoLock(mDescriptor, mXFeatDescriptorBank, query, useDescriptorBank);
+}
+
+void MapPoint::GetBestXFeatDescriptorDistances(const cv::Mat& queries,
+                                               const std::vector<size_t>& queryRows,
+                                               std::vector<float>& distances,
+                                               bool useDescriptorBank,
+                                               int rowOffset)
+{
+    distances.assign(queryRows.size(), std::numeric_limits<float>::infinity());
+    if(queries.empty() || queryRows.empty())
+        return;
+
+    unique_lock<mutex> lock(mMutexFeatures);
+    for(size_t i = 0; i < queryRows.size(); ++i)
+    {
+        const int row = static_cast<int>(queryRows[i]) + rowOffset;
+        if(row < 0 || row >= queries.rows)
+            continue;
+        distances[i] = BestXFeatDescriptorDistanceNoLock(mDescriptor,
+                                                         mXFeatDescriptorBank,
+                                                         queries.row(row),
+                                                         useDescriptorBank);
+    }
 }
 
 cv::Mat MapPoint::GetBestDescriptorForQuery(const cv::Mat& query)
