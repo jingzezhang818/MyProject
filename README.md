@@ -1,104 +1,82 @@
-# xfeatSLAM 代码修改说明
+# XFeatSLAM
 
-## XFeat 特征集成
+基于 ORB-SLAM3 的视觉 SLAM 系统，使用 XFeat（类 SuperPoint 轻量网络）替代 ORB 作为前端特征，支持单目/双目模式。
 
-### XFeatMatcher
+## 特性
 
-新增独立的 `XFeatMatcher` 类，替代 ORB matching 在关键路径上的使用：
+- **XFeat 前端**: 轻量 CNN 提取 float 描述子，替代传统 ORB 手工特征
+- **OctTree + ANMS 空间均匀化**: 特征点在图像空间均匀分布，避免局部过密
+- **独立 XFeatMatcher**: 基于最近邻和投影的匹配器，覆盖初始化和跟踪全路径
+- **立体匹配门控**: ratio test + 左右互检过滤歧义匹配，减少误匹配
+- **运行时调参**: 全部阈值和开关通过环境变量控制，无需重编译
+- **ORB 兼容**: 支持 `USE_ORB=1` 一键切回纯 ORB 前端
 
-- **位置**: [include/XFeatMatcher.h](include/XFeatMatcher.h), [src/XFeatMatcher.cc](src/XFeatMatcher.cc)
-- **主要方法**:
-  - `SearchByNN` - 最近邻搜索，用于初始匹配
-  - `SearchByProjection` - 基于投影的匹配，用于局部地图跟踪
-  - `SearchForInitialization` - 双目初始化匹配
+## 编译
 
-### XFeat 特征提取器
+依赖: OpenCV >= 4.0, Eigen3, Pangolin, Boost (serialization), CUDA (可选, 用于 XFeat 推理加速)
 
-集成 XFeat 检测器与 ORB 共存：
+```bash
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+```
 
-- **位置**: [include/XFeat.h](include/XFeat.h), [include/XFextractor.h](include/XFextractor.h)
-- **特性**: 类 SuperPoint 检测器，输出 float 描述子
+如果无法加载 ORB Vocabulary，请自行从 [ORB-SLAM3](https://github.com/UZ-SLAMLab/ORB_SLAM3) 下载 `ORBvoc.txt`。
 
-### MapPoint 增强
+## 运行
 
-扩展 MapPoint 支持多描述子 bank：
+### 单目
 
-- **位置**: [include/MapPoint.h](include/MapPoint.h), [src/MapPoint.cc](src/MapPoint.cc)
-- **成员**: `mDescriptorBank` 存储每个地图点的多个 float 描述子
-- **Medoid 选择**: 自动选择代表描述子
+```bash
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/SePT01_cam0.yaml \
+  /path/to/dataset \
+  examples/Monocular/SePT01_cam0.txt
+```
 
-## 修改的跟踪路径
+### 双目
 
-| 路径 | 方法 | Matcher |
-|------|------|---------|
-| 单目初始化 | `SearchForInitialization` | XFeatMatcher |
-| 参考关键帧跟踪 | `SearchByNN` | XFeatMatcher |
-| 运动模型 | `SearchByProjection` | XFeatMatcher |
-| 局部地图 | `SearchByProjection` | XFeatMatcher |
-| 重定位 | `SearchByNN` | XFeatMatcher |
+```bash
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/EuRoC.yaml \
+  /path/to/dataset/mav0 \
+  examples/Stereo/V1_01_easy_TimeStamps/times.txt \
+  output_basename
+```
 
-## TrackReferenceKeyFrame 三路融合
+## 环境变量
 
-将 TrackReferenceKeyFrame 的 XFeat 分支从"整包替换"改为"三路融合"：
+完整参考见 [command.md](command.md)。常用：
 
-1. **strict 模式**: 严格 NN 匹配，作为主干结果
-2. **relaxed 模式**: 只填充空位，不覆盖已有匹配
-3. **projection fallback**: 投影匹配作为最后补位，不覆盖已有匹配
-
-## 仍保留的 ORB 依赖
-
-- 启动时仍加载 ORB Vocabulary
-- 部分 fallback 路径仍使用 ORBmatcher
-- BoW 索引仍基于 ORB
-
-## 第一阶段：稳态基线版（运行时开关）
-
-当前逻辑以 XFeat 作为默认前端，运行时通过少量环境变量切换 Reference/Relocalization 策略：
-
-| 环境变量 | 作用 | 默认值 |
+| 变量 | 作用 | 默认 |
 |---|---|---|
-| `XFEAT_STAGE1_REF_RELOC_MODE` | `current`/`hybrid`，统一控制 `TrackReferenceKeyFrame` 与 `Relocalization` | `hybrid` |
-| `XFEAT_STAGE1_DEBUG` | Stage1 统一调试日志开关（兼容 `XFEAT_DEBUG`） | `0` |
-| `XFEAT_ENABLE_LIGHT_DUAL_DESC` | 轻量 ORB side-channel 总开关（KeyFrame ORB side desc + ORB BoW） | `1`（XFeat 前端） |
-| `XFEAT_ORB_SIDE_ON_KF_ONLY` | 是否仅在关键帧常驻 ORB side 特征（`1` 时普通帧按需懒提取） | `1` |
-| `XFEAT_ORB_SIDE_ON_RELOC_FRAME` | Relocalization 是否允许当前帧按需提取 ORB side | `1` |
-| `XFEAT_USE_DESC_BANK` | MapPoint descriptor bank 开关 | `0` |
-| `USE_ORB` | 切换为纯 ORB 前端（兼容保留） | 未设置 |
+| `USE_ORB` | 切换到纯 ORB 前端 | 不设置 |
+| `XFEAT_DEVICE` | 推理设备 `auto/cuda/cpu` | `auto` |
+| `XFEAT_UNIFORM_DISABLE` | 关闭特征空间均匀化 | 不设置（开启） |
+| `XFEAT_STEREO_RATIO` | 立体匹配 ratio test 阈值 | `0.80` |
+| `XFEAT_STEREO_MUTUAL` | 左右互检开关 | 开启 |
+| `XFEAT_STEREO_DESC_TH` | 立体匹配描述子阈值 | `1.35` |
+| `XFEAT_STEREO_MIN_DISPARITY` | 最小视差（像素） | `1.0` |
+| `XFEAT_DIAG_INTERVAL` | 诊断日志间隔帧数 | `1` |
+| `XFEAT_DEBUG` | 全局调试输出 | 关 |
 
-说明：
-- `Initialization / MotionModel / LocalMap`：默认始终走 XFeat（除非显式 `USE_ORB=1`）。
-- `XFEAT_STAGE1_REF_RELOC_MODE=current`：Reference + Relocalization 走纯当前 XFeat 逻辑。
-- `XFEAT_STAGE1_REF_RELOC_MODE=hybrid`：在 XFeat 前端下，Reference/Relocalization 优先尝试 ORB side-channel（BoW 候选），再由 XFeat 做补匹配或 refine。
+更多阈值和匹配器配置见 [command.md](command.md)。
 
-### 四组消融配置（把 `<run_cmd>` 替换成你当前运行命令）
+## 数据集
 
-1. XFeat 纯当前链路（对照）
-```bash
-XFEAT_STAGE1_REF_RELOC_MODE=current \
-XFEAT_ENABLE_LIGHT_DUAL_DESC=1 \
-XFEAT_USE_DESC_BANK=0 \
-<run_cmd>
-```
+已适配配置:
+- **EuRoC** (单目/双目)
+- **SePT01** (单目/双目)
+- **Moon_1** (单目)
+- **TUM-VI / TUM RGB-D** (单目)
+- **KITTI** (单目)
 
-2. 稳态混合（Reference/Reloc ORB side-channel 主导）
-```bash
-XFEAT_STAGE1_REF_RELOC_MODE=hybrid \
-XFEAT_ENABLE_LIGHT_DUAL_DESC=1 \
-<run_cmd>
-```
+## 轨迹评估
 
-3. 稳态混合 + bank off（显式）
-```bash
-XFEAT_STAGE1_REF_RELOC_MODE=hybrid \
-XFEAT_ENABLE_LIGHT_DUAL_DESC=1 \
-XFEAT_USE_DESC_BANK=0 \
-<run_cmd>
-```
+参考 [convert_euroc_to_tum.py](convert_euroc_to_tum.py) 将输出轨迹转为 TUM 格式后使用 evo 工具评估。
 
-4. 稳态混合 + bank on
-```bash
-XFEAT_STAGE1_REF_RELOC_MODE=hybrid \
-XFEAT_ENABLE_LIGHT_DUAL_DESC=1 \
-XFEAT_USE_DESC_BANK=1 \
-<run_cmd>
-```
+## License
+
+GPLv3，同 ORB-SLAM3。
