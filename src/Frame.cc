@@ -90,6 +90,38 @@ namespace
         return minDisp;
     }
 
+    float GetXFeatStereoRatio()
+    {
+        //Ratio test阈值,用于过滤歧义立体匹配.
+        //bestDist < secondBestDist × ratio 才接受. 设为0关闭ratio test.
+        static const float ratio = []() {
+            float value = 0.80f;
+            const char* env = std::getenv("XFEAT_STEREO_RATIO");
+            if(env && env[0] != '\0')
+            {
+                char* end = nullptr;
+                const float parsed = std::strtof(env, &end);
+                if(end != env && std::isfinite(parsed))
+                    value = parsed;
+            }
+            return std::max(0.0f, std::min(1.0f, value));
+        }();
+        return ratio;
+    }
+
+    bool IsXFeatStereoMutualEnabled()
+    {
+        //左右互检开关,默认开启. 关闭: XFEAT_STEREO_MUTUAL=0
+        static const bool enabled = []() {
+            const char* env = std::getenv("XFEAT_STEREO_MUTUAL");
+            if(!env || env[0] == '\0')
+                return true;
+            const std::string v(env);
+            return !(v == "0" || v == "false" || v == "FALSE");
+        }();
+        return enabled;
+    }
+
     bool IsFloatDescriptorMat(const cv::Mat& descriptors)
     {
         return !descriptors.empty() && descriptors.type() == CV_32F;
@@ -1241,6 +1273,20 @@ void Frame::ComputeStereoMatches()
 
     const int Nr = mvKeysRight.size();
 
+    // XFeat stereo gating config (must be before reverse arrays)
+    const float stereoRatio = GetXFeatStereoRatio();
+    const bool bStereoMutual = IsXFeatStereoMutualEnabled();
+    const bool bUseStereoRatio = (stereoRatio > 0.0f);
+
+    // Reverse best match arrays for mutual check (built during forward search)
+    std::vector<float> reverseBestDist;
+    std::vector<int>   reverseBestIdx;
+    if(bFloatDescriptors && bStereoMutual)
+    {
+        reverseBestDist.assign(Nr, std::numeric_limits<float>::infinity());
+        reverseBestIdx.assign(Nr, -1);
+    }
+
     for(int iR=0; iR<Nr; iR++)
     {
         const cv::KeyPoint &kp = mvKeysRight[iR];
@@ -1258,8 +1304,12 @@ void Frame::ComputeStereoMatches()
     const float minD = bFloatDescriptors ? GetXFeatStereoMinDisparity() : 0.0f;
     const float maxD = mbf/minZ;
 
-    //诊断: XFeat立体匹配描述子通过统计
+    //诊断: XFeat立体匹配各阶段统计
     int nDescPass = 0;
+    int nRatioReject = 0;
+    int nMutualReject = 0;
+    int nDisparityReject = 0;
+    int nAccepted = 0;
 
     // For each left keypoint search a match in the right image
     vector<pair<float, int> > vDistIdx;
@@ -1285,6 +1335,7 @@ void Frame::ComputeStereoMatches()
             continue;
 
         float bestDist = std::numeric_limits<float>::infinity();
+        float bestDist2 = std::numeric_limits<float>::infinity();
         size_t bestIdxR = 0;
 
         const cv::Mat &dL = mDescriptors.row(iL);
@@ -1307,8 +1358,20 @@ void Frame::ComputeStereoMatches()
 
                 if(dist<bestDist)
                 {
-                    bestDist = dist;
-                    bestIdxR = iR;
+                    bestDist2 = bestDist;
+                    bestDist  = dist;
+                    bestIdxR  = iR;
+                }
+                else if(dist<bestDist2)
+                {
+                    bestDist2 = dist;
+                }
+
+                // Track reverse best for mutual check
+                if(bStereoMutual && dist < reverseBestDist[iR])
+                {
+                    reverseBestDist[iR] = dist;
+                    reverseBestIdx[iR] = iL;
                 }
             }
         }
@@ -1318,17 +1381,45 @@ void Frame::ComputeStereoMatches()
         {
             if(bFloatDescriptors)
             {
-                // XFeat: use raw keypoint disparity directly (skip sub-pixel refinement).
+                // XFeat: raw keypoint disparity with stereo quality gates.
                 nDescPass++;
+
+                // Gate 1: ratio test
+                if(bUseStereoRatio && std::isfinite(bestDist2) && bestDist2 > 0.0f)
+                {
+                    if(bestDist >= stereoRatio * bestDist2)
+                    {
+                        nRatioReject++;
+                        continue;
+                    }
+                }
+
+                // Gate 2: mutual check (left→right must agree with right→left)
+                if(bStereoMutual)
+                {
+                    const int revBest = reverseBestIdx[bestIdxR];
+                    if(revBest < 0 || revBest != iL)
+                    {
+                        nMutualReject++;
+                        continue;
+                    }
+                }
+
+                // Gate 3: disparity range
                 const float uR0 = mvKeysRight[bestIdxR].pt.x;
                 float disparity = (uL - uR0);
-                if(disparity>=minD && disparity<maxD)
+                if(disparity < minD || disparity >= maxD)
                 {
-                    if(disparity<=0) disparity=0.01f;
-                    mvDepth[iL]=mbf/disparity;
-                    mvuRight[iL] = uL-disparity;
-                    vDistIdx.push_back(pair<float,int>(bestDist,iL));
+                    nDisparityReject++;
+                    continue;
                 }
+
+                // Accepted
+                nAccepted++;
+                if(disparity<=0) disparity=0.01f;
+                mvDepth[iL]=mbf/disparity;
+                mvuRight[iL] = uL-disparity;
+                vDistIdx.push_back(pair<float,int>(bestDist,iL));
                 continue;
             }
 
@@ -1420,10 +1511,30 @@ void Frame::ComputeStereoMatches()
 
     if(IsXFeatFrameDebugEnabled() && bFloatDescriptors)
     {
+        //诊断: XFEAT_DIAG_INTERVAL 控制打印频率,默认每帧
+        static long unsigned int sLastStereoDiagFrame = 0;
+        static bool sFirstDiagFrame = true;
+        int diagInterval = 1;
+        {
+            const char* env = std::getenv("XFEAT_DIAG_INTERVAL");
+            if(env) {
+                try { diagInterval = std::max(1, std::min(1000, std::stoi(std::string(env)))); }
+                catch(...) { diagInterval = 1; }
+            }
+        }
+        if(!sFirstDiagFrame && mnId < sLastStereoDiagFrame + static_cast<long unsigned int>(diagInterval))
+            return;
+        sFirstDiagFrame = false;
+        sLastStereoDiagFrame = mnId;
+
         int nDepthBeforeMedian = static_cast<int>(vDistIdx.size());
         std::cout << "[ComputeStereoMatches] frame=" << mnId
                   << " N=" << N
                   << " desc_pass=" << nDescPass
+                  << " ratio_reject=" << nRatioReject
+                  << " mutual_reject=" << nMutualReject
+                  << " disparity_reject=" << nDisparityReject
+                  << " accepted=" << nAccepted
                   << " depth_before_median=" << nDepthBeforeMedian
                   << " median_dist=" << median
                   << " th_dist=" << thDist

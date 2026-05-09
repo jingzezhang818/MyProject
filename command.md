@@ -9,7 +9,7 @@
 ```bash
 XFEAT_DEBUG=1 \
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
-XFEAT_DIAG_INTERVAL=20 \
+XFEAT_DIAG_INTERVAL=30 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/EuRoC.yaml \
@@ -62,7 +62,7 @@ XFEAT_DIAG_INTERVAL=20 \
 python convert_euroc_to_tum.py \
   --gt ground_truth_tum_SePT01.txt \
   --est-traj f_SePT01.txt \
-  --out-est experiment_logs/Stereo/SePT01/CameraTrajectory_SePT01_tum_run1.txt \
+  --out-est experiment_logs/Stereo/SePT01/CameraTrajectory_SePT01_tum_run2.txt \
   --timestamp-unit ns \
   --estimate-right-rot
 ```
