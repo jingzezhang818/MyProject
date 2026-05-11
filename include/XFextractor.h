@@ -22,6 +22,7 @@
 #include "XFeat.h"
 #include <vector>
 #include <list>
+#include <string>
 #include <opencv2/opencv.hpp>
 #include "torch/torch.h"
 
@@ -35,6 +36,8 @@ public:
     
     XFextractor(int nfeatures, float scaleFactor, int nlevels,
                  int iniThFAST, int minThFAST);
+    XFextractor(int nfeatures, float scaleFactor, int nlevels,
+                 int iniThFAST, int minThFAST, const std::string& modelWeightsPath);
 
     ~XFextractor(){}
 
@@ -95,6 +98,7 @@ protected:
     std::vector<float> mvInvLevelSigma2;
 
     torch::DeviceType device_type;
+    torch::Device device_{torch::kCPU};
     std::shared_ptr<XFeatModel> model;
     std::shared_ptr<InterpolateSparse2d> bilinear, nearest;
 };

@@ -69,8 +69,11 @@
 #include <cmath>
 #include <chrono>
 #include <iomanip>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "XFextractor.h"
+#include "XFeatLighterGlue/core.hpp"
 
 
 using namespace cv;
@@ -279,6 +282,179 @@ namespace ORB_SLAM3
             if(a.first != b.first)
                 return a.first < b.first;
             return a.second->UL.x < b.second->UL.x;
+        }
+
+        bool HasPrefix(const std::string& value, const std::string& prefix)
+        {
+            return value.rfind(prefix, 0) == 0;
+        }
+
+        void StripPrefix(std::string& value, const std::string& prefix)
+        {
+            if(HasPrefix(value, prefix))
+                value.erase(0, prefix.size());
+        }
+
+        std::string MapXFeatExtractorWeightKey(const std::string& key)
+        {
+            std::string mapped = key;
+            StripPrefix(mapped, "module.");
+            StripPrefix(mapped, "extractor.");
+            StripPrefix(mapped, "model.");
+            StripPrefix(mapped, "net.");
+            StripPrefix(mapped, "extractor.model.");
+            StripPrefix(mapped, "extractor.model.net.");
+            return mapped;
+        }
+
+        bool IsPotentialXFeatExtractorWeightKey(const std::string& key)
+        {
+            return HasPrefix(key, "skip1.") ||
+                   HasPrefix(key, "block1.") ||
+                   HasPrefix(key, "block2.") ||
+                   HasPrefix(key, "block3.") ||
+                   HasPrefix(key, "block4.") ||
+                   HasPrefix(key, "block5.") ||
+                   HasPrefix(key, "block_fusion.") ||
+                   HasPrefix(key, "heatmap_head.") ||
+                   HasPrefix(key, "keypoint_head.") ||
+                   HasPrefix(key, "fine_matcher.") ||
+                   HasPrefix(key, "norm.");
+        }
+
+        std::string TensorShapeString(const torch::Tensor& tensor)
+        {
+            std::ostringstream oss;
+            oss << "[";
+            for(size_t i = 0; i < tensor.sizes().size(); ++i)
+            {
+                if(i != 0)
+                    oss << ", ";
+                oss << tensor.sizes()[i];
+            }
+            oss << "]";
+            return oss.str();
+        }
+
+        bool SameShape(const torch::Tensor& a, const torch::Tensor& b)
+        {
+            return a.sizes().vec() == b.sizes().vec();
+        }
+
+        bool LoadXFeatPythonStateDict(
+            const std::shared_ptr<XFeatModel>& model,
+            const std::vector<std::pair<std::string, torch::Tensor>>& weights,
+            const torch::Device& device)
+        {
+            torch::NoGradGuard no_grad;
+
+            std::unordered_map<std::string, torch::Tensor> params;
+            std::unordered_map<std::string, torch::Tensor> buffers;
+            std::unordered_set<std::string> loadedParams;
+            std::unordered_set<std::string> loadedBuffers;
+
+            for(const auto& p : model->named_parameters(true))
+                params[p.key()] = p.value();
+            for(const auto& b : model->named_buffers(true))
+                buffers[b.key()] = b.value();
+
+            int loaded = 0;
+            int missing = 0;
+            int unexpected = 0;
+            int skipped = 0;
+            int shapeMismatch = 0;
+
+            for(const auto& item : weights)
+            {
+                const std::string& loadedKey = item.first;
+                const std::string mappedKey = MapXFeatExtractorWeightKey(loadedKey);
+
+                if(!IsPotentialXFeatExtractorWeightKey(mappedKey))
+                {
+                    ++skipped;
+                    std::cout << "[XFextractor] skipped non-extractor key: " << loadedKey << std::endl;
+                    continue;
+                }
+
+                std::cout << "[XFextractor] loaded key: " << loadedKey << std::endl;
+                std::cout << "[XFextractor] mapped key: " << loadedKey
+                          << " -> " << mappedKey << std::endl;
+
+                auto pIt = params.find(mappedKey);
+                if(pIt != params.end())
+                {
+                    if(!SameShape(pIt->second, item.second))
+                    {
+                        ++shapeMismatch;
+                        std::cerr << "[XFextractor] shape mismatch: " << loadedKey
+                                  << " -> " << mappedKey
+                                  << " checkpoint=" << TensorShapeString(item.second)
+                                  << " model=" << TensorShapeString(pIt->second)
+                                  << std::endl;
+                        continue;
+                    }
+                    pIt->second.copy_(item.second.to(device).to(pIt->second.scalar_type()));
+                    loadedParams.insert(mappedKey);
+                    ++loaded;
+                    continue;
+                }
+
+                auto bIt = buffers.find(mappedKey);
+                if(bIt != buffers.end())
+                {
+                    if(!SameShape(bIt->second, item.second))
+                    {
+                        ++shapeMismatch;
+                        std::cerr << "[XFextractor] shape mismatch: " << loadedKey
+                                  << " -> " << mappedKey
+                                  << " checkpoint=" << TensorShapeString(item.second)
+                                  << " model=" << TensorShapeString(bIt->second)
+                                  << std::endl;
+                        continue;
+                    }
+                    bIt->second.copy_(item.second.to(device).to(bIt->second.scalar_type()));
+                    loadedBuffers.insert(mappedKey);
+                    ++loaded;
+                    continue;
+                }
+
+                ++unexpected;
+                std::cout << "[XFextractor] unexpected key: " << loadedKey
+                          << " -> " << mappedKey << std::endl;
+            }
+
+            for(const auto& p : params)
+            {
+                if(loadedParams.find(p.first) == loadedParams.end())
+                {
+                    ++missing;
+                    std::cout << "[XFextractor] missing key: " << p.first << std::endl;
+                }
+            }
+            for(const auto& b : buffers)
+            {
+                if(loadedBuffers.find(b.first) == loadedBuffers.end())
+                {
+                    ++missing;
+                    std::cout << "[XFextractor] missing key: " << b.first << std::endl;
+                }
+            }
+
+            std::cout << "[XFextractor] load report: loaded=" << loaded
+                      << " missing=" << missing
+                      << " unexpected=" << unexpected
+                      << " skipped=" << skipped
+                      << " shape_mismatch=" << shapeMismatch
+                      << std::endl;
+
+            if(shapeMismatch > 0)
+                throw std::runtime_error("XFextractor checkpoint shape mismatch.");
+            if(loaded == 0)
+                throw std::runtime_error("XFextractor checkpoint did not contain extractor weights.");
+            if(missing > 0 || unexpected > 0)
+                throw std::runtime_error("XFextractor checkpoint key mismatch.");
+
+            return true;
         }
 
         std::vector<int> ApplyGreedyNMSByRadius(const float* kptPtr,
@@ -821,7 +997,15 @@ namespace ORB_SLAM3
     const int HALF_PATCH_SIZE = 15;
 
     XFextractor::XFextractor(int _nfeatures, float _scaleFactor, int _nlevels,
-                               int _iniThFAST, int _minThFAST):
+                               int _iniThFAST, int _minThFAST)
+        : XFextractor(_nfeatures, _scaleFactor, _nlevels,
+                      _iniThFAST, _minThFAST, "weights/xfeat.pt")
+    {
+    }
+
+    XFextractor::XFextractor(int _nfeatures, float _scaleFactor, int _nlevels,
+                               int _iniThFAST, int _minThFAST,
+                               const std::string& modelWeightsPath):
             nfeatures(_nfeatures), scaleFactor(_scaleFactor), nlevels(_nlevels),
             iniThFAST(_iniThFAST), minThFAST(_minThFAST)
     {
@@ -878,11 +1062,23 @@ namespace ORB_SLAM3
         }
         
         // load the xfeat model
-        std::string weights = "weights/xfeat.pt";
+        const std::string weights = modelWeightsPath.empty() ? "weights/xfeat.pt" : modelWeightsPath;
+        const std::string resolvedWeights = getModelWeightsPath(weights);
         model = std::make_shared<XFeatModel>();
-        torch::serialize::InputArchive archive;
-        archive.load_from(getModelWeightsPath(weights));
-        model->load(archive);
+        try
+        {
+            torch::serialize::InputArchive archive;
+            archive.load_from(resolvedWeights);
+            model->load(archive);
+            std::cout << "[XFextractor] loaded InputArchive weights: " << resolvedWeights << std::endl;
+        }
+        catch(const c10::Error& e)
+        {
+            std::cerr << "[XFextractor] InputArchive load failed, trying Python state_dict: "
+                      << e.what() << std::endl;
+            auto tensors = LoadPyTorchCheckpointTensors(resolvedWeights);
+            LoadXFeatPythonStateDict(model, tensors, torch::Device(torch::kCPU));
+        }
         // [XFEAT_STABILITY] Force inference mode behavior for BatchNorm and
         // other training-dependent layers to avoid descriptor drift.
         model->eval();
@@ -940,6 +1136,7 @@ namespace ORB_SLAM3
                 (void)warmup;
                 model->to(device);
                 device_type = torch::kCUDA;
+                device_ = device;
                 std::cout << "Device: " << device << std::endl;
                 return true;
             }
@@ -971,6 +1168,7 @@ namespace ORB_SLAM3
         {
             device_type = torch::kCPU;
             torch::Device device(device_type);
+            device_ = device;
             std::cout << "Device: " << device << std::endl;
             model->to(device);
         }
@@ -982,6 +1180,10 @@ namespace ORB_SLAM3
 
     std::string XFextractor::getModelWeightsPath(std::string weights)
     {
+        const std::filesystem::path requested(weights);
+        if(requested.is_absolute())
+            return static_cast<std::string>(requested);
+
         std::filesystem::path current_file = __FILE__;
         std::filesystem::path parent_dir = current_file.parent_path();
         std::filesystem::path full_path = parent_dir / ".." / weights;
@@ -1151,7 +1353,7 @@ namespace ORB_SLAM3
         allKeypoints.resize(nlevels);
 
         std::vector<cv::Mat> vDescPerLevel;
-        torch::Device device(device_type);
+        torch::Device device(device_);
         const bool profile = IsXFeatProfileEnabled();
         double tParseH2D = 0.0;
         double tPreprocess = 0.0;

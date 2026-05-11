@@ -95,6 +95,11 @@ add_library(${PROJECT_NAME} SHARED
     src/XFeat.cc
     src/XFextractor.cc
     src/XFeatMatcher.cc
+    src/XFeatLighterGlue/core.cpp
+    src/XFeatLighterGlue/encoding.cpp
+    src/XFeatLighterGlue/attention.cpp
+    src/XFeatLighterGlue/transformer.cpp
+    src/XFeatLighterGlue/matcher.cpp
 
     include/System.h
     include/Tracking.h
@@ -129,6 +134,11 @@ add_library(${PROJECT_NAME} SHARED
     include/XFeat.h
     include/XFextractor.h
     include/XFeatMatcher.h
+    include/XFeatLighterGlue/core.hpp
+    include/XFeatLighterGlue/encoding.hpp
+    include/XFeatLighterGlue/attention.hpp
+    include/XFeatLighterGlue/transformer.hpp
+    include/XFeatLighterGlue/matcher.hpp
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -175,3 +185,18 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/examples/Stereo)
 add_executable(stereo_euroc
     examples/Stereo/stereo_euroc.cc)
 target_link_libraries(stereo_euroc ${PROJECT_NAME})
+
+# Standalone XFeat LighterGlue shape/key-loading test.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/tools)
+
+add_executable(test_xfeat_lighterglue_cpp
+    tools/test_xfeat_lighterglue_cpp.cc)
+target_link_libraries(test_xfeat_lighterglue_cpp ${PROJECT_NAME})
+
+add_executable(test_xfeat_lighterglue_images_cpp
+    tools/test_xfeat_lighterglue_images_cpp.cc)
+target_link_libraries(test_xfeat_lighterglue_images_cpp ${PROJECT_NAME})
+
+add_executable(convert_xfeat_lighterglue_weights_cpp
+    tools/convert_xfeat_lighterglue_weights_cpp.cc)
+target_link_libraries(convert_xfeat_lighterglue_weights_cpp ${PROJECT_NAME})
