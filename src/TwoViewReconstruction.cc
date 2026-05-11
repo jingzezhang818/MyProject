@@ -24,6 +24,7 @@
 #include "thirdparty/DBoW2/DUtils/Random.h"
 
 #include<thread>
+#include <algorithm>
 #include <iostream>
 #include <cstdlib>
 #include <string>
@@ -41,6 +42,38 @@ namespace ORB_SLAM3
                 return false;
             const std::string v(env);
             return !(v.empty() || v == "0" || v == "false" || v == "FALSE");
+        }
+
+        int GetXFeatDiagInterval()
+        {
+            static const int interval = []() {
+                int value = 1;
+                const char* env = std::getenv("XFEAT_DIAG_INTERVAL");
+                if(env)
+                {
+                    try
+                    {
+                        value = std::max(1, std::min(1000, std::stoi(std::string(env))));
+                    }
+                    catch(...)
+                    {
+                        value = 1;
+                    }
+                }
+                return value;
+            }();
+            return interval;
+        }
+
+        bool ShouldPrintXFeatInitDebug()
+        {
+            if(!IsXFeatInitDebugEnabled())
+                return false;
+
+            static long unsigned int callCount = 0;
+            const bool shouldPrint = (callCount % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0;
+            ++callCount;
+            return shouldPrint;
         }
 
         int CountInliers(const std::vector<bool>& vb)
@@ -203,7 +236,7 @@ namespace ORB_SLAM3
         }
 
         //调试: 输出双视图初始化阶段模型选择与重建结果，便于定位“高匹配但初始化失败”根因。
-        if(IsXFeatInitDebugEnabled())
+        if(ShouldPrintXFeatInitDebug())
         {
             std::cout << "[TwoViewReconstruction] "
                       << "matches=" << N

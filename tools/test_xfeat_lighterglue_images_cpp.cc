@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <iomanip>
@@ -15,6 +16,8 @@
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
+#include <opencv2/features2d.hpp>
 #include <torch/torch.h>
 
 namespace
@@ -181,6 +184,42 @@ struct KeypointRange
     float maxY = 0.0f;
 };
 
+struct ValidMatchRecord
+{
+    ORB_SLAM3::LGMatch match;
+    cv::Point2f p0;
+    cv::Point2f p1;
+    float displacement = 0.0f;
+};
+
+struct BasicMatchStats
+{
+    float meanScore = 0.0f;
+    float medianScore = 0.0f;
+    float meanDisplacement = 0.0f;
+    float medianDisplacement = 0.0f;
+};
+
+struct RansacStats
+{
+    bool attempted = false;
+    bool success = false;
+    int inliers = 0;
+    float inlierRatio = 0.0f;
+    float meanInlierScore = 0.0f;
+    float meanOutlierScore = 0.0f;
+    std::vector<uchar> mask;
+};
+
+struct EssentialOptions
+{
+    bool enabled = false;
+    double fx = 0.0;
+    double fy = 0.0;
+    double cx = 0.0;
+    double cy = 0.0;
+};
+
 KeypointRange ComputeKeypointRange(const std::vector<cv::KeyPoint>& keypoints)
 {
     if(keypoints.empty())
@@ -217,11 +256,276 @@ void PrintImageDiagnostics(const std::string& label,
               << ", y range: " << range.minY << " .. " << range.maxY << std::endl;
 }
 
+float Median(std::vector<float> values)
+{
+    if(values.empty())
+        return 0.0f;
+
+    const size_t mid = values.size() / 2;
+    std::nth_element(values.begin(), values.begin() + mid, values.end());
+    const float hi = values[mid];
+    if(values.size() % 2 != 0)
+        return hi;
+
+    std::nth_element(values.begin(), values.begin() + mid - 1, values.end());
+    return 0.5f * (values[mid - 1] + hi);
+}
+
+BasicMatchStats ComputeBasicStats(const std::vector<ValidMatchRecord>& records)
+{
+    if(records.empty())
+        return {};
+
+    std::vector<float> scores;
+    std::vector<float> displacements;
+    scores.reserve(records.size());
+    displacements.reserve(records.size());
+
+    double sumScore = 0.0;
+    double sumDisplacement = 0.0;
+    for(const auto& r : records)
+    {
+        scores.push_back(r.match.score);
+        displacements.push_back(r.displacement);
+        sumScore += r.match.score;
+        sumDisplacement += r.displacement;
+    }
+
+    return BasicMatchStats{
+        static_cast<float>(sumScore / static_cast<double>(records.size())),
+        Median(scores),
+        static_cast<float>(sumDisplacement / static_cast<double>(records.size())),
+        Median(displacements)};
+}
+
+void ComputeMaskScoreStats(const std::vector<ValidMatchRecord>& records,
+                           RansacStats& stats)
+{
+    if(records.empty() || stats.mask.size() != records.size())
+        return;
+
+    double inlierScore = 0.0;
+    double outlierScore = 0.0;
+    int inlierCount = 0;
+    int outlierCount = 0;
+
+    for(size_t i = 0; i < records.size(); ++i)
+    {
+        if(stats.mask[i])
+        {
+            inlierScore += records[i].match.score;
+            ++inlierCount;
+        }
+        else
+        {
+            outlierScore += records[i].match.score;
+            ++outlierCount;
+        }
+    }
+
+    stats.inliers = inlierCount;
+    stats.inlierRatio = static_cast<float>(inlierCount) / static_cast<float>(records.size());
+    stats.meanInlierScore = inlierCount > 0 ? static_cast<float>(inlierScore / inlierCount) : 0.0f;
+    stats.meanOutlierScore = outlierCount > 0 ? static_cast<float>(outlierScore / outlierCount) : 0.0f;
+}
+
+RansacStats RunFundamentalRansac(const std::vector<cv::Point2f>& pts0,
+                                 const std::vector<cv::Point2f>& pts1,
+                                 const std::vector<ValidMatchRecord>& records)
+{
+    RansacStats stats;
+    if(records.size() < 8)
+        return stats;
+
+    stats.attempted = true;
+    cv::Mat mask;
+    cv::Mat F;
+    try
+    {
+        F = cv::findFundamentalMat(pts0, pts1, cv::FM_RANSAC, 3.0, 0.999, mask);
+    }
+    catch(const cv::Exception& e)
+    {
+        std::cerr << "F RANSAC failed: " << e.what() << std::endl;
+        return stats;
+    }
+    if(F.empty() || mask.empty())
+        return stats;
+
+    stats.success = true;
+    stats.mask.assign(mask.begin<uchar>(), mask.end<uchar>());
+    ComputeMaskScoreStats(records, stats);
+    return stats;
+}
+
+RansacStats RunHomographyRansac(const std::vector<cv::Point2f>& pts0,
+                                const std::vector<cv::Point2f>& pts1,
+                                const std::vector<ValidMatchRecord>& records)
+{
+    RansacStats stats;
+    if(records.size() < 4)
+        return stats;
+
+    stats.attempted = true;
+    cv::Mat mask;
+    cv::Mat H;
+    try
+    {
+        H = cv::findHomography(pts0, pts1, cv::RANSAC, 3.0, mask);
+    }
+    catch(const cv::Exception& e)
+    {
+        std::cerr << "H RANSAC failed: " << e.what() << std::endl;
+        return stats;
+    }
+    if(H.empty() || mask.empty())
+        return stats;
+
+    stats.success = true;
+    stats.mask.assign(mask.begin<uchar>(), mask.end<uchar>());
+    ComputeMaskScoreStats(records, stats);
+    return stats;
+}
+
+RansacStats RunEssentialRansac(const std::vector<cv::Point2f>& pts0,
+                               const std::vector<cv::Point2f>& pts1,
+                               const std::vector<ValidMatchRecord>& records,
+                               const EssentialOptions& options)
+{
+    RansacStats stats;
+    if(!options.enabled || records.size() < 8)
+        return stats;
+
+    stats.attempted = true;
+    cv::Mat K = (cv::Mat_<double>(3, 3) << options.fx, 0.0, options.cx,
+                                          0.0, options.fy, options.cy,
+                                          0.0, 0.0, 1.0);
+    cv::Mat mask;
+    cv::Mat E;
+    try
+    {
+        E = cv::findEssentialMat(pts0, pts1, K, cv::RANSAC, 0.999, 1.0, mask);
+    }
+    catch(const cv::Exception& e)
+    {
+        std::cerr << "E RANSAC failed: " << e.what() << std::endl;
+        return stats;
+    }
+    if(E.empty() || mask.empty())
+        return stats;
+
+    stats.success = true;
+    stats.mask.assign(mask.begin<uchar>(), mask.end<uchar>());
+    ComputeMaskScoreStats(records, stats);
+    return stats;
+}
+
+void PrintRansacStats(const std::string& prefix,
+                      const RansacStats& stats,
+                      size_t validCount,
+                      bool scoreStats)
+{
+    if(!stats.attempted)
+    {
+        std::cout << prefix << " skipped" << std::endl;
+        return;
+    }
+    if(!stats.success)
+    {
+        std::cout << prefix << " failed" << std::endl;
+        return;
+    }
+
+    std::cout << prefix << "_inliers: " << stats.inliers << std::endl;
+    std::cout << prefix << "_inlier_ratio: "
+              << (validCount > 0 ? stats.inlierRatio : 0.0f) << std::endl;
+    if(scoreStats)
+    {
+        std::cout << prefix << "_mean_inlier_score: " << stats.meanInlierScore << std::endl;
+        std::cout << prefix << "_mean_outlier_score: " << stats.meanOutlierScore << std::endl;
+    }
+}
+
+std::vector<ValidMatchRecord> BuildValidMatchRecords(
+    const std::vector<ORB_SLAM3::LGMatch>& matches,
+    const std::vector<cv::KeyPoint>& keypoints0,
+    const std::vector<cv::KeyPoint>& keypoints1)
+{
+    std::vector<ValidMatchRecord> records;
+    records.reserve(matches.size());
+    for(const auto& m : matches)
+    {
+        if(m.idx0 < 0 || m.idx0 >= static_cast<int>(keypoints0.size()) ||
+           m.idx1 < 0 || m.idx1 >= static_cast<int>(keypoints1.size()))
+        {
+            continue;
+        }
+
+        const cv::Point2f p0 = keypoints0[m.idx0].pt;
+        const cv::Point2f p1 = keypoints1[m.idx1].pt;
+        const cv::Point2f d = p1 - p0;
+        records.push_back(ValidMatchRecord{m, p0, p1, std::sqrt(d.x * d.x + d.y * d.y)});
+    }
+    return records;
+}
+
+void SaveMatchImage(const std::string& outputPath,
+                    const cv::Mat& img0,
+                    const cv::Mat& img1,
+                    const std::vector<cv::KeyPoint>& keypoints0,
+                    const std::vector<cv::KeyPoint>& keypoints1,
+                    const std::vector<ValidMatchRecord>& records,
+                    const RansacStats& fStats)
+{
+    if(outputPath.empty())
+        return;
+
+    std::vector<cv::DMatch> drawMatchesVec;
+    drawMatchesVec.reserve(records.size());
+    const bool useFMask = fStats.success && fStats.mask.size() == records.size();
+    for(size_t i = 0; i < records.size(); ++i)
+    {
+        if(useFMask && !fStats.mask[i])
+            continue;
+        drawMatchesVec.emplace_back(records[i].match.idx0,
+                                    records[i].match.idx1,
+                                    1.0f - records[i].match.score);
+    }
+
+    cv::Mat out;
+    cv::drawMatches(img0, keypoints0, img1, keypoints1, drawMatchesVec, out);
+    if(!cv::imwrite(outputPath, out))
+        throw std::runtime_error("failed to write output_png: " + outputPath);
+    std::cout << "output_png: " << outputPath
+              << " drawn_matches=" << drawMatchesVec.size()
+              << (useFMask ? " source=F_inliers" : " source=all_valid_matches")
+              << std::endl;
+}
+
+bool ParseDouble(const std::string& value, double& out)
+{
+    try
+    {
+        size_t pos = 0;
+        out = std::stod(value, &pos);
+        return pos == value.size();
+    }
+    catch(...)
+    {
+        return false;
+    }
+}
+
 void PrintUsage()
 {
     std::cerr << "Usage: ./test_xfeat_lighterglue_images_cpp "
               << "/path/to/xfeat.pt /path/to/xfeat-lighterglue.pt "
-              << "/path/to/img0.png /path/to/img1.png [top_k] [lg_threshold]" << std::endl;
+              << "/path/to/img0.png /path/to/img1.png "
+              << "[top_k] [lg_threshold] [output_png] [fx fy cx cy]" << std::endl
+              << "   or: ./test_xfeat_lighterglue_images_cpp "
+              << "/path/to/xfeat.pt /path/to/xfeat-lighterglue.pt "
+              << "/path/to/img0.png /path/to/img1.png "
+              << "[top_k] [lg_threshold] [fx fy cx cy] [output_png]" << std::endl;
 }
 
 } // namespace
@@ -232,7 +536,7 @@ int main(int argc, char** argv)
     {
         torch::NoGradGuard no_grad;
 
-        if(argc < 5 || argc > 7)
+        if(argc < 5 || argc > 12)
         {
             PrintUsage();
             return 1;
@@ -244,6 +548,51 @@ int main(int argc, char** argv)
         const std::string img1Path = argv[4];
         const int topK = argc > 5 ? std::max(1, std::stoi(argv[5])) : 2048;
         const float lgThreshold = argc > 6 ? std::stof(argv[6]) : 0.1f;
+        std::string outputPng;
+        EssentialOptions essentialOptions;
+
+        if(argc == 11)
+        {
+            essentialOptions.enabled = ParseDouble(argv[7], essentialOptions.fx) &&
+                                       ParseDouble(argv[8], essentialOptions.fy) &&
+                                       ParseDouble(argv[9], essentialOptions.cx) &&
+                                       ParseDouble(argv[10], essentialOptions.cy);
+            if(!essentialOptions.enabled)
+                throw std::runtime_error("fx fy cx cy must be numeric.");
+        }
+        else if(argc == 8)
+        {
+            outputPng = argv[7];
+        }
+        else if(argc == 12)
+        {
+            EssentialOptions tailOutputOptions;
+            const bool tailOutputHasK = ParseDouble(argv[7], tailOutputOptions.fx) &&
+                                        ParseDouble(argv[8], tailOutputOptions.fy) &&
+                                        ParseDouble(argv[9], tailOutputOptions.cx) &&
+                                        ParseDouble(argv[10], tailOutputOptions.cy);
+            if(tailOutputHasK)
+            {
+                essentialOptions = tailOutputOptions;
+                essentialOptions.enabled = true;
+                outputPng = argv[11];
+            }
+            else
+            {
+                outputPng = argv[7];
+                essentialOptions.enabled = ParseDouble(argv[8], essentialOptions.fx) &&
+                                           ParseDouble(argv[9], essentialOptions.fy) &&
+                                           ParseDouble(argv[10], essentialOptions.cx) &&
+                                           ParseDouble(argv[11], essentialOptions.cy);
+                if(!essentialOptions.enabled)
+                    throw std::runtime_error("fx fy cx cy must be numeric.");
+            }
+        }
+        else if(argc > 7)
+        {
+            PrintUsage();
+            return 1;
+        }
 
         const torch::Device device = SelectDeviceAndConfigureExtractor();
 
@@ -285,28 +634,58 @@ int main(int argc, char** argv)
                                            lgThreshold);
 
         std::cout << "number of matches: " << matches.size() << std::endl;
-        const size_t show = std::min<size_t>(20, matches.size());
+
+        const auto validRecords = BuildValidMatchRecords(matches, keypoints0, keypoints1);
+        std::vector<cv::Point2f> pts0;
+        std::vector<cv::Point2f> pts1;
+        pts0.reserve(validRecords.size());
+        pts1.reserve(validRecords.size());
+        for(const auto& r : validRecords)
+        {
+            pts0.push_back(r.p0);
+            pts1.push_back(r.p1);
+        }
+
+        const auto basicStats = ComputeBasicStats(validRecords);
+        std::cout << "raw_matches: " << matches.size() << std::endl;
+        std::cout << "valid_index_matches: " << validRecords.size() << std::endl;
+        std::cout << "mean_score: " << basicStats.meanScore << std::endl;
+        std::cout << "median_score: " << basicStats.medianScore << std::endl;
+        std::cout << "mean_displacement_px: " << basicStats.meanDisplacement << std::endl;
+        std::cout << "median_displacement_px: " << basicStats.medianDisplacement << std::endl;
+
+        const auto fStats = RunFundamentalRansac(pts0, pts1, validRecords);
+        const auto hStats = RunHomographyRansac(pts0, pts1, validRecords);
+        const auto eStats = RunEssentialRansac(pts0, pts1, validRecords, essentialOptions);
+
+        PrintRansacStats("F", fStats, validRecords.size(), true);
+        PrintRansacStats("H", hStats, validRecords.size(), true);
+        if(essentialOptions.enabled)
+            PrintRansacStats("E", eStats, validRecords.size(), false);
+        else
+            std::cout << "E skipped" << std::endl;
+
+        SaveMatchImage(outputPng, img0, img1, keypoints0, keypoints1, validRecords, fStats);
+
+        const size_t show = std::min<size_t>(20, validRecords.size());
         for(size_t i = 0; i < show; ++i)
         {
-            const auto& m = matches[i];
-            if(m.idx0 < 0 || m.idx0 >= static_cast<int>(keypoints0.size()) ||
-               m.idx1 < 0 || m.idx1 >= static_cast<int>(keypoints1.size()))
-            {
-                std::cout << "match[" << i << "]: invalid index "
-                          << m.idx0 << " " << m.idx1
-                          << " score=" << m.score << std::endl;
-                continue;
-            }
-
-            const auto& p0 = keypoints0[m.idx0].pt;
-            const auto& p1 = keypoints1[m.idx1].pt;
+            const auto& r = validRecords[i];
+            const auto& m = r.match;
+            const bool fInlier = fStats.success && fStats.mask.size() == validRecords.size() && fStats.mask[i];
+            const bool hInlier = hStats.success && hStats.mask.size() == validRecords.size() && hStats.mask[i];
+            const bool eInlier = eStats.success && eStats.mask.size() == validRecords.size() && eStats.mask[i];
             std::cout << "match[" << i << "]: idx0=" << m.idx0
                       << " idx1=" << m.idx1
                       << " score=" << m.score
-                      << " x0=" << p0.x
-                      << " y0=" << p0.y
-                      << " x1=" << p1.x
-                      << " y1=" << p1.y
+                      << " x0=" << r.p0.x
+                      << " y0=" << r.p0.y
+                      << " x1=" << r.p1.x
+                      << " y1=" << r.p1.y
+                      << " displacement=" << r.displacement
+                      << " F_inlier=" << (fInlier ? 1 : 0)
+                      << " H_inlier=" << (hInlier ? 1 : 0)
+                      << " E_inlier=" << (eInlier ? 1 : 0)
                       << std::endl;
         }
 

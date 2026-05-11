@@ -62,7 +62,7 @@ XFEAT_DIAG_INTERVAL=20 \
 python convert_euroc_to_tum.py \
   --gt ground_truth_tum_SePT01.txt \
   --est-traj f_SePT01.txt \
-  --out-est experiment_logs/Stereo/SePT01/CameraTrajectory_SePT01_tum_run2.txt \
+  --out-est experiment_logs/Stereo/SePT01/CameraTrajectory_SePT01_tum_run_LG.txt \
   --timestamp-unit ns \
   --estimate-right-rot
 ```
@@ -101,9 +101,9 @@ python convert_euroc_to_tum.py \
 | 变量 | 作用 | 默认 | 范围 | 代码依据 |
 |---|---|---|---|---|
 | `USE_ORB` | 切换到 ORB 前端 | 未设置 | — | `src/Tracking.cc:2328-2350` |
-| `XFEAT_DEBUG` | 全局调试输出（高频） | 关 | — | `src/Tracking.cc:65-69`, `src/Frame.cc:43-53` |
+| `XFEAT_DEBUG` | 全局调试输出（由 `XFEAT_DIAG_INTERVAL` 限频） | 关 | — | `src/Tracking.cc:65-83`, `src/Frame.cc:43-83` |
 | `XFEAT_DIAG_FEATURE_DISTRIBUTION` | 特征分布诊断日志 | 关 | — | `src/Tracking.cc:72-77,3322-3327` |
-| `XFEAT_DIAG_INTERVAL` | 诊断日志间隔帧数 | `1` | `[1,500]` | `src/Tracking.cc:79-99` |
+| `XFEAT_DIAG_INTERVAL` | XFeat 调试/诊断日志间隔帧数 | `1` | `[1,500]` | `src/Tracking.cc:85-105` |
 | `XFEAT_DIAG_GRID_COLS` | 诊断空间网格列数 | `8` | `[2,64]` | `src/Tracking.cc:102-123` |
 | `XFEAT_DIAG_GRID_ROWS` | 诊断空间网格行数 | `6` | `[2,64]` | `src/Tracking.cc:125-146` |
 | `XFEAT_FPS` / `SLAM_FPS` | RuntimeFPS 日志 | 关 | — | `src/Tracking.cc:148-152` |
@@ -191,4 +191,4 @@ python convert_euroc_to_tum.py \
 ## 3. 备注
 
 - 多数环境变量在函数内以 `static` 方式缓存，进程启动后不再动态修改。
-- `XFEAT_DEBUG=1` 是高频日志开关；`XFEAT_DIAG_INTERVAL` 只控制诊断频率，不是全局限流。
+- `XFEAT_DEBUG=1` 开启 XFeat 调试日志；`XFEAT_DIAG_INTERVAL` 控制主要 XFeat 调试/诊断日志的输出间隔。

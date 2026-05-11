@@ -53,6 +53,34 @@ namespace
         return enabled;
     }
 
+    int GetXFeatDiagInterval()
+    {
+        static const int interval = []() {
+            int value = 1;
+            const char* env = std::getenv("XFEAT_DIAG_INTERVAL");
+            if(env)
+            {
+                try
+                {
+                    value = std::max(1, std::min(1000, std::stoi(std::string(env))));
+                }
+                catch(...)
+                {
+                    value = 1;
+                }
+            }
+            return value;
+        }();
+        return interval;
+    }
+
+    bool ShouldPrintXFeatFrameDebug(const long unsigned int frameId)
+    {
+        if(!IsXFeatFrameDebugEnabled())
+            return false;
+        return (frameId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0;
+    }
+
     float GetXFeatStereoDescThreshold()
     {
         static const float threshold = []() {
@@ -737,7 +765,7 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, XFextractor* extrac
     UndistortKeyPoints();
 
     //调试: XFeat提取结果摘要（在Undistort之后打印，避免 mvKeysUn 误导信息）。
-    if(IsXFeatFrameDebugEnabled())
+    if(ShouldPrintXFeatFrameDebug(mnId))
     {
         std::cout << "[Frame::ExtractXF] frame=" << mnId
                   << " N=" << N
@@ -1509,24 +1537,8 @@ void Frame::ComputeStereoMatches()
         }
     }
 
-    if(IsXFeatFrameDebugEnabled() && bFloatDescriptors)
+    if(ShouldPrintXFeatFrameDebug(mnId) && bFloatDescriptors)
     {
-        //诊断: XFEAT_DIAG_INTERVAL 控制打印频率,默认每帧
-        static long unsigned int sLastStereoDiagFrame = 0;
-        static bool sFirstDiagFrame = true;
-        int diagInterval = 1;
-        {
-            const char* env = std::getenv("XFEAT_DIAG_INTERVAL");
-            if(env) {
-                try { diagInterval = std::max(1, std::min(1000, std::stoi(std::string(env)))); }
-                catch(...) { diagInterval = 1; }
-            }
-        }
-        if(!sFirstDiagFrame && mnId < sLastStereoDiagFrame + static_cast<long unsigned int>(diagInterval))
-            return;
-        sFirstDiagFrame = false;
-        sLastStereoDiagFrame = mnId;
-
         int nDepthBeforeMedian = static_cast<int>(vDistIdx.size());
         std::cout << "[ComputeStereoMatches] frame=" << mnId
                   << " N=" << N

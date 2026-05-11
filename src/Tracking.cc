@@ -21,6 +21,7 @@
 
 #include "ORBmatcher.h"
 #include "XFeatMatcher.h"
+#include "XFeatLighterGlueMatcher.h"
 #include "FrameDrawer.h"
 #include "Converter.h"
 #include "G2oTypes.h"
@@ -67,6 +68,15 @@ namespace
     {
         static const bool enabled = IsEnvFlagEnabled("XFEAT_DEBUG");
         return enabled;
+    }
+
+    int GetXFeatFeatureDiagInterval();
+
+    bool ShouldPrintXFeatDebug(const long unsigned int frameId)
+    {
+        if(!IsXFeatDebugEnabled())
+            return false;
+        return (frameId % static_cast<long unsigned int>(GetXFeatFeatureDiagInterval())) == 0;
     }
 
     //诊断: 关键点空间/尺度/深度分布日志总开关（默认关闭，避免常规运行刷屏）。
@@ -2707,7 +2717,7 @@ void Tracking::ResetFrameIMU()
 void Tracking::Track()
 {
     //调试: 每帧总览（高频日志，默认关闭）。
-    if(IsXFeatDebugEnabled())
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
         //调试: 避免 fixed/boolalpha 影响后续全局日志格式。
         const std::ios::fmtflags oldFlags = std::cout.flags();
@@ -2892,7 +2902,7 @@ void Tracking::Track()
 
             if((!mbVelocity && !pCurrentMap->isImuInitialized()) || mCurrentFrame.mnId<mnLastRelocFrameId+2)
             {
-                if(IsXFeatDebugEnabled())
+                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                 {
                     std::cout << "[Track] branch=TrackReferenceKeyFrame"
                               << " reason="
@@ -2903,7 +2913,7 @@ void Tracking::Track()
                 Verbose::PrintMess("TRACK: Track with respect to the reference KF ", Verbose::VERBOSITY_DEBUG);
                 bOK = TrackReferenceKeyFrame();
 
-                if(IsXFeatDebugEnabled())
+                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                 {
                     std::cout << "[Track] TrackReferenceKeyFrame returned "
                               << (bOK ? "true" : "false") << std::endl;
@@ -2911,13 +2921,13 @@ void Tracking::Track()
             }
             else
             {
-                if(IsXFeatDebugEnabled())
+                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                     std::cout << "[Track] branch=TrackWithMotionModel" << std::endl;
 
                 Verbose::PrintMess("TRACK: Track with motion model", Verbose::VERBOSITY_DEBUG);
                 bOK = TrackWithMotionModel();
 
-                if(IsXFeatDebugEnabled())
+                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                 {
                     std::cout << "[Track] TrackWithMotionModel returned "
                               << (bOK ? "true" : "false") << std::endl;
@@ -2925,10 +2935,10 @@ void Tracking::Track()
 
                 if(!bOK)
                 {
-                    if(IsXFeatDebugEnabled())
+                    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                         std::cout << "[Track] fallback=TrackReferenceKeyFrame" << std::endl;
                     bOK = TrackReferenceKeyFrame();
-                    if(IsXFeatDebugEnabled())
+                    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                     {
                         std::cout << "[Track] fallback TrackReferenceKeyFrame returned "
                                   << (bOK ? "true" : "false") << std::endl;
@@ -2958,7 +2968,7 @@ void Tracking::Track()
                         {
                             mState = RECENTLY_LOST;
                             mTimeStampLost = mCurrentFrame.mTimeStamp;
-                            if(IsXFeatDebugEnabled())
+                            if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                             {
                                 std::cout << "[Track] degrade_to_RECENTLY_LOST "
                                           << "reason=small_map_transient_failure"
@@ -2979,7 +2989,7 @@ void Tracking::Track()
                 if (mState == RECENTLY_LOST)
                 {
                     //调试: 在 RECENTLY_LOST 和 LOST 分支入口加日志。
-                    if(IsXFeatDebugEnabled())
+                    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                         std::cout << "[Track] branch=RECENTLY_LOST" << std::endl;
                     Verbose::PrintMess("Lost for a short time", Verbose::VERBOSITY_NORMAL);
 
@@ -3002,10 +3012,10 @@ void Tracking::Track()
                     {
                         // Relocalization
                         //调试: RECENTLY_LOST 下的重定位入口日志。
-                        if(IsXFeatDebugEnabled())
+                        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                             std::cout << "[Track] RECENTLY_LOST path=Relocalization" << std::endl;
                         bOK = Relocalization();
-                        if(IsXFeatDebugEnabled())
+                        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                         {
                             std::cout << "[Track] Relocalization returned "
                                       << (bOK ? "true" : "false") << std::endl;
@@ -3022,7 +3032,7 @@ void Tracking::Track()
                 }
                 else if (mState == LOST)
                 {
-                    if(IsXFeatDebugEnabled())
+                    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                         std::cout << "[Track] branch=LOST" << std::endl;
                     Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
 
@@ -3145,10 +3155,10 @@ void Tracking::Track()
         {
             if(bOK)
             {
-                if(IsXFeatDebugEnabled())
+                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                     std::cout << "[Track] call TrackLocalMap" << std::endl;
                 bOK = TrackLocalMap();
-                if(IsXFeatDebugEnabled())
+                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                 {
                     std::cout << "[Track] TrackLocalMap returned "
                               << (bOK ? "true" : "false")
@@ -3588,7 +3598,7 @@ void Tracking::MonocularInitialization()
             nmatchesForReconstruct = CountValidInitMatches(vIniMatchesForReconstruct);
 
             //调试: 输出双视图重建前裁剪统计，定位“高匹配数反而初始化失败”的门槛问题。
-            if(IsXFeatDebugEnabled())
+            if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
             {
                 std::cout << "[InitMono] MATCH_PRUNE "
                           << "raw=" << nmatches
@@ -3631,7 +3641,7 @@ void Tracking::MonocularInitialization()
             if(bStaleReference || bDegradingReference)
             {
                 //调试: 同一初始化参考帧跨度过大且重建失败，重锚到当前帧以避免持续退化。
-                if(IsXFeatDebugEnabled())
+                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
                 {
                     std::cout << "[InitMono] REANCHOR "
                               << "reason=" << (bStaleReference ? "reconstruct_failed_with_stale_reference" :
@@ -3719,7 +3729,7 @@ void Tracking::CreateInitialMapMonocular()
     const float minBaselineDepthRatio = bUseORBInit ? 0.005f : GetXFeatInitMinBaselineDepthRatio();
     const int trackedMapPoints = pKFcur->TrackedMapPoints(1);
 
-    if(IsXFeatDebugEnabled())
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
         std::cout << "[InitMono] "
                   << "medianDepth=" << medianDepth
@@ -3740,7 +3750,7 @@ void Tracking::CreateInitialMapMonocular()
     if(medianDepth<0 || trackedMapPoints<50 || baselineDepthRatio < minBaselineDepthRatio) // TODO Check, originally 100 tracks
     {
         Verbose::PrintMess("Wrong initialization, reseting...", Verbose::VERBOSITY_QUIET);
-        if(IsXFeatDebugEnabled())
+        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         {
             std::cout << "[InitMono] REJECT "
                       << "reason="
@@ -3884,7 +3894,7 @@ bool Tracking::TrackReferenceKeyFrame()
         mCurrentFrame.ComputeBoW();
 
     //调试: 参考关键帧匹配入口摘要。
-    if(IsXFeatDebugEnabled())
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
         std::cout << "[TrackRefKF] frame=" << mCurrentFrame.mnId
               << " N=" << mCurrentFrame.N
@@ -3898,11 +3908,14 @@ bool Tracking::TrackReferenceKeyFrame()
 
 
     int nmatches = 0;
+    bool bUsedLightGlueRef = false;
+    XFeatLighterGlueMatcher::Stats lgRefStats;
+    int lgRefPrePoseObs = 0;
     if(bUseORB)
     {
         ORBmatcher matcher(0.7, true);
         nmatches = matcher.SearchByBoW(mpReferenceKF, mCurrentFrame, vpMapPointMatches);
-        if(IsXFeatDebugEnabled())
+        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         {
             std::cout << "[TrackRefKF] mode=BoW nmatches=" << nmatches
                       << " refKF=" << mpReferenceKF->mnId
@@ -3911,6 +3924,32 @@ bool Tracking::TrackReferenceKeyFrame()
     }
     else
     {
+        if(IsEnvFlagEnabled("XFEAT_USE_LIGHTGLUE_REF"))
+        {
+            try
+            {
+                static XFeatLighterGlueMatcher lightGlueMatcher;
+                const float lgConf = GetEnvFloatInRange("XFEAT_LIGHTGLUE_CONF", 0.1f, 0.0f, 1.0f);
+                nmatches = lightGlueMatcher.SearchByLightGlue(mpReferenceKF,
+                                                              mCurrentFrame,
+                                                              vpMapPointMatches,
+                                                              lgConf);
+                lgRefStats = lightGlueMatcher.LastStats();
+                lgRefPrePoseObs = nmatches;
+                bUsedLightGlueRef = true;
+            }
+            catch(const std::exception& e)
+            {
+                std::cerr << "[TrackRefKF][LightGlue] failed, falling back to XFeatMatcher: "
+                          << e.what() << std::endl;
+                bUsedLightGlueRef = false;
+                vpMapPointMatches.clear();
+                nmatches = 0;
+            }
+        }
+
+        if(!bUsedLightGlueRef)
+        {
         // XFeat路径: 三路候选融合（strict主干 + relaxed/proj补空位），避免“整包替换”带来的抖动。
         auto CountAssignedMatches = [](const std::vector<MapPoint*>& vMatches) -> int
         {
@@ -3972,7 +4011,7 @@ bool Tracking::TrackReferenceKeyFrame()
         vpMapPointMatches = vpStrictMatches;
         nmatches = CountAssignedMatches(vpMapPointMatches);
 
-        if(IsXFeatDebugEnabled())
+        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         {
             std::cout << "[TrackRefKF] mode=NN(strict) nmatches=" << nmatchesStrict
                       << " th_high=" << GetXFeatThHighRefNNStrict()
@@ -3992,7 +4031,7 @@ bool Tracking::TrackReferenceKeyFrame()
             MergeMatchesFillEmpty(vpRelaxedMatches, vpMapPointMatches, relaxedAdded, relaxedConflict);
             nmatches = CountAssignedMatches(vpMapPointMatches);
 
-            if(IsXFeatDebugEnabled())
+            if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
             {
                 std::cout << "[TrackRefKF] mode=NN(relaxed) nmatches=" << nmatchesRelaxed
                           << " added=" << relaxedAdded
@@ -4037,7 +4076,7 @@ bool Tracking::TrackReferenceKeyFrame()
             MergeMatchesFillEmpty(mCurrentFrame.mvpMapPoints, vpMapPointMatches, projAdded, projConflict);
             nmatches = CountAssignedMatches(vpMapPointMatches);
 
-            if(IsXFeatDebugEnabled())
+            if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
             {
                 std::cout << "[TrackRefKF] mode=ProjFallback nmatches=" << nmatchesProj
                           << " added=" << projAdded
@@ -4049,7 +4088,7 @@ bool Tracking::TrackReferenceKeyFrame()
             }
         }
 
-        if(IsXFeatDebugEnabled())
+        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         {
             std::cout << "[TrackRefKF] fused_summary strict=" << nmatchesStrict
                       << " relaxed=" << nmatchesRelaxed
@@ -4058,6 +4097,7 @@ bool Tracking::TrackReferenceKeyFrame()
                       << " trig_relaxed=" << kRelaxedFuseTrigger
                       << " trig_proj=" << kProjFuseTrigger
                       << std::endl;
+        }
         }
     }
 
@@ -4072,6 +4112,20 @@ bool Tracking::TrackReferenceKeyFrame()
 
     if(nmatches<15)
     {
+        if(bUsedLightGlueRef && ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+        {
+            std::cout << "[TrackRefKF][LightGlue] frame_id=" << lgRefStats.frame_id
+                      << " ref_kf_id=" << lgRefStats.ref_kf_id
+                      << " N_ref=" << lgRefStats.N_ref
+                      << " N_cur=" << lgRefStats.N_cur
+                      << " lg_raw_matches=" << lgRefStats.lg_raw_matches
+                      << " mp_valid=" << lgRefStats.mp_valid
+                      << " one_to_one=" << lgRefStats.one_to_one
+                      << " pre_pose_obs=" << lgRefPrePoseObs
+                      << " post_pose_inliers=0"
+                      << " outlier_ratio=1.000000"
+                      << std::endl;
+        }
         cout << "TRACK_REF_KF: Less than 15 matches!!\n";
         return false;
     }
@@ -4095,11 +4149,29 @@ bool Tracking::TrackReferenceKeyFrame()
         }
     }
 
-    if(IsXFeatDebugEnabled())
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
         std::cout << "[TrackRefKF] after PoseOptimization "
                   << "assoc_cnt=" << assoc_cnt
                   << " inlier_cnt=" << inlier_cnt
+                  << std::endl;
+    }
+
+    if(bUsedLightGlueRef && ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+    {
+        const float outlierRatio = assoc_cnt > 0
+            ? static_cast<float>(assoc_cnt - inlier_cnt) / static_cast<float>(assoc_cnt)
+            : 0.0f;
+        std::cout << "[TrackRefKF][LightGlue] frame_id=" << lgRefStats.frame_id
+                  << " ref_kf_id=" << lgRefStats.ref_kf_id
+                  << " N_ref=" << lgRefStats.N_ref
+                  << " N_cur=" << lgRefStats.N_cur
+                  << " lg_raw_matches=" << lgRefStats.lg_raw_matches
+                  << " mp_valid=" << lgRefStats.mp_valid
+                  << " one_to_one=" << lgRefStats.one_to_one
+                  << " pre_pose_obs=" << lgRefPrePoseObs
+                  << " post_pose_inliers=" << inlier_cnt
+                  << " outlier_ratio=" << outlierRatio
                   << std::endl;
     }
 
@@ -4243,6 +4315,30 @@ bool Tracking::TrackWithMotionModel()
         th=15;
 
     int nmatches = 0;
+    bool bUsedLightGlueMotion = false;
+    XFeatLighterGlueMatcher::Stats lgMotionStats;
+    int lgMotionPrePoseObs = 0;
+    std::vector<MapPoint*> vpLightGlueMotionMatches;
+    auto CountAssignedMatches = [](const std::vector<MapPoint*>& vMatches) -> int
+    {
+        int count = 0;
+        for(MapPoint* pMP : vMatches)
+        {
+            if(pMP)
+                ++count;
+        }
+        return count;
+    };
+    auto RestorePreservedMatches = [&](const std::vector<MapPoint*>& preservedMatches)
+    {
+        const size_t n = std::min(preservedMatches.size(), mCurrentFrame.mvpMapPoints.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            if(preservedMatches[i])
+                mCurrentFrame.mvpMapPoints[i] = preservedMatches[i];
+        }
+    };
+
     if(bUseORB)
     {
         ORBmatcher matcher(0.9, true);
@@ -4250,15 +4346,55 @@ bool Tracking::TrackWithMotionModel()
     }
     else
     {
-        XFeatMatcher matcher(0.9f, false);
-        nmatches = matcher.SearchByProjection(mCurrentFrame,
-                                              mLastFrame,
-                                              th,
-                                              mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR,
-                                              GetXFeatThHighMotionProjection());
+        if(IsEnvFlagEnabled("XFEAT_USE_LIGHTGLUE_MOTION"))
+        {
+            try
+            {
+                static XFeatLighterGlueMatcher lightGlueMatcher;
+                const float lgConf = GetEnvFloatInRange("XFEAT_LIGHTGLUE_CONF", 0.1f, 0.0f, 1.0f);
+                nmatches = lightGlueMatcher.SearchByLightGlue(mLastFrame,
+                                                              mCurrentFrame,
+                                                              vpLightGlueMotionMatches,
+                                                              lgConf);
+                lgMotionStats = lightGlueMatcher.LastStats();
+                lgMotionPrePoseObs = nmatches;
+                mCurrentFrame.mvpMapPoints = vpLightGlueMotionMatches;
+                bUsedLightGlueMotion = true;
+            }
+            catch(const std::exception& e)
+            {
+                std::cerr << "[TrackMotion][LightGlue] failed, falling back to XFeatMatcher: "
+                          << e.what() << std::endl;
+                bUsedLightGlueMotion = false;
+                vpLightGlueMotionMatches.clear();
+                fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+                nmatches = 0;
+            }
+        }
+
+        if(!bUsedLightGlueMotion)
+        {
+            XFeatMatcher matcher(0.9f, false);
+            nmatches = matcher.SearchByProjection(mCurrentFrame,
+                                                  mLastFrame,
+                                                  th,
+                                                  mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR,
+                                                  GetXFeatThHighMotionProjection());
+        }
+        else if(nmatches < 20)
+        {
+            XFeatMatcher matcher(0.9f, false);
+            matcher.SearchByProjection(mCurrentFrame,
+                                       mLastFrame,
+                                       th,
+                                       mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR,
+                                       GetXFeatThHighMotionProjection());
+            RestorePreservedMatches(vpLightGlueMotionMatches);
+            nmatches = CountAssignedMatches(mCurrentFrame.mvpMapPoints);
+        }
     }
     //调试: 运动模型投影匹配摘要。
-    if(IsXFeatDebugEnabled())
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
         std::cout << "[TrackMotion] proj_matches=" << nmatches
               << " th_high=" << GetXFeatThHighMotionProjection()
@@ -4270,7 +4406,8 @@ bool Tracking::TrackWithMotionModel()
     if(nmatches<20)
     {
         Verbose::PrintMess("Not enough matches, wider window search!!", Verbose::VERBOSITY_NORMAL);
-        fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+        if(!bUsedLightGlueMotion)
+            fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
 
         if(bUseORB)
         {
@@ -4279,20 +4416,45 @@ bool Tracking::TrackWithMotionModel()
         }
         else
         {
+            const std::vector<MapPoint*> vPreservedMatches = mCurrentFrame.mvpMapPoints;
             XFeatMatcher matcher(0.9f, false);
             nmatches = matcher.SearchByProjection(mCurrentFrame,
                                                   mLastFrame,
                                                   2*th,
                                                   mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR,
                                                   GetXFeatThHighMotionProjection());
+            if(bUsedLightGlueMotion)
+            {
+                RestorePreservedMatches(vPreservedMatches);
+                nmatches = CountAssignedMatches(mCurrentFrame.mvpMapPoints);
+            }
         }
         Verbose::PrintMess("Matches with wider search: " + to_string(nmatches), Verbose::VERBOSITY_NORMAL);
 
     }
 
+    if(bUsedLightGlueMotion)
+        lgMotionPrePoseObs = nmatches;
+
     if(nmatches<20)
     {
         Verbose::PrintMess("Not enough matches!!", Verbose::VERBOSITY_NORMAL);
+        if(bUsedLightGlueMotion && ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+        {
+            std::cout << "[TrackMotion][LightGlue]"
+                      << " frame_id=" << lgMotionStats.frame_id
+                      << " last_frame_id=" << lgMotionStats.last_frame_id
+                      << " N_last=" << lgMotionStats.N_last
+                      << " N_cur=" << lgMotionStats.N_cur
+                      << " lg_raw_matches=" << lgMotionStats.lg_raw_matches
+                      << " mp_valid=" << lgMotionStats.mp_valid
+                      << " one_to_one=" << lgMotionStats.one_to_one
+                      << " proj_gate_keep=" << lgMotionStats.proj_gate_keep
+                      << " pre_pose_obs=" << lgMotionPrePoseObs
+                      << " post_pose_inliers=0"
+                      << " outlier_ratio=1.000000"
+                      << std::endl;
+        }
         if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
             return true;
         else
@@ -4312,12 +4474,37 @@ bool Tracking::TrackWithMotionModel()
         }
     }
 
-    if(IsXFeatDebugEnabled())
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
         std::cout << "[TrackMotion] after PoseOptimization "
                   << "assoc_cnt=" << assoc_cnt
                   << " inlier_cnt=" << inlier_cnt
                   << std::endl;
+    }
+
+    if(bUsedLightGlueMotion && ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+    {
+        const float outlierRatio = assoc_cnt > 0
+            ? static_cast<float>(assoc_cnt - inlier_cnt) / static_cast<float>(assoc_cnt)
+            : 0.0f;
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[TrackMotion][LightGlue]"
+                  << " frame_id=" << lgMotionStats.frame_id
+                  << " last_frame_id=" << lgMotionStats.last_frame_id
+                  << " N_last=" << lgMotionStats.N_last
+                  << " N_cur=" << lgMotionStats.N_cur
+                  << " lg_raw_matches=" << lgMotionStats.lg_raw_matches
+                  << " mp_valid=" << lgMotionStats.mp_valid
+                  << " one_to_one=" << lgMotionStats.one_to_one
+                  << " proj_gate_keep=" << lgMotionStats.proj_gate_keep
+                  << " pre_pose_obs=" << lgMotionPrePoseObs
+                  << " post_pose_inliers=" << inlier_cnt
+                  << " outlier_ratio=" << outlierRatio
+                  << std::endl;
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
     }
 
     // Discard outliers
@@ -4373,7 +4560,7 @@ bool Tracking::TrackLocalMap()
     {
         if (mCurrentFrame.mvpMapPoints[i]) assoc_before_opt++;
     }
-    if(IsXFeatDebugEnabled())
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
         std::cout << "[TrackLocalMap] before optimization assoc_before_opt="
                   << assoc_before_opt << std::endl;
@@ -4404,7 +4591,7 @@ bool Tracking::TrackLocalMap()
             }
         }
 
-        if(IsXFeatDebugEnabled())
+        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         {
             std::cout << "[TrackLocalMap] after optimization "
                       << "assoc_after_opt=" << assoc_after_opt
@@ -4476,10 +4663,13 @@ bool Tracking::TrackLocalMap()
     const int recentRelocInlierTh = bUseORB ? 50 : GetXFeatRecentRelocInlierThreshold();
     if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<recentRelocInlierTh)
     {
-        //调试: 失败摘要限流。`XFEAT_DEBUG=1` 时逐帧打印，默认每10帧最多1条。
+        //调试: 失败摘要限流。`XFEAT_DEBUG=1` 时由 XFEAT_DIAG_INTERVAL 控制频率，默认每10帧最多1条。
         static bool sTrackLocalFailLogInitialized = false;
         static long unsigned int sLastTrackLocalFailLogFrame = 0;
-        if(IsXFeatDebugEnabled() || !sTrackLocalFailLogInitialized || mCurrentFrame.mnId > sLastTrackLocalFailLogFrame + 10)
+        const bool debugLogDue = ShouldPrintXFeatDebug(mCurrentFrame.mnId);
+        const bool summaryLogDue = !IsXFeatDebugEnabled() &&
+            (!sTrackLocalFailLogInitialized || mCurrentFrame.mnId > sLastTrackLocalFailLogFrame + 10);
+        if(debugLogDue || summaryLogDue)
         {
             std::cout << "[TrackLocalMap] FAIL "
               << "frame=" << mCurrentFrame.mnId
@@ -4909,7 +5099,7 @@ void Tracking::SearchLocalPoints()
         }
 
         //调试: 局部点投影匹配摘要（用于区分视锥筛选与描述子匹配问题）。
-        if(IsXFeatDebugEnabled())
+        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         {
             std::cout << "[SearchLocalPoints] frame=" << mCurrentFrame.mnId
                       << " nToMatch=" << nToMatch
@@ -5129,7 +5319,7 @@ void Tracking::UpdateLocalKeyFrames()
 bool Tracking::Relocalization()
 {
     //调试: 重定位入口。
-    if(IsXFeatDebugEnabled())
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         std::cout << "[Reloc] ENTER frame=" << mCurrentFrame.mnId << std::endl;
     Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
     // [XFEAT_RELOC_20260414] ORB keeps BoW pipeline; XFeat avoids BoW dependency in relocalization.
@@ -5210,7 +5400,7 @@ bool Tracking::Relocalization()
     }
 
     //调试: 重定位候选摘要（避免逐候选刷屏）。
-    if(IsXFeatDebugEnabled())
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
         std::cout << "[Reloc] candidates_total=" << nKFs
                   << " candidates_with_pnp=" << nCandidates
@@ -5355,7 +5545,7 @@ bool Tracking::Relocalization()
 
     if(!bMatch)
     {
-        if(IsXFeatDebugEnabled())
+        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         {
             std::cout << "[Reloc] FAIL frame=" << mCurrentFrame.mnId
                       << " best_inliers=" << relocBestInliers
@@ -5367,7 +5557,7 @@ bool Tracking::Relocalization()
     }
     else
     {
-        if(IsXFeatDebugEnabled())
+        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         {
             std::cout << "[Reloc] SUCCESS frame=" << mCurrentFrame.mnId
                       << " best_inliers=" << relocBestInliers

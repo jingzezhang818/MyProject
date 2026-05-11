@@ -41,6 +41,41 @@ bool IsXFeatMatcherVerboseDebugEnabled()
     return enabled;
 }
 
+int GetXFeatDiagInterval()
+{
+    static const int interval = []() {
+        int value = 1;
+        const char* env = std::getenv("XFEAT_DIAG_INTERVAL");
+        if(env)
+        {
+            try
+            {
+                value = std::max(1, std::min(1000, std::stoi(std::string(env))));
+            }
+            catch(...)
+            {
+                value = 1;
+            }
+        }
+        return value;
+    }();
+    return interval;
+}
+
+bool ShouldPrintXFeatMatcherDebug(const long unsigned int frameId)
+{
+    if(!IsXFeatMatcherDebugEnabled())
+        return false;
+    return (frameId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0;
+}
+
+bool ShouldPrintXFeatMatcherVerboseDebug(const long unsigned int frameId)
+{
+    if(!IsXFeatMatcherVerboseDebugEnabled())
+        return false;
+    return (frameId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0;
+}
+
 bool UseXFeatDescriptorBank()
 {
     //调试: descriptor bank 默认关闭；设置 `XFEAT_USE_DESC_BANK=1` 手动启用。
@@ -706,7 +741,7 @@ int XFeatMatcher::SearchByNN(KeyFrame *pKF,
     const std::vector<MapPoint*> vpMapPointsKF = pKF->GetMapPointMatches();
     if(pKF->mDescriptors.empty() || F.mDescriptors.empty() || vpMapPointsKF.empty())
     {
-        if(IsXFeatMatcherDebugEnabled())
+        if(ShouldPrintXFeatMatcherDebug(F.mnId))
         {
             std::cout << "[XFeatMatcher::SearchByNN] frame=" << F.mnId
                       << " raw=" << rawMatches
@@ -725,7 +760,7 @@ int XFeatMatcher::SearchByNN(KeyFrame *pKF,
     const int usableRows = std::min(static_cast<int>(vpMapPointsKF.size()), descKF.rows);
     if(usableRows <= 0 || descF.rows <= 0)
     {
-        if(IsXFeatMatcherDebugEnabled())
+        if(ShouldPrintXFeatMatcherDebug(F.mnId))
         {
             std::cout << "[XFeatMatcher::SearchByNN] frame=" << F.mnId
                       << " raw=" << rawMatches
@@ -754,7 +789,7 @@ int XFeatMatcher::SearchByNN(KeyFrame *pKF,
 
     if(queryToMP.empty())
     {
-        if(IsXFeatMatcherDebugEnabled())
+        if(ShouldPrintXFeatMatcherDebug(F.mnId))
         {
             std::cout << "[XFeatMatcher::SearchByNN] frame=" << F.mnId
                       << " raw=" << rawMatches
@@ -864,7 +899,7 @@ int XFeatMatcher::SearchByNN(KeyFrame *pKF,
 
     oneToOneConflictRejectMatches = std::max(0, ratioMatches - finalMatches - spatialStats.dropped);
 
-    if(IsXFeatMatcherDebugEnabled())
+    if(ShouldPrintXFeatMatcherDebug(F.mnId))
     {
         std::cout << "[XFeatMatcher::SearchByNN] frame=" << F.mnId
                   << " q=" << queryCount
@@ -883,7 +918,7 @@ int XFeatMatcher::SearchByNN(KeyFrame *pKF,
                   << " spatial_grid=" << spatialStats.gridCols << "x" << spatialStats.gridRows
                   << std::endl;
 
-        if(IsXFeatMatcherVerboseDebugEnabled())
+        if(ShouldPrintXFeatMatcherVerboseDebug(F.mnId))
         {
             //调试: 详细拒绝原因，便于定位匹配数骤降发生在哪一步。
             std::cout << "[XFeatMatcher::SearchByNN][verbose] frame=" << F.mnId
@@ -923,7 +958,7 @@ int XFeatMatcher::SearchForInitialization(Frame &F1, Frame &F2,
 
     if(F1.mDescriptors.empty() || F2.mDescriptors.empty())
     {
-        if(IsXFeatMatcherDebugEnabled())
+        if(ShouldPrintXFeatMatcherDebug(F2.mnId))
         {
             std::cout << "[XFeatMatcher::SearchForInitialization] frame1=" << F1.mnId
                       << " frame2=" << F2.mnId
@@ -1087,7 +1122,7 @@ int XFeatMatcher::SearchForInitialization(Frame &F1, Frame &F2,
             vbPrevMatched[i1] = F2.mvKeysUn[idx2].pt;
     }
 
-    if(IsXFeatMatcherDebugEnabled())
+    if(ShouldPrintXFeatMatcherDebug(F2.mnId))
     {
         std::cout << "[XFeatMatcher::SearchForInitialization] frame1=" << F1.mnId
                   << " frame2=" << F2.mnId
@@ -1099,7 +1134,7 @@ int XFeatMatcher::SearchForInitialization(Frame &F1, Frame &F2,
                   << " nnratio=" << mfNNratio
                   << std::endl;
 
-        if(IsXFeatMatcherVerboseDebugEnabled())
+        if(ShouldPrintXFeatMatcherVerboseDebug(F2.mnId))
         {
             //调试: 初始化匹配位移统计，用于识别“高匹配但低有效基线”场景。
             std::vector<float> displacements;
@@ -1172,7 +1207,7 @@ int XFeatMatcher::SearchForTriangulation(KeyFrame *pKF1,
 
     if(!pKF1 || !pKF2 || pKF1->mDescriptors.empty() || pKF2->mDescriptors.empty())
     {
-        if(IsXFeatMatcherDebugEnabled())
+        if(ShouldPrintXFeatMatcherDebug(pKF1 ? pKF1->mnId : (pKF2 ? pKF2->mnId : 0UL)))
         {
             std::cout << "[XFeatMatcher::SearchForTriangulation] kf1="
                       << (pKF1 ? std::to_string(pKF1->mnId) : std::string("null"))
@@ -1272,7 +1307,7 @@ int XFeatMatcher::SearchForTriangulation(KeyFrame *pKF1,
 
     if(queryToIdx1.empty())
     {
-        if(IsXFeatMatcherDebugEnabled())
+        if(ShouldPrintXFeatMatcherDebug(pKF2->mnId))
         {
             std::cout << "[XFeatMatcher::SearchForTriangulation] kf1=" << pKF1->mnId
                       << " kf2=" << pKF2->mnId
@@ -1473,7 +1508,7 @@ int XFeatMatcher::SearchForTriangulation(KeyFrame *pKF1,
         ++finalMatches;
     }
 
-    if(IsXFeatMatcherDebugEnabled())
+    if(ShouldPrintXFeatMatcherDebug(pKF2->mnId))
     {
         std::cout << "[XFeatMatcher::SearchForTriangulation] kf1=" << pKF1->mnId
                   << " kf2=" << pKF2->mnId
@@ -1486,7 +1521,7 @@ int XFeatMatcher::SearchForTriangulation(KeyFrame *pKF1,
                   << " knn=" << kKnn
                   << std::endl;
 
-        if(IsXFeatMatcherVerboseDebugEnabled())
+        if(ShouldPrintXFeatMatcherVerboseDebug(pKF2->mnId))
         {
             //调试: 细分拒绝来源，判断是几何约束还是描述子过滤导致新增点不足。
             std::cout << "[XFeatMatcher::SearchForTriangulation][verbose] kf1=" << pKF1->mnId
@@ -1536,7 +1571,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
 
     if(F.mDescriptors.empty())
     {
-        if(IsXFeatMatcherDebugEnabled())
+        if(ShouldPrintXFeatMatcherDebug(F.mnId))
         {
             std::cout << "[XFeatMatcher::SearchByProjection(MapPoints)] frame=" << F.mnId
                       << " raw=" << rawMatches
@@ -1844,7 +1879,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
         }
     }
 
-    if(IsXFeatMatcherDebugEnabled())
+    if(ShouldPrintXFeatMatcherDebug(F.mnId))
     {
         //调试: `mutual` 这里表示一对一去重后的候选数量，不是双向BF互检。
         std::cout << "[XFeatMatcher::SearchByProjection(MapPoints)] frame=" << F.mnId
@@ -1865,7 +1900,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                   << " spatial_grid=" << spatialStats.gridCols << "x" << spatialStats.gridRows
                   << std::endl;
 
-        if(IsXFeatMatcherVerboseDebugEnabled())
+        if(ShouldPrintXFeatMatcherVerboseDebug(F.mnId))
         {
             //调试: 详细拒绝原因，便于区分视锥/搜索半径问题与描述子过滤问题。
             std::cout << "[XFeatMatcher::SearchByProjection(MapPoints)][verbose] frame=" << F.mnId
@@ -1916,7 +1951,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
 
     if(CurrentFrame.mDescriptors.empty())
     {
-        if(IsXFeatMatcherDebugEnabled())
+        if(ShouldPrintXFeatMatcherDebug(CurrentFrame.mnId))
         {
             std::cout << "[XFeatMatcher::SearchByProjection(LastFrame)] frame=" << CurrentFrame.mnId
                       << " raw=" << rawMatches
@@ -2251,7 +2286,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
         }
     }
 
-    if(IsXFeatMatcherDebugEnabled())
+    if(ShouldPrintXFeatMatcherDebug(CurrentFrame.mnId))
     {
         //调试: `mutual` 这里表示一对一去重后的候选数量，不是双向BF互检。
         std::cout << "[XFeatMatcher::SearchByProjection(LastFrame)] frame=" << CurrentFrame.mnId
@@ -2275,7 +2310,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
                   << " spatial_grid=" << spatialStats.gridCols << "x" << spatialStats.gridRows
                   << std::endl;
 
-        if(IsXFeatMatcherVerboseDebugEnabled())
+        if(ShouldPrintXFeatMatcherVerboseDebug(CurrentFrame.mnId))
         {
             //调试: 详细拒绝原因，便于定位是预测投影窗口不足还是描述子过滤过严。
             std::cout << "[XFeatMatcher::SearchByProjection(LastFrame)][verbose] frame=" << CurrentFrame.mnId

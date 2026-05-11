@@ -95,6 +95,7 @@ add_library(${PROJECT_NAME} SHARED
     src/XFeat.cc
     src/XFextractor.cc
     src/XFeatMatcher.cc
+    src/XFeatLighterGlueMatcher.cc
     src/XFeatLighterGlue/core.cpp
     src/XFeatLighterGlue/encoding.cpp
     src/XFeatLighterGlue/attention.cpp
@@ -134,6 +135,7 @@ add_library(${PROJECT_NAME} SHARED
     include/XFeat.h
     include/XFextractor.h
     include/XFeatMatcher.h
+    include/XFeatLighterGlueMatcher.h
     include/XFeatLighterGlue/core.hpp
     include/XFeatLighterGlue/encoding.hpp
     include/XFeatLighterGlue/attention.hpp
