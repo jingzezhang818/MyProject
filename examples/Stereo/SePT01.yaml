@@ -57,7 +57,7 @@ Stereo.ThDepth: 60.0
 # ORB/XFeat extractor parameters
 #--------------------------------------------------------------------------------------------
 
-ORBextractor.nFeatures: 1200
+ORBextractor.nFeatures: 1000
 ORBextractor.scaleFactor: 1.2
 ORBextractor.nLevels: 8
 ORBextractor.iniThFAST: 20

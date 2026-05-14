@@ -71,6 +71,7 @@ private:
     int embed_dim_{0};
     int heads_{0};
     float scale_{1.0f};
+    bool enable_flash_{false};
     torch::nn::Linear to_qk_{nullptr};
     torch::nn::Linear to_v_{nullptr};
     torch::nn::Linear to_out_{nullptr};

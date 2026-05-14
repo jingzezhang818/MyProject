@@ -90,11 +90,11 @@ bool RewriteModuleListKey(std::string& value, const std::string& module_prefix)
     return true;
 }
 
-int64_t ReadIndex(const torch::Tensor& flat_indices, int64_t local_index)
+int64_t ReadIndex(const int64_t* flat_indices, int64_t local_index)
 {
-    if(!flat_indices.defined() || flat_indices.numel() == 0)
+    if(!flat_indices)
         return local_index;
-    return flat_indices.index({local_index}).item<int64_t>();
+    return flat_indices[local_index];
 }
 
 } // namespace
@@ -173,16 +173,22 @@ std::vector<LGMatch> filter_matches(
     if(indices1.has_value())
         original1 = indices1.value().reshape({-1}).to(torch::kCPU).contiguous();
 
+    const int64_t* local0Ptr = local0.data_ptr<int64_t>();
+    const int64_t* local1Ptr = local1.data_ptr<int64_t>();
+    const float* scorePtr = match_scores.data_ptr<float>();
+    const int64_t* original0Ptr = original0.defined() ? original0.data_ptr<int64_t>() : nullptr;
+    const int64_t* original1Ptr = original1.defined() ? original1.data_ptr<int64_t>() : nullptr;
+
     std::vector<LGMatch> matches;
     matches.reserve(static_cast<size_t>(local0.numel()));
     for(int64_t i = 0; i < local0.numel(); ++i)
     {
-        const int64_t i0 = local0.index({i}).item<int64_t>();
-        const int64_t i1 = local1.index({i}).item<int64_t>();
+        const int64_t i0 = local0Ptr[i];
+        const int64_t i1 = local1Ptr[i];
         matches.push_back(LGMatch{
-            static_cast<int>(ReadIndex(original0, i0)),
-            static_cast<int>(ReadIndex(original1, i1)),
-            match_scores.index({i}).item<float>()});
+            static_cast<int>(ReadIndex(original0Ptr, i0)),
+            static_cast<int>(ReadIndex(original1Ptr, i1)),
+            scorePtr[i]});
     }
     return matches;
 }

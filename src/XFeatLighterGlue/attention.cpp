@@ -1,12 +1,49 @@
 #include "XFeatLighterGlue/attention.hpp"
 
+#include <ATen/ops/scaled_dot_product_attention.h>
+
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
 namespace ORB_SLAM3
 {
+namespace
+{
+
+torch::Tensor ScaledDotProductAttentionOrMatmul(const torch::Tensor& q,
+                                                const torch::Tensor& k,
+                                                const torch::Tensor& v,
+                                                const bool enableSdpa,
+                                                const double fallbackScale)
+{
+    if(enableSdpa)
+    {
+        try
+        {
+            return at::scaled_dot_product_attention(q,
+                                                    k,
+                                                    v,
+                                                    std::nullopt,
+                                                    0.0,
+                                                    false,
+                                                    std::nullopt,
+                                                    false);
+        }
+        catch(const c10::Error&)
+        {
+            // Fall through to the explicit matmul path when the runtime has no fused SDPA kernel.
+        }
+    }
+
+    auto sim = torch::matmul(q, k.transpose(-2, -1)) * fallbackScale;
+    auto attn = torch::softmax(sim, -1);
+    return torch::matmul(attn, v);
+}
+
+} // namespace
 
 TokenConfidence::TokenConfidence(int dim)
 {
@@ -28,9 +65,8 @@ std::tuple<torch::Tensor, torch::Tensor> TokenConfidence::forward(
 
 Attention::Attention(bool allow_flash)
 {
-    // First C++ version intentionally disables flash attention for correctness.
     (void)allow_flash;
-    enable_flash_ = false;
+    enable_flash_ = true;
 }
 
 torch::Tensor Attention::forward(const torch::Tensor& q,
@@ -44,11 +80,8 @@ torch::Tensor Attention::forward(const torch::Tensor& q,
         return torch::zeros(shape, q.options());
     }
 
-    (void)enable_flash_;
     const double scale = 1.0 / std::sqrt(static_cast<double>(q.size(-1)));
-    auto sim = torch::einsum("...id,...jd->...ij", {q, k}) * scale;
-    auto attn = torch::softmax(sim, -1);
-    return torch::einsum("...ij,...jd->...id", {attn, v});
+    return ScaledDotProductAttentionOrMatmul(q, k, v, enable_flash_, scale);
 }
 
 SelfBlock::SelfBlock(int embed_dim, int num_heads, bool flash, bool bias)
@@ -110,7 +143,8 @@ torch::Tensor SelfBlock::forward(const torch::Tensor& x,
 CrossBlock::CrossBlock(int embed_dim, int num_heads, bool flash, bool bias)
     : embed_dim_(embed_dim),
       heads_(num_heads),
-      scale_(1.0f / std::sqrt(static_cast<float>(embed_dim / num_heads)))
+      scale_(1.0f / std::sqrt(static_cast<float>(embed_dim / num_heads))),
+      enable_flash_(true)
 {
     (void)flash;
     if(embed_dim % num_heads != 0)
@@ -148,18 +182,27 @@ std::tuple<torch::Tensor, torch::Tensor> CrossBlock::forward(
     auto v0 = reshape_for_attention(to_v_->forward(x0));
     auto v1 = reshape_for_attention(to_v_->forward(x1));
 
-    qk0 = qk0 * std::sqrt(scale_);
-    qk1 = qk1 * std::sqrt(scale_);
+    if(enable_flash_ && !mask.has_value())
+    {
+        auto m0 = ScaledDotProductAttentionOrMatmul(qk0, qk1, v1, true, scale_);
+        auto m1 = ScaledDotProductAttentionOrMatmul(qk1, qk0, v0, true, scale_);
+        m0 = to_out_->forward(m0.transpose(1, 2).reshape({x0.size(0), x0.size(1), embed_dim_}));
+        m1 = to_out_->forward(m1.transpose(1, 2).reshape({x1.size(0), x1.size(1), embed_dim_}));
 
-    auto sim = torch::einsum("bhid,bhjd->bhij", {qk0, qk1});
+        auto out0 = x0 + ffn_->forward(torch::cat({x0, m0}, -1));
+        auto out1 = x1 + ffn_->forward(torch::cat({x1, m1}, -1));
+        return std::make_tuple(out0, out1);
+    }
+
+    auto sim = torch::matmul(qk0, qk1.transpose(-2, -1)) * scale_;
     if(mask.has_value())
         sim = sim.masked_fill(~mask.value(), -std::numeric_limits<float>::infinity());
 
     auto attn01 = torch::softmax(sim, -1);
     auto attn10 = torch::softmax(sim.transpose(-2, -1).contiguous(), -1);
 
-    auto m0 = torch::einsum("bhij,bhjd->bhid", {attn01, v1});
-    auto m1 = torch::einsum("bhji,bhid->bhjd", {attn10, v0});
+    auto m0 = torch::matmul(attn01, v1);
+    auto m1 = torch::matmul(attn10, v0);
 
     if(mask.has_value())
     {

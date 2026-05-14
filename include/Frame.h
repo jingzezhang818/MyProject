@@ -263,6 +263,8 @@ public:
     // MapPoints associated to keypoints, NULL pointer if no association.
     // Flag to identify outlier associations.
     std::vector<bool> mvbOutlier;
+    // XFeat diagnostics only: source tag for each current-frame MapPoint association.
+    std::vector<unsigned char> mvXFeatMatchSource;
     int mnCloseMPs;
 
     // Keypoints are assigned to cells in a grid to reduce matching complexity when projecting MapPoints.

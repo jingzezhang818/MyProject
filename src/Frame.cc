@@ -40,7 +40,7 @@ namespace ORB_SLAM3
 {
 namespace
 {
-    //调试: Frame 级调试开关，设置 `XFEAT_DEBUG=1` 启用。
+    //调试: Frame 级调试开关，跟随统一 XFeat 调试开关。
     bool IsXFeatFrameDebugEnabled()
     {
         static const bool enabled = []() {
@@ -218,7 +218,7 @@ Frame::Frame(const Frame &frame)
      mvKeysRight(frame.mvKeysRight), mvKeysUn(frame.mvKeysUn), mvuRight(frame.mvuRight),
      mvDepth(frame.mvDepth), mBowVec(frame.mBowVec), mFeatVec(frame.mFeatVec),
      mDescriptors(frame.mDescriptors.clone()), mDescriptorsRight(frame.mDescriptorsRight.clone()),
-     mvpMapPoints(frame.mvpMapPoints), mvbOutlier(frame.mvbOutlier), mImuCalib(frame.mImuCalib), mnCloseMPs(frame.mnCloseMPs),
+     mvpMapPoints(frame.mvpMapPoints), mvbOutlier(frame.mvbOutlier), mvXFeatMatchSource(frame.mvXFeatMatchSource), mImuCalib(frame.mImuCalib), mnCloseMPs(frame.mnCloseMPs),
      mpImuPreintegrated(frame.mpImuPreintegrated), mpImuPreintegratedFrame(frame.mpImuPreintegratedFrame), mImuBias(frame.mImuBias),
      mnId(frame.mnId), mpReferenceKF(frame.mpReferenceKF), mnScaleLevels(frame.mnScaleLevels),
      mfScaleFactor(frame.mfScaleFactor), mfLogScaleFactor(frame.mfLogScaleFactor),
@@ -307,6 +307,7 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvbOutlier = vector<bool>(N,false);
+    mvXFeatMatchSource = vector<unsigned char>(N, 0);
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
 
@@ -378,8 +379,6 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
 #ifdef REGISTER_TIMES
     std::chrono::steady_clock::time_point time_StartExtORB = std::chrono::steady_clock::now();
 #endif
-    // XFeat extraction is run sequentially to avoid sharing a mutable Torch
-    // module from two threads when both cameras reuse one extractor.
     {
         vector<int> vLapping = {0,0};
         monoLeft = (*extractorLeft)(imLeft,cv::Mat(),mvKeys,mDescriptors,vLapping);
@@ -412,6 +411,7 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvbOutlier = vector<bool>(N,false);
+    mvXFeatMatchSource = vector<unsigned char>(N, 0);
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
 
@@ -497,6 +497,7 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
     ComputeStereoFromRGBD(imDepth);
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
+    mvXFeatMatchSource = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
@@ -585,6 +586,7 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
     ComputeStereoFromRGBD(imDepth);
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
+    mvXFeatMatchSource = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
@@ -676,6 +678,7 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
     mnCloseMPs = 0;
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
+    mvXFeatMatchSource = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();// = map<long unsigned int, cv::Point2f>(N, static_cast<cv::Point2f>(NULL));
     mmMatchedInImage.clear();
@@ -782,6 +785,7 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, XFextractor* extrac
     mnCloseMPs = 0;
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
+    mvXFeatMatchSource = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();// = map<long unsigned int, cv::Point2f>(N, static_cast<cv::Point2f>(NULL));
     mmMatchedInImage.clear();
@@ -1314,6 +1318,15 @@ void Frame::ComputeStereoMatches()
         reverseBestDist.assign(Nr, std::numeric_limits<float>::infinity());
         reverseBestIdx.assign(Nr, -1);
     }
+    std::vector<float> xfeatBestDist;
+    std::vector<float> xfeatBestDist2;
+    std::vector<int> xfeatBestIdxR;
+    if(bFloatDescriptors)
+    {
+        xfeatBestDist.assign(N, std::numeric_limits<float>::infinity());
+        xfeatBestDist2.assign(N, std::numeric_limits<float>::infinity());
+        xfeatBestIdxR.assign(N, -1);
+    }
 
     for(int iR=0; iR<Nr; iR++)
     {
@@ -1338,6 +1351,8 @@ void Frame::ComputeStereoMatches()
     int nMutualReject = 0;
     int nDisparityReject = 0;
     int nAccepted = 0;
+    int nForwardCandidates = 0;
+    int nMedianReject = 0;
 
     // For each left keypoint search a match in the right image
     vector<pair<float, int> > vDistIdx;
@@ -1364,7 +1379,7 @@ void Frame::ComputeStereoMatches()
 
         float bestDist = std::numeric_limits<float>::infinity();
         float bestDist2 = std::numeric_limits<float>::infinity();
-        size_t bestIdxR = 0;
+        int bestIdxR = -1;
 
         const cv::Mat &dL = mDescriptors.row(iL);
 
@@ -1388,15 +1403,15 @@ void Frame::ComputeStereoMatches()
                 {
                     bestDist2 = bestDist;
                     bestDist  = dist;
-                    bestIdxR  = iR;
+                    bestIdxR  = static_cast<int>(iR);
                 }
                 else if(dist<bestDist2)
                 {
                     bestDist2 = dist;
                 }
 
-                // Track reverse best for mutual check
-                if(bStereoMutual && dist < reverseBestDist[iR])
+                // XFeat mutual check is evaluated after all left/right best matches are known.
+                if(bFloatDescriptors && bStereoMutual && dist < reverseBestDist[iR])
                 {
                     reverseBestDist[iR] = dist;
                     reverseBestIdx[iR] = iL;
@@ -1404,53 +1419,21 @@ void Frame::ComputeStereoMatches()
             }
         }
 
+        if(bFloatDescriptors)
+        {
+            if(bestIdxR >= 0 && std::isfinite(bestDist))
+            {
+                xfeatBestDist[iL] = bestDist;
+                xfeatBestDist2[iL] = bestDist2;
+                xfeatBestIdxR[iL] = bestIdxR;
+                ++nForwardCandidates;
+            }
+            continue;
+        }
+
         // Subpixel match by correlation
         if(bestDist<thDescDist)
         {
-            if(bFloatDescriptors)
-            {
-                // XFeat: raw keypoint disparity with stereo quality gates.
-                nDescPass++;
-
-                // Gate 1: ratio test
-                if(bUseStereoRatio && std::isfinite(bestDist2) && bestDist2 > 0.0f)
-                {
-                    if(bestDist >= stereoRatio * bestDist2)
-                    {
-                        nRatioReject++;
-                        continue;
-                    }
-                }
-
-                // Gate 2: mutual check (left→right must agree with right→left)
-                if(bStereoMutual)
-                {
-                    const int revBest = reverseBestIdx[bestIdxR];
-                    if(revBest < 0 || revBest != iL)
-                    {
-                        nMutualReject++;
-                        continue;
-                    }
-                }
-
-                // Gate 3: disparity range
-                const float uR0 = mvKeysRight[bestIdxR].pt.x;
-                float disparity = (uL - uR0);
-                if(disparity < minD || disparity >= maxD)
-                {
-                    nDisparityReject++;
-                    continue;
-                }
-
-                // Accepted
-                nAccepted++;
-                if(disparity<=0) disparity=0.01f;
-                mvDepth[iL]=mbf/disparity;
-                mvuRight[iL] = uL-disparity;
-                vDistIdx.push_back(pair<float,int>(bestDist,iL));
-                continue;
-            }
-
             // coordinates in image pyramid at keypoint scale
             const float uR0 = mvKeysRight[bestIdxR].pt.x;
             const float scaleFactor = mvInvScaleFactors[kpL.octave];
@@ -1519,8 +1502,79 @@ void Frame::ComputeStereoMatches()
         }
     }
 
+    if(bFloatDescriptors)
+    {
+        for(int iL=0; iL<N; ++iL)
+        {
+            const int bestIdxR = xfeatBestIdxR[iL];
+            if(bestIdxR < 0)
+                continue;
+
+            const float bestDist = xfeatBestDist[iL];
+            const float bestDist2 = xfeatBestDist2[iL];
+            if(bestDist >= thDescDist)
+                continue;
+
+            nDescPass++;
+
+            if(bUseStereoRatio && std::isfinite(bestDist2) && bestDist2 > 0.0f)
+            {
+                if(bestDist >= stereoRatio * bestDist2)
+                {
+                    nRatioReject++;
+                    continue;
+                }
+            }
+
+            if(bStereoMutual)
+            {
+                const int revBest = reverseBestIdx[static_cast<size_t>(bestIdxR)];
+                if(revBest < 0 || revBest != iL)
+                {
+                    nMutualReject++;
+                    continue;
+                }
+            }
+
+            const float uL = mvKeys[iL].pt.x;
+            const float uR0 = mvKeysRight[static_cast<size_t>(bestIdxR)].pt.x;
+            float disparity = (uL - uR0);
+            if(disparity < minD || disparity >= maxD)
+            {
+                nDisparityReject++;
+                continue;
+            }
+
+            nAccepted++;
+            if(disparity<=0) disparity=0.01f;
+            mvDepth[iL]=mbf/disparity;
+            mvuRight[iL] = uL-disparity;
+            vDistIdx.push_back(pair<float,int>(bestDist,iL));
+        }
+    }
+
     if(vDistIdx.empty())
+    {
+        if(ShouldPrintXFeatFrameDebug(mnId) && bFloatDescriptors)
+        {
+            std::cout << "[ComputeStereoMatches] frame=" << mnId
+                      << " N=" << N
+                      << " right_N=" << Nr
+                      << " forward_candidates=" << nForwardCandidates
+                      << " desc_pass=" << nDescPass
+                      << " ratio_reject=" << nRatioReject
+                      << " mutual_reject=" << nMutualReject
+                      << " disparity_reject=" << nDisparityReject
+                      << " accepted_before_median=" << nAccepted
+                      << " median_reject=0"
+                      << " accepted_after_median=0"
+                      << " depth_before_median=0"
+                      << " median_dist=-1"
+                      << " th_dist=-1"
+                      << std::endl;
+        }
         return;
+    }
 
     sort(vDistIdx.begin(),vDistIdx.end());
     const float median = vDistIdx[vDistIdx.size()/2].first;
@@ -1534,6 +1588,8 @@ void Frame::ComputeStereoMatches()
         {
             mvuRight[vDistIdx[i].second]=-1;
             mvDepth[vDistIdx[i].second]=-1;
+            if(bFloatDescriptors)
+                ++nMedianReject;
         }
     }
 
@@ -1542,11 +1598,15 @@ void Frame::ComputeStereoMatches()
         int nDepthBeforeMedian = static_cast<int>(vDistIdx.size());
         std::cout << "[ComputeStereoMatches] frame=" << mnId
                   << " N=" << N
+                  << " right_N=" << Nr
+                  << " forward_candidates=" << nForwardCandidates
                   << " desc_pass=" << nDescPass
                   << " ratio_reject=" << nRatioReject
                   << " mutual_reject=" << nMutualReject
                   << " disparity_reject=" << nDisparityReject
-                  << " accepted=" << nAccepted
+                  << " accepted_before_median=" << nAccepted
+                  << " median_reject=" << nMedianReject
+                  << " accepted_after_median=" << (nAccepted - nMedianReject)
                   << " depth_before_median=" << nDepthBeforeMedian
                   << " median_dist=" << median
                   << " th_dist=" << thDist
@@ -1688,6 +1748,7 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(nullptr));
     mvbOutlier = vector<bool>(N,false);
+    mvXFeatMatchSource = vector<unsigned char>(N, 0);
 
     AssignFeaturesToGrid();
 

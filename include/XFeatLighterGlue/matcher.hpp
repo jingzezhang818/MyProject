@@ -51,6 +51,12 @@ public:
         const torch::Tensor& desc1,
         const torch::Tensor& size1,
         float filterThreshold = 0.1f);
+    std::vector<LGMatch> MatchPrepared(
+        const torch::Tensor& normalizedKpts0,
+        const torch::Tensor& desc0,
+        const torch::Tensor& normalizedKpts1,
+        const torch::Tensor& desc1,
+        float filterThreshold = 0.1f);
 
     bool LoadWeights(const std::string& weight_path);
     void To(const torch::Device& device);

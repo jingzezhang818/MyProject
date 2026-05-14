@@ -56,6 +56,31 @@ void ValidateInputTensor(const torch::Tensor& tensor,
     }
 }
 
+void ValidatePreparedTensor(const torch::Tensor& tensor,
+                            const std::string& name,
+                            int64_t cols)
+{
+    if(!tensor.defined())
+        throw std::invalid_argument(name + " is undefined.");
+    if(tensor.dim() != 3 || tensor.size(0) != 1 || tensor.size(2) != cols)
+    {
+        throw std::invalid_argument(name + " must have shape [1, N, " + std::to_string(cols) + "].");
+    }
+}
+
+torch::Tensor ToFloatDeviceContiguous(const torch::Tensor& tensor,
+                                      const torch::Device& device)
+{
+    torch::Tensor out = tensor;
+    if(out.scalar_type() != torch::kFloat32)
+        out = out.to(torch::kFloat32);
+    if(out.device() != device)
+        out = out.to(device);
+    if(!out.is_contiguous())
+        out = out.contiguous();
+    return out;
+}
+
 int PruningThreshold(const torch::Device& device, bool flash)
 {
     if(flash)
@@ -565,7 +590,7 @@ torch::Tensor MatchAssignment::forward(const torch::Tensor& desc0,
     mdesc0 = mdesc0 * scale;
     mdesc1 = mdesc1 * scale;
 
-    auto sim = torch::einsum("bmd,bnd->bmn", {mdesc0, mdesc1});
+    auto sim = torch::matmul(mdesc0, mdesc1.transpose(-2, -1));
     auto z0 = matchability_->forward(desc0);
     auto z1 = matchability_->forward(desc1);
     return sigmoid_log_double_softmax(sim, z0, z1);
@@ -681,8 +706,7 @@ std::vector<LGMatch> XFeatLighterGlue::Match(
     const torch::Tensor& size1,
     float filterThreshold)
 {
-    torch::NoGradGuard no_grad;
-    eval();
+    c10::InferenceMode inference_guard(true);
 
     ValidateInputTensor(kpts0, "kpts0", 2);
     ValidateInputTensor(kpts1, "kpts1", 2);
@@ -700,15 +724,46 @@ std::vector<LGMatch> XFeatLighterGlue::Match(
     if(m == 0 || n == 0)
         return {};
 
-    auto k0 = kpts0.to(torch::kFloat32).to(device_).contiguous().unsqueeze(0);
-    auto k1 = kpts1.to(torch::kFloat32).to(device_).contiguous().unsqueeze(0);
-    auto d0 = desc0.to(torch::kFloat32).to(device_).contiguous().unsqueeze(0);
-    auto d1 = desc1.to(torch::kFloat32).to(device_).contiguous().unsqueeze(0);
-    auto s0 = size0.to(torch::kFloat32).to(device_).contiguous().view({2});
-    auto s1 = size1.to(torch::kFloat32).to(device_).contiguous().view({2});
+    auto k0 = ToFloatDeviceContiguous(kpts0, device_).unsqueeze(0);
+    auto k1 = ToFloatDeviceContiguous(kpts1, device_).unsqueeze(0);
+    auto d0 = ToFloatDeviceContiguous(desc0, device_).unsqueeze(0);
+    auto d1 = ToFloatDeviceContiguous(desc1, device_).unsqueeze(0);
+    auto s0 = ToFloatDeviceContiguous(size0, device_).view({2});
+    auto s1 = ToFloatDeviceContiguous(size1, device_).view({2});
 
     k0 = normalize_keypoints(k0, s0);
     k1 = normalize_keypoints(k1, s1);
+
+    return MatchPrepared(k0, d0, k1, d1, filterThreshold);
+}
+
+std::vector<LGMatch> XFeatLighterGlue::MatchPrepared(
+    const torch::Tensor& normalizedKpts0,
+    const torch::Tensor& desc0,
+    const torch::Tensor& normalizedKpts1,
+    const torch::Tensor& desc1,
+    float filterThreshold)
+{
+    c10::InferenceMode inference_guard(true);
+
+    ValidatePreparedTensor(normalizedKpts0, "normalizedKpts0", 2);
+    ValidatePreparedTensor(normalizedKpts1, "normalizedKpts1", 2);
+    ValidatePreparedTensor(desc0, "desc0", config_.input_dim);
+    ValidatePreparedTensor(desc1, "desc1", config_.input_dim);
+    if(normalizedKpts0.size(1) != desc0.size(1))
+        throw std::invalid_argument("normalizedKpts0 and desc0 must have the same point count.");
+    if(normalizedKpts1.size(1) != desc1.size(1))
+        throw std::invalid_argument("normalizedKpts1 and desc1 must have the same point count.");
+
+    const int64_t m = normalizedKpts0.size(1);
+    const int64_t n = normalizedKpts1.size(1);
+    if(m == 0 || n == 0)
+        return {};
+
+    auto k0 = ToFloatDeviceContiguous(normalizedKpts0, device_);
+    auto k1 = ToFloatDeviceContiguous(normalizedKpts1, device_);
+    auto d0 = ToFloatDeviceContiguous(desc0, device_);
+    auto d1 = ToFloatDeviceContiguous(desc1, device_);
 
     if(config_.add_scale_ori)
         throw std::runtime_error("XFeatLighterGlue currently supports add_scale_ori=false only.");

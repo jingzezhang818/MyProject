@@ -2,96 +2,327 @@
 
 ## 1. 命令模板（按数据集）
 
-### 1.1 EuRoC — V1_01
+### 1.1 通用约定
 
-#### 双目
+- 以下命令都从仓库根目录运行。
+- 示例程序会按最后一个参数自动保存 `f_<trajectory_name>.txt` 和 `kf_<trajectory_name>.txt`。
+- 转换后的 TUM 文件建议放到 `experiment_logs/<Monocular|Stereo>/<dataset>/<sequence>/`。
+- 如果输出目录不存在，先执行对应的 `mkdir -p ...`。
+- 单目轨迹评估使用 Sim3/尺度对齐：`-as`；双目轨迹评估使用 SE3 对齐：`-a`。
+- 单目默认使用较保守的 XFeat 配置；需要试 LightGlue 时，把 `XFEAT_USE_LIGHTGLUE_REF=1` 或 `XFEAT_USE_LIGHTGLUE_MOTION=1` 内联加到运行命令的环境变量里。
+
+### 1.2 EuRoC
+
+已生成的真值文件位于 `examples/GroundTruth/EuRoC/`：
+
+| 序列 | 数据集路径 | 单目时间戳 | 双目时间戳 | 真值 |
+|---|---|---|---|---|
+| `MH_01_easy` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_01_easy` | `examples/Monocular/EuRoC_TimeStamps/MH01.txt` | `examples/Stereo/EuRoC_TimeStamps/MH01.txt` | `examples/GroundTruth/EuRoC/MH_01_easy.tum` |
+| `MH_04_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_04_difficult` | `examples/Monocular/EuRoC_TimeStamps/MH04.txt` | `examples/Stereo/EuRoC_TimeStamps/MH04.txt` | `examples/GroundTruth/EuRoC/MH_04_difficult.tum` |
+| `V2_03_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_03_difficult` | `examples/Monocular/EuRoC_TimeStamps/V203.txt` | `examples/Stereo/EuRoC_TimeStamps/V203.txt` | `examples/GroundTruth/EuRoC/V2_03_difficult.tum` |
+
+#### MH_01_easy 单目
+
+运行命令：
 
 ```bash
-XFEAT_USE_LIGHTGLUE_MOTION=1 \
-XFEAT_LG_MOTION_USE_PROJ_GATE=0 \
-XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
-XFEAT_DEBUG=1 \
+mkdir -p experiment_logs/Monocular/EuRoC/MH_01_easy
+XFEAT_DEVICE=auto \
+XFEAT_CUDA_DEVICE=0 \
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_01_easy" \
+  examples/Monocular/EuRoC_TimeStamps/MH01.txt \
+  EuRoC_MH_01_easy_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/MH_01_easy/run_EuRoC_MH_01_easy_mono.log
+```
+
+格式转化命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --est-traj f_EuRoC_MH_01_easy_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_mono.tum \
+  --timestamp-unit ns
+```
+
+轨迹评估命令：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/MH_01_easy.tum experiment_logs/Monocular/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_mono.tum --ref=examples/GroundTruth/EuRoC/MH_01_easy.tum -as -p
+```
+
+#### MH_01_easy 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/MH_01_easy
+XFEAT_DEVICE=auto \
+XFEAT_CUDA_DEVICE=0 \
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+XFEAT_LG_MOTION_POLICY=projection_first \
+XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/EuRoC.yaml \
-  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_01_easy/mav0" \
-  examples/Stereo/V1_01_easy_TimeStamps/times.txt \
-  EuRoC_V101 \
-  2>&1 | tee run_EuRoC_V101.log
+  "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_01_easy/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/MH01.txt \
+  EuRoC_MH_01_easy_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/MH_01_easy/run_EuRoC_MH_01_easy_stereo.log
 ```
 
-- `stereo_euroc` 最后一个参数是输出基名，程序自动保存 `f_<基名>.txt` 和 `kf_<基名>.txt`
-- 代码依据：`examples/Stereo/stereo_euroc.cc:171-177`
-
-#### 转 TUM
+格式转化命令：
 
 ```bash
 python convert_euroc_to_tum.py \
-  --gt ground_truth_tum_V101.txt \
-  --est-traj f_EuRoC_V101.txt \
-  --out-est experiment_logs/Stereo/V101/CameraTrajectory_V101_tum_LG.txt \
-  --timestamp-unit ns \
-  --estimate-right-rot
+  --est-traj f_EuRoC_MH_01_easy_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_stereo.tum \
+  --timestamp-unit ns
 ```
 
-脚本结束自动打印 `evo_ape` / `evo_traj` 命令（`convert_euroc_to_tum.py:548-562`）。
-
-#### 轨迹评估
+轨迹评估命令：
 
 ```bash
-evo_ape tum ground_truth_tum_V101.txt experiment_logs/Stereo/V101/CameraTrajectory_V101_tum.txt -r trans_part -a -p
-evo_traj tum experiment_logs/Stereo/V101/CameraTrajectory_V101_tum.txt --ref=ground_truth_tum_V101.txt -a -p
+evo_ape tum examples/GroundTruth/EuRoC/MH_01_easy.tum experiment_logs/Stereo/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_stereo.tum --ref=examples/GroundTruth/EuRoC/MH_01_easy.tum -a -p
 ```
 
-### 1.2 SePT01
+#### MH_04_difficult 单目
 
-#### 双目
+运行命令：
 
 ```bash
+mkdir -p experiment_logs/Monocular/EuRoC/MH_04_difficult
+XFEAT_DEVICE=auto \
+XFEAT_CUDA_DEVICE=0 \
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
-XFEAT_DIAG_INTERVAL=20 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_04_difficult" \
+  examples/Monocular/EuRoC_TimeStamps/MH04.txt \
+  EuRoC_MH_04_difficult_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/MH_04_difficult/run_EuRoC_MH_04_difficult_mono.log
+```
+
+格式转化命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --est-traj f_EuRoC_MH_04_difficult_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_mono.tum \
+  --timestamp-unit ns
+```
+
+轨迹评估命令：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/MH_04_difficult.tum experiment_logs/Monocular/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_mono.tum --ref=examples/GroundTruth/EuRoC/MH_04_difficult.tum -as -p
+```
+
+#### MH_04_difficult 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/MH_04_difficult
+XFEAT_DEVICE=auto \
+XFEAT_CUDA_DEVICE=0 \
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+XFEAT_LG_MOTION_POLICY=projection_first \
+XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
-  examples/Stereo/SePT01.yaml \
-  /mnt/d/data_set/SePT01/mav0 \
-  examples/Stereo/SePT01_TimeStamps/times.txt \
-  SePT01 \
-  2>&1 | tee run_SePT01.log
+  examples/Stereo/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_04_difficult/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/MH04.txt \
+  EuRoC_MH_04_difficult_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/MH_04_difficult/run_EuRoC_MH_04_difficult_stereo.log
 ```
+
+格式转化命令：
 
 ```bash
 python convert_euroc_to_tum.py \
-  --gt ground_truth_tum_SePT01.txt \
-  --est-traj f_SePT01.txt \
-  --out-est experiment_logs/Stereo/SePT01/CameraTrajectory_SePT01_tum_LG.txt \
-  --timestamp-unit ns \
-  --estimate-right-rot
+  --est-traj f_EuRoC_MH_04_difficult_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_stereo.tum \
+  --timestamp-unit ns
 ```
+
+轨迹评估命令：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/MH_04_difficult.tum experiment_logs/Stereo/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_stereo.tum --ref=examples/GroundTruth/EuRoC/MH_04_difficult.tum -a -p
+```
+
+#### V2_03_difficult 单目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Monocular/EuRoC/V2_03_difficult
+XFEAT_DEVICE=auto \
+XFEAT_CUDA_DEVICE=0 \
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_03_difficult" \
+  examples/Monocular/EuRoC_TimeStamps/V203.txt \
+  EuRoC_V2_03_difficult_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/V2_03_difficult/run_EuRoC_V2_03_difficult_mono.log
+```
+
+格式转化命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --est-traj f_EuRoC_V2_03_difficult_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_mono.tum \
+  --timestamp-unit ns
+```
+
+轨迹评估命令：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V2_03_difficult.tum experiment_logs/Monocular/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_mono.tum --ref=examples/GroundTruth/EuRoC/V2_03_difficult.tum -as -p
+```
+
+#### V2_03_difficult 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/V2_03_difficult
+XFEAT_DEVICE=auto \
+XFEAT_CUDA_DEVICE=0 \
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+XFEAT_LG_MOTION_POLICY=projection_first \
+XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_03_difficult/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/V203.txt \
+  EuRoC_V2_03_difficult_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/V2_03_difficult/run_EuRoC_V2_03_difficult_stereo.log
+```
+
+格式转化命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --est-traj f_EuRoC_V2_03_difficult_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_stereo.tum \
+  --timestamp-unit ns
+```
+
+轨迹评估命令：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V2_03_difficult.tum experiment_logs/Stereo/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_stereo.tum --ref=examples/GroundTruth/EuRoC/V2_03_difficult.tum -a -p
+```
+
+### 1.3 SePT01
+
+已生成的真值文件位于 `examples/GroundTruth/SePT01/SePT01.tum`。
 
 #### 单目
 
+运行命令：
+
 ```bash
+mkdir -p experiment_logs/Monocular/SePT01/SePT01
+XFEAT_DEVICE=auto \
+XFEAT_CUDA_DEVICE=0 \
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 ./examples/Monocular/mono_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Monocular/SePT01_cam0.yaml \
   /mnt/d/data_set/SePT01 \
   examples/Monocular/SePT01_cam0.txt \
-  2>&1 | tee run_SePT01_mono.log
+  SePT01_mono \
+  2>&1 | tee experiment_logs/Monocular/SePT01/SePT01/run_SePT01_mono.log
 ```
 
-### 1.3 Moon_1
-
-#### 单目
+格式转化命令：
 
 ```bash
-./examples/Monocular/mono_euroc \
+python convert_euroc_to_tum.py \
+  --est-traj f_SePT01_mono.txt \
+  --out-est experiment_logs/Monocular/SePT01/SePT01/CameraTrajectory_SePT01_mono.tum \
+  --timestamp-unit ns
+```
+
+轨迹评估命令：
+
+```bash
+evo_ape tum examples/GroundTruth/SePT01/SePT01.tum experiment_logs/Monocular/SePT01/SePT01/CameraTrajectory_SePT01_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/SePT01/SePT01/CameraTrajectory_SePT01_mono.tum --ref=examples/GroundTruth/SePT01/SePT01.tum -as -p
+```
+
+#### 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/SePT/SePT01
+XFEAT_DEVICE=auto \
+XFEAT_CUDA_DEVICE=0 \
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+XFEAT_LG_MOTION_POLICY=projection_first \
+XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
+./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
-  examples/Monocular/Moon_1.yaml \
-  /mnt/d/data_set/Moon_1 \
-  examples/Monocular/Moon_1_times.txt \
-  2>&1 | tee run_Moon1.log
+  examples/Stereo/SePT01.yaml \
+  /mnt/d/data_set/SePT01/mav0 \
+  examples/Stereo/SePT01_TimeStamps/times.txt \
+  SePT01_stereo \
+  2>&1 | tee experiment_logs/Stereo/SePT/SePT01/run_SePT01_stereo.log
+```
+
+格式转化命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --est-traj f_SePT01_stereo.txt \
+  --out-est experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum \
+  --timestamp-unit ns
+```
+
+轨迹评估命令：
+
+```bash
+evo_ape tum examples/GroundTruth/SePT01/SePT01.tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum --ref=examples/GroundTruth/SePT01/SePT01.tum -a -p
 ```
 
 ## 2. 环境变量参考
@@ -190,6 +421,23 @@ python convert_euroc_to_tum.py \
 | `XFEAT_PROJ_LAST_BWD_MIN_OFFSET` | LastFrame 后退窗口最小偏移 | `-2` | `[-8,8]` | `:199-204` |
 | `XFEAT_PROJ_LAST_BWD_MAX_OFFSET` | LastFrame 后退窗口最大偏移 | `1` | `[-8,8]` | `:206-211` |
 | `XFEAT_TRIANG_KNN` | 三角化阶段每点 KNN 候选数 | `32` | `[2,128]` | `:281-298` |
+
+### 2.5 LightGlue 匹配
+
+| 变量 | 作用 | 默认 | 范围 | 代码依据 |
+|---|---|---|---|---|
+| `XFEAT_LIGHTGLUE_WEIGHT` | LightGlue C++ 权重路径 | `./weights/xfeat_lighterglue_matcher_cpp.pt` | — | `src/XFeatLighterGlueMatcher.cc:18-25` |
+| `XFEAT_LIGHTGLUE_CONF` | LightGlue 匹配最小置信度 | `0.1` | `[0,1]` | `src/Tracking.cc:4347,4736,5796` |
+| `XFEAT_USE_LIGHTGLUE_REF` | TrackReferenceKeyFrame 使用 LightGlue | 关 | — | `src/Tracking.cc:4342-4353` |
+| `XFEAT_USE_LIGHTGLUE_MOTION` | TrackWithMotionModel 使用 LightGlue | 关 | — | `src/Tracking.cc:4717-4745` |
+| `XFEAT_LG_MOTION_POLICY` | 运动模型 LightGlue 策略；`projection_first`/`proj_first` 先跑投影匹配再按阈值回退到 LightGlue | 默认直接 LightGlue | — | `src/Tracking.cc:1092-1103,4718-4733` |
+| `XFEAT_LG_MOTION_FALLBACK_MIN_MATCHES` | `projection_first` 下投影匹配少于该值时回退到 LightGlue | `20` | `[1,1000]` | `src/Tracking.cc:1105-1108,4728-4733` |
+| `XFEAT_LG_MOTION_USE_PROJ_GATE` | LightGlue motion 结果再经过投影半径门控 | 关 | — | `src/XFeatLighterGlueMatcher.cc:490-491` |
+| `XFEAT_USE_LIGHTGLUE_RELOC` | Relocalization 初始候选匹配使用 LightGlue，低匹配或异常回退 XFeatMatcher | 关 | — | `src/Tracking.cc` |
+| `XFEAT_LG_RELOC_FALLBACK_MIN_MATCHES` | Relocalization 中 LightGlue 少于该匹配数时回退 NN | `15` | `[1,1000]` | `src/Tracking.cc` |
+| `XFEAT_USE_LIGHTGLUE_TRIANG` | LocalMapping 新关键帧间三角化候选匹配使用 LightGlue，三角化几何验收不变 | 关 | — | `src/LocalMapping.cc` |
+| `XFEAT_USE_LIGHTGLUE_LOCALMAP` | LocalMap 匹配启用 LightGlue | 关 | — | `src/Tracking.cc:1072-1075` |
+| `XFEAT_LG_MATCH_DEBUG` | LightGlue core 匹配调试输出 | 关 | — | `src/XFeatLighterGlue/core.cpp:146` |
 
 ## 3. 备注
 

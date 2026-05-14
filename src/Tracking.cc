@@ -35,6 +35,7 @@
 
 #include <mutex>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
@@ -45,6 +46,7 @@
 #include <sstream>
 #include <iomanip>
 #include <functional>
+#include <unordered_set>
 
 
 using namespace std;
@@ -594,6 +596,505 @@ namespace
         return fallback;
     }
 
+    int GetEnvIntInRange(const char* key, const int fallback, const int minValue, const int maxValue)
+    {
+        const char* env = std::getenv(key);
+        if(!env)
+            return fallback;
+
+        try
+        {
+            const int v = std::stoi(std::string(env));
+            return std::max(minValue, std::min(maxValue, v));
+        }
+        catch(...)
+        {
+        }
+        return fallback;
+    }
+
+    struct DepthDistributionStats
+    {
+        int total = 0;
+        int valid = 0;
+        int invalid = 0;
+        int gt50 = 0;
+        int gt100 = 0;
+        int gt1000 = 0;
+        double sum = 0.0;
+        std::vector<float> samples;
+    };
+
+    void AccumulateDepthDistribution(DepthDistributionStats& stats, const float depth)
+    {
+        stats.total++;
+        if(!std::isfinite(depth) || depth <= 0.0f)
+        {
+            stats.invalid++;
+            return;
+        }
+
+        stats.valid++;
+        stats.sum += depth;
+        if(depth > 50.0f)
+            stats.gt50++;
+        if(depth > 100.0f)
+            stats.gt100++;
+        if(depth > 1000.0f)
+            stats.gt1000++;
+        stats.samples.push_back(depth);
+    }
+
+    float DepthPercentile(std::vector<float>& sortedSamples, const float percentile)
+    {
+        if(sortedSamples.empty())
+            return 0.0f;
+        std::sort(sortedSamples.begin(), sortedSamples.end());
+        const float clamped = std::max(0.0f, std::min(1.0f, percentile));
+        const size_t idx = static_cast<size_t>(std::round(clamped * static_cast<float>(sortedSamples.size() - 1)));
+        return sortedSamples[std::min(idx, sortedSamples.size() - 1)];
+    }
+
+    void AppendDepthDistributionStats(std::ostream& os,
+                                      const char* prefix,
+                                      const DepthDistributionStats& stats)
+    {
+        std::vector<float> sortedSamples = stats.samples;
+        const float minDepth = sortedSamples.empty() ? 0.0f : DepthPercentile(sortedSamples, 0.0f);
+        const float p50 = sortedSamples.empty() ? 0.0f : DepthPercentile(sortedSamples, 0.50f);
+        const float p90 = sortedSamples.empty() ? 0.0f : DepthPercentile(sortedSamples, 0.90f);
+        const float p99 = sortedSamples.empty() ? 0.0f : DepthPercentile(sortedSamples, 0.99f);
+        const float maxDepth = sortedSamples.empty() ? 0.0f : DepthPercentile(sortedSamples, 1.0f);
+        const double avg = stats.valid > 0 ? stats.sum / static_cast<double>(stats.valid) : 0.0;
+
+        os << " " << prefix << "_total=" << stats.total
+           << " " << prefix << "_valid=" << stats.valid
+           << " " << prefix << "_invalid=" << stats.invalid
+           << " " << prefix << "_avg=" << avg
+           << " " << prefix << "_min=" << minDepth
+           << " " << prefix << "_p50=" << p50
+           << " " << prefix << "_p90=" << p90
+           << " " << prefix << "_p99=" << p99
+           << " " << prefix << "_max=" << maxDepth
+           << " " << prefix << "_gt50=" << stats.gt50
+           << " " << prefix << "_gt100=" << stats.gt100
+           << " " << prefix << "_gt1000=" << stats.gt1000;
+    }
+
+    struct MapPointQualityStats
+    {
+        int total = 0;
+        int obs0 = 0;
+        int obs1 = 0;
+        int obs2 = 0;
+        int obs3plus = 0;
+        int lowObs = 0;
+        int foundLt025 = 0;
+        int foundLt050 = 0;
+        int foundLt075 = 0;
+        int depthValid = 0;
+        int closeDepth = 0;
+        int farDepth = 0;
+        int depthGt50 = 0;
+        int depthGt100 = 0;
+        int depthGt1000 = 0;
+        int ageValid = 0;
+        int ageLe2 = 0;
+        int ageLe5 = 0;
+        double sumObs = 0.0;
+        double sumFoundRatio = 0.0;
+        double sumDepth = 0.0;
+        double sumAge = 0.0;
+        std::vector<float> depthSamples;
+    };
+
+    void AccumulateMapPointQuality(MapPointQualityStats& stats,
+                                   MapPoint* pMP,
+                                   const long unsigned int frameId,
+                                   const float depth,
+                                   const float closeDepthThreshold)
+    {
+        if(!pMP)
+            return;
+
+        stats.total++;
+
+        const int obs = pMP->Observations();
+        stats.sumObs += obs;
+        if(obs <= 0)
+            stats.obs0++;
+        else if(obs == 1)
+            stats.obs1++;
+        else if(obs == 2)
+            stats.obs2++;
+        else
+            stats.obs3plus++;
+        if(obs <= 2)
+            stats.lowObs++;
+
+        const float foundRatio = pMP->GetFoundRatio();
+        if(std::isfinite(foundRatio))
+        {
+            stats.sumFoundRatio += foundRatio;
+            if(foundRatio < 0.25f)
+                stats.foundLt025++;
+            if(foundRatio < 0.50f)
+                stats.foundLt050++;
+            if(foundRatio < 0.75f)
+                stats.foundLt075++;
+        }
+
+        if(std::isfinite(depth) && depth > 0.0f)
+        {
+            stats.depthValid++;
+            stats.sumDepth += depth;
+            stats.depthSamples.push_back(depth);
+            if(depth < closeDepthThreshold)
+                stats.closeDepth++;
+            else
+                stats.farDepth++;
+            if(depth > 50.0f)
+                stats.depthGt50++;
+            if(depth > 100.0f)
+                stats.depthGt100++;
+            if(depth > 1000.0f)
+                stats.depthGt1000++;
+        }
+
+        if(pMP->mnFirstFrame >= 0 && frameId >= static_cast<long unsigned int>(pMP->mnFirstFrame))
+        {
+            const long unsigned int age = frameId - static_cast<long unsigned int>(pMP->mnFirstFrame);
+            stats.ageValid++;
+            stats.sumAge += static_cast<double>(age);
+            if(age <= 2)
+                stats.ageLe2++;
+            if(age <= 5)
+                stats.ageLe5++;
+        }
+    }
+
+    void AppendMapPointQualityStats(std::ostream& os,
+                                    const char* prefix,
+                                    const MapPointQualityStats& stats)
+    {
+        const double avgObs = stats.total > 0 ? stats.sumObs / stats.total : 0.0;
+        const double avgFound = stats.total > 0 ? stats.sumFoundRatio / stats.total : 0.0;
+        const double avgDepth = stats.depthValid > 0 ? stats.sumDepth / stats.depthValid : 0.0;
+        const double avgAge = stats.ageValid > 0 ? stats.sumAge / stats.ageValid : 0.0;
+        std::vector<float> sortedDepths = stats.depthSamples;
+        const float depthMin = sortedDepths.empty() ? 0.0f : DepthPercentile(sortedDepths, 0.0f);
+        const float depthP50 = sortedDepths.empty() ? 0.0f : DepthPercentile(sortedDepths, 0.50f);
+        const float depthP90 = sortedDepths.empty() ? 0.0f : DepthPercentile(sortedDepths, 0.90f);
+        const float depthP99 = sortedDepths.empty() ? 0.0f : DepthPercentile(sortedDepths, 0.99f);
+        const float depthMax = sortedDepths.empty() ? 0.0f : DepthPercentile(sortedDepths, 1.0f);
+
+        os << " " << prefix << "_total=" << stats.total
+           << " " << prefix << "_obs_avg=" << avgObs
+           << " " << prefix << "_obs0=" << stats.obs0
+           << " " << prefix << "_obs1=" << stats.obs1
+           << " " << prefix << "_obs2=" << stats.obs2
+           << " " << prefix << "_obs3p=" << stats.obs3plus
+           << " " << prefix << "_low_obs=" << stats.lowObs
+           << " " << prefix << "_found_avg=" << avgFound
+           << " " << prefix << "_found_lt_025=" << stats.foundLt025
+           << " " << prefix << "_found_lt_050=" << stats.foundLt050
+           << " " << prefix << "_found_lt_075=" << stats.foundLt075
+           << " " << prefix << "_depth_valid=" << stats.depthValid
+           << " " << prefix << "_depth_avg=" << avgDepth
+           << " " << prefix << "_depth_min=" << depthMin
+           << " " << prefix << "_depth_p50=" << depthP50
+           << " " << prefix << "_depth_p90=" << depthP90
+           << " " << prefix << "_depth_p99=" << depthP99
+           << " " << prefix << "_depth_max=" << depthMax
+           << " " << prefix << "_depth_gt50=" << stats.depthGt50
+           << " " << prefix << "_depth_gt100=" << stats.depthGt100
+           << " " << prefix << "_depth_gt1000=" << stats.depthGt1000
+           << " " << prefix << "_close=" << stats.closeDepth
+           << " " << prefix << "_far=" << stats.farDepth
+           << " " << prefix << "_age_avg=" << avgAge
+           << " " << prefix << "_age_le2=" << stats.ageLe2
+           << " " << prefix << "_age_le5=" << stats.ageLe5;
+    }
+
+    enum XFeatMatchSource : unsigned char
+    {
+        kXFeatMatchUnknown = 0,
+        kXFeatMatchMotionProjection = 1,
+        kXFeatMatchMotionLightGlue = 2,
+        kXFeatMatchReference = 3,
+        kXFeatMatchReferenceLightGlue = 4,
+        kXFeatMatchLocalProjection = 5,
+        kXFeatMatchLocalProjectionLightGlueVerified = 6,
+        kXFeatMatchRelocalization = 7
+    };
+
+    const char* XFeatMatchSourceName(const unsigned char source)
+    {
+        switch(source)
+        {
+            case kXFeatMatchMotionProjection: return "motion_proj";
+            case kXFeatMatchMotionLightGlue: return "motion_lg";
+            case kXFeatMatchReference: return "ref";
+            case kXFeatMatchReferenceLightGlue: return "ref_lg";
+            case kXFeatMatchLocalProjection: return "local_proj";
+            case kXFeatMatchLocalProjectionLightGlueVerified: return "local_proj_lg_verified";
+            case kXFeatMatchRelocalization: return "relocalization";
+            default: return "unknown";
+        }
+    }
+
+    void EnsureXFeatMatchSourceSize(Frame& F)
+    {
+        if(static_cast<int>(F.mvXFeatMatchSource.size()) != F.N)
+            F.mvXFeatMatchSource.assign(static_cast<size_t>(F.N), kXFeatMatchUnknown);
+    }
+
+    void ClearXFeatMatchSources(Frame& F)
+    {
+        F.mvXFeatMatchSource.assign(static_cast<size_t>(F.N), kXFeatMatchUnknown);
+    }
+
+    void MarkAssignedMatches(Frame& F, const unsigned char source)
+    {
+        EnsureXFeatMatchSourceSize(F);
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvXFeatMatchSource.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            if(F.mvpMapPoints[i])
+                F.mvXFeatMatchSource[i] = source;
+        }
+    }
+
+    int DepthBinIndex(const float depth)
+    {
+        if(!std::isfinite(depth) || depth <= 0.0f)
+            return 0;
+        if(depth < 5.0f)
+            return 1;
+        if(depth < 10.0f)
+            return 2;
+        if(depth < 30.0f)
+            return 3;
+        if(depth < 100.0f)
+            return 4;
+        return 5;
+    }
+
+    const char* DepthBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "0_5";
+            case 2: return "5_10";
+            case 3: return "10_30";
+            case 4: return "30_100";
+            case 5: return "100p";
+            default: return "invalid";
+        }
+    }
+
+    struct ReprojectionConstraintStats
+    {
+        int total = 0;
+        int inlier = 0;
+        int outlier = 0;
+        int errValid = 0;
+        int inlierErrValid = 0;
+        double errSum = 0.0;
+        double inlierErrSum = 0.0;
+        double depthSum = 0.0;
+        std::vector<float> errSamples;
+        std::vector<float> inlierErrSamples;
+        std::vector<float> depthSamples;
+    };
+
+    void AccumulateReprojectionConstraint(ReprojectionConstraintStats& stats,
+                                          const float reprojErr,
+                                          const float depth,
+                                          const bool isInlier)
+    {
+        stats.total++;
+        if(isInlier)
+            stats.inlier++;
+        else
+            stats.outlier++;
+
+        if(std::isfinite(reprojErr))
+        {
+            stats.errValid++;
+            stats.errSum += reprojErr;
+            stats.errSamples.push_back(reprojErr);
+            if(isInlier)
+            {
+                stats.inlierErrValid++;
+                stats.inlierErrSum += reprojErr;
+                stats.inlierErrSamples.push_back(reprojErr);
+            }
+        }
+
+        if(std::isfinite(depth) && depth > 0.0f)
+        {
+            stats.depthSum += depth;
+            stats.depthSamples.push_back(depth);
+        }
+    }
+
+    bool ComputeFrameReprojectionError(const Frame& F,
+                                       const int idx,
+                                       MapPoint* pMP,
+                                       float& reprojErr,
+                                       float& depth)
+    {
+        reprojErr = std::numeric_limits<float>::quiet_NaN();
+        depth = std::numeric_limits<float>::quiet_NaN();
+        if(!pMP || idx < 0 || idx >= static_cast<int>(F.mvKeysUn.size()) || !F.mpCamera)
+            return false;
+
+        const Eigen::Vector3f x3Dc = F.GetPose() * pMP->GetWorldPos();
+        depth = x3Dc(2);
+        if(!std::isfinite(depth) || depth <= 0.0f)
+            return false;
+
+        const Eigen::Vector2f uv = F.mpCamera->project(x3Dc);
+        const cv::Point2f& kp = F.mvKeysUn[static_cast<size_t>(idx)].pt;
+        const float dx = uv(0) - kp.x;
+        const float dy = uv(1) - kp.y;
+        reprojErr = std::sqrt(dx * dx + dy * dy);
+        return std::isfinite(reprojErr);
+    }
+
+    void AppendReprojectionConstraintStats(std::ostream& os,
+                                           const ReprojectionConstraintStats& stats)
+    {
+        std::vector<float> errSamples = stats.errSamples;
+        std::vector<float> inlierErrSamples = stats.inlierErrSamples;
+        std::vector<float> depthSamples = stats.depthSamples;
+        const double outlierRatio = stats.total > 0
+            ? static_cast<double>(stats.outlier) / static_cast<double>(stats.total)
+            : 0.0;
+        const double errAvg = stats.errValid > 0
+            ? stats.errSum / static_cast<double>(stats.errValid)
+            : 0.0;
+        const double inlierErrAvg = stats.inlierErrValid > 0
+            ? stats.inlierErrSum / static_cast<double>(stats.inlierErrValid)
+            : 0.0;
+        const double depthAvg = !depthSamples.empty()
+            ? stats.depthSum / static_cast<double>(depthSamples.size())
+            : 0.0;
+
+        os << " total=" << stats.total
+           << " inlier=" << stats.inlier
+           << " outlier=" << stats.outlier
+           << " outlier_ratio=" << outlierRatio
+           << " err_valid=" << stats.errValid
+           << " err_avg=" << errAvg
+           << " err_p50=" << (errSamples.empty() ? 0.0f : DepthPercentile(errSamples, 0.50f))
+           << " err_p90=" << (errSamples.empty() ? 0.0f : DepthPercentile(errSamples, 0.90f))
+           << " inlier_err_avg=" << inlierErrAvg
+           << " inlier_err_p50=" << (inlierErrSamples.empty() ? 0.0f : DepthPercentile(inlierErrSamples, 0.50f))
+           << " inlier_err_p90=" << (inlierErrSamples.empty() ? 0.0f : DepthPercentile(inlierErrSamples, 0.90f))
+           << " depth_avg=" << depthAvg
+           << " depth_p50=" << (depthSamples.empty() ? 0.0f : DepthPercentile(depthSamples, 0.50f));
+    }
+
+    void LogTrackLocalMapConstraintSourceDiagnostics(const Frame& F)
+    {
+        static constexpr int kNumSources = 8;
+        static constexpr int kNumDepthBins = 6;
+        ReprojectionConstraintStats bySource[kNumSources];
+        ReprojectionConstraintStats bySourceDepth[kNumSources][kNumDepthBins];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP)
+                continue;
+
+            unsigned char source = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                source = F.mvXFeatMatchSource[i];
+            if(source >= kNumSources)
+                source = kXFeatMatchUnknown;
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            const bool isInlier = !F.mvbOutlier[i];
+            AccumulateReprojectionConstraint(bySource[source], reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(bySourceDepth[source][DepthBinIndex(depth)], reprojErr, depth, isInlier);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int source = 0; source < kNumSources; ++source)
+        {
+            if(bySource[source].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][SourceError]"
+                      << " frame_id=" << F.mnId
+                      << " source=" << XFeatMatchSourceName(static_cast<unsigned char>(source));
+            AppendReprojectionConstraintStats(std::cout, bySource[source]);
+            std::cout << std::endl;
+        }
+
+        for(int source = 0; source < kNumSources; ++source)
+        {
+            for(int bin = 0; bin < kNumDepthBins; ++bin)
+            {
+                if(bySourceDepth[source][bin].total <= 0)
+                    continue;
+                std::cout << "[TrackLocalMap][SourceDepthError]"
+                          << " frame_id=" << F.mnId
+                          << " source=" << XFeatMatchSourceName(static_cast<unsigned char>(source))
+                          << " depth_bin=" << DepthBinName(bin);
+                AppendReprojectionConstraintStats(std::cout, bySourceDepth[source][bin]);
+                std::cout << std::endl;
+            }
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    bool IsXFeatLightGlueLocalMapEnabled()
+    {
+        return IsEnvFlagEnabled("XFEAT_USE_LIGHTGLUE_LOCALMAP");
+    }
+
+    int GetXFeatLightGlueLocalMapMaxKFs()
+    {
+        return 3;
+    }
+
+    float GetXFeatLightGlueLocalMapProjRadius()
+    {
+        return 12.0f;
+    }
+
+    float GetXFeatLightGlueLocalConflictMinScore()
+    {
+        return 0.20f;
+    }
+
+    bool UseXFeatLightGlueMotionProjectionFirst()
+    {
+        const char* env = std::getenv("XFEAT_LG_MOTION_POLICY");
+        if(!env || env[0] == '\0')
+            return false;
+
+        std::string policy(env);
+        std::transform(policy.begin(), policy.end(), policy.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return policy == "projection_first" || policy == "proj_first";
+    }
+
+    int GetXFeatLightGlueMotionFallbackMinMatches()
+    {
+        return GetEnvIntInRange("XFEAT_LG_MOTION_FALLBACK_MIN_MATCHES", 20, 1, 1000);
+    }
+
     float GetXFeatThHighRefNNStrict()
     {
         //调试: TrackReferenceKeyFrame 严格NN阈值（默认偏严格，优先精度）。
@@ -640,6 +1141,16 @@ namespace
     {
         //调试: 重定位细窗口投影补匹配阈值（窗口小，阈值应更严格）。
         return GetEnvFloatInRange("XFEAT_TH_HIGH_RELOC_PROJ_FINE", 1.60f, 0.05f, 2.0f);
+    }
+
+    bool IsXFeatLightGlueRelocEnabled()
+    {
+        return IsEnvFlagEnabled("XFEAT_USE_LIGHTGLUE_RELOC");
+    }
+
+    int GetXFeatLightGlueRelocFallbackMinMatches()
+    {
+        return GetEnvIntInRange("XFEAT_LG_RELOC_FALLBACK_MIN_MATCHES", 15, 1, 1000);
     }
 
     int GetXFeatRecentRelocInlierThreshold()
@@ -2716,25 +3227,6 @@ void Tracking::ResetFrameIMU()
 
 void Tracking::Track()
 {
-    //调试: 每帧总览（高频日志，默认关闭）。
-    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-    {
-        //调试: 避免 fixed/boolalpha 影响后续全局日志格式。
-        const std::ios::fmtflags oldFlags = std::cout.flags();
-        const std::streamsize oldPrecision = std::cout.precision();
-        std::cout << "\n[Track] ===== frame " << mCurrentFrame.mnId
-                  << " ts=" << std::fixed << std::setprecision(6) << mCurrentFrame.mTimeStamp
-                  << " state=" << mState
-                  << " lastState=" << mLastProcessedState
-                  << " mbVelocity=" << std::boolalpha << mbVelocity
-                  << " mnLastRelocFrameId=" << mnLastRelocFrameId
-                  << " mMaxFrames=" << mMaxFrames
-                  << std::noboolalpha
-                  << " =====" << std::endl;
-        std::cout.flags(oldFlags);
-        std::cout.precision(oldPrecision);
-    }
-
     if (bStepByStep)
     {
         std::cout << "Tracking: Waiting to the next step" << std::endl;
@@ -2897,52 +3389,21 @@ void Tracking::Track()
             //             bOK = TrackReferenceKeyFrame();
             //     }
 
-            //调试: 在 mState==OK 的主分支里打印“到底选了哪条跟踪路”。
             CheckReplacedInLastFrame();
 
             if((!mbVelocity && !pCurrentMap->isImuInitialized()) || mCurrentFrame.mnId<mnLastRelocFrameId+2)
             {
-                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                {
-                    std::cout << "[Track] branch=TrackReferenceKeyFrame"
-                              << " reason="
-                              << ((!mbVelocity && !pCurrentMap->isImuInitialized()) ? "no_velocity_no_imu" : "recent_reloc")
-                              << std::endl;
-                }
-
                 Verbose::PrintMess("TRACK: Track with respect to the reference KF ", Verbose::VERBOSITY_DEBUG);
                 bOK = TrackReferenceKeyFrame();
-
-                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                {
-                    std::cout << "[Track] TrackReferenceKeyFrame returned "
-                              << (bOK ? "true" : "false") << std::endl;
-                }
             }
             else
             {
-                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                    std::cout << "[Track] branch=TrackWithMotionModel" << std::endl;
-
                 Verbose::PrintMess("TRACK: Track with motion model", Verbose::VERBOSITY_DEBUG);
                 bOK = TrackWithMotionModel();
 
-                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                {
-                    std::cout << "[Track] TrackWithMotionModel returned "
-                              << (bOK ? "true" : "false") << std::endl;
-                }
-
                 if(!bOK)
                 {
-                    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                        std::cout << "[Track] fallback=TrackReferenceKeyFrame" << std::endl;
                     bOK = TrackReferenceKeyFrame();
-                    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                    {
-                        std::cout << "[Track] fallback TrackReferenceKeyFrame returned "
-                                  << (bOK ? "true" : "false") << std::endl;
-                    }
                 }
             } //end
 
@@ -2968,13 +3429,6 @@ void Tracking::Track()
                         {
                             mState = RECENTLY_LOST;
                             mTimeStampLost = mCurrentFrame.mTimeStamp;
-                            if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                            {
-                                std::cout << "[Track] degrade_to_RECENTLY_LOST "
-                                          << "reason=small_map_transient_failure"
-                                          << " kf_in_map=" << pCurrentMap->KeyFramesInMap()
-                                          << std::endl;
-                            }
                         }
                         else
                         {
@@ -2988,9 +3442,6 @@ void Tracking::Track()
 
                 if (mState == RECENTLY_LOST)
                 {
-                    //调试: 在 RECENTLY_LOST 和 LOST 分支入口加日志。
-                    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                        std::cout << "[Track] branch=RECENTLY_LOST" << std::endl;
                     Verbose::PrintMess("Lost for a short time", Verbose::VERBOSITY_NORMAL);
 
                     bOK = true;
@@ -3011,15 +3462,7 @@ void Tracking::Track()
                     else
                     {
                         // Relocalization
-                        //调试: RECENTLY_LOST 下的重定位入口日志。
-                        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                            std::cout << "[Track] RECENTLY_LOST path=Relocalization" << std::endl;
                         bOK = Relocalization();
-                        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                        {
-                            std::cout << "[Track] Relocalization returned "
-                                      << (bOK ? "true" : "false") << std::endl;
-                        }
                         //std::cout << "mCurrentFrame.mTimeStamp:" << to_string(mCurrentFrame.mTimeStamp) << std::endl;
                         //std::cout << "mTimeStampLost:" << to_string(mTimeStampLost) << std::endl;
                         if(mCurrentFrame.mTimeStamp-mTimeStampLost>3.0f && !bOK)
@@ -3032,8 +3475,6 @@ void Tracking::Track()
                 }
                 else if (mState == LOST)
                 {
-                    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                        std::cout << "[Track] branch=LOST" << std::endl;
                     Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
 
                     if (pCurrentMap->KeyFramesInMap()<10)
@@ -3155,16 +3596,7 @@ void Tracking::Track()
         {
             if(bOK)
             {
-                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                    std::cout << "[Track] call TrackLocalMap" << std::endl;
                 bOK = TrackLocalMap();
-                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-                {
-                    std::cout << "[Track] TrackLocalMap returned "
-                              << (bOK ? "true" : "false")
-                              << " mnMatchesInliers=" << mnMatchesInliers
-                              << std::endl;
-                }
             }
 
             if(!bOK)
@@ -3893,17 +4325,6 @@ bool Tracking::TrackReferenceKeyFrame()
     if(bUseORB)
         mCurrentFrame.ComputeBoW();
 
-    //调试: 参考关键帧匹配入口摘要。
-    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-    {
-        std::cout << "[TrackRefKF] frame=" << mCurrentFrame.mnId
-              << " N=" << mCurrentFrame.N
-              << " desc_rows=" << mCurrentFrame.mDescriptors.rows
-              << " bow_words=" << mCurrentFrame.mBowVec.size()
-              << " feat_nodes=" << mCurrentFrame.mFeatVec.size()
-              << std::endl;
-    }
-
     vector<MapPoint*> vpMapPointMatches;
 
 
@@ -3915,12 +4336,6 @@ bool Tracking::TrackReferenceKeyFrame()
     {
         ORBmatcher matcher(0.7, true);
         nmatches = matcher.SearchByBoW(mpReferenceKF, mCurrentFrame, vpMapPointMatches);
-        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-        {
-            std::cout << "[TrackRefKF] mode=BoW nmatches=" << nmatches
-                      << " refKF=" << mpReferenceKF->mnId
-                      << std::endl;
-        }
     }
     else
     {
@@ -3988,7 +4403,6 @@ bool Tracking::TrackReferenceKeyFrame()
             }
         };
 
-        //调试: 触发宽松补匹配的阈值。高于失败阈值，给临界帧留冗余。
         const int kRelaxedFuseTrigger = 28;
         const int kProjFuseTrigger = 20;
 
@@ -4011,14 +4425,6 @@ bool Tracking::TrackReferenceKeyFrame()
         vpMapPointMatches = vpStrictMatches;
         nmatches = CountAssignedMatches(vpMapPointMatches);
 
-        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-        {
-            std::cout << "[TrackRefKF] mode=NN(strict) nmatches=" << nmatchesStrict
-                      << " th_high=" << GetXFeatThHighRefNNStrict()
-                      << " refKF=" << mpReferenceKF->mnId
-                      << std::endl;
-        }
-
         // 2) relaxed NN补空位（仅在strict不足时触发）
         if(nmatches < kRelaxedFuseTrigger)
         {
@@ -4030,16 +4436,6 @@ bool Tracking::TrackReferenceKeyFrame()
                                                         GetXFeatThHighRefNNRelaxed());
             MergeMatchesFillEmpty(vpRelaxedMatches, vpMapPointMatches, relaxedAdded, relaxedConflict);
             nmatches = CountAssignedMatches(vpMapPointMatches);
-
-            if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-            {
-                std::cout << "[TrackRefKF] mode=NN(relaxed) nmatches=" << nmatchesRelaxed
-                          << " added=" << relaxedAdded
-                          << " conflict=" << relaxedConflict
-                          << " th_high=" << GetXFeatThHighRefNNRelaxed()
-                          << " refKF=" << mpReferenceKF->mnId
-                          << std::endl;
-            }
         }
 
         // 3) projection补空位（仍不足时触发）
@@ -4047,6 +4443,7 @@ bool Tracking::TrackReferenceKeyFrame()
         {
             mCurrentFrame.SetPose(mLastFrame.GetPose());
             mCurrentFrame.mvpMapPoints = std::vector<MapPoint*>(mCurrentFrame.N, static_cast<MapPoint*>(NULL));
+            ClearXFeatMatchSources(mCurrentFrame);
 
             const std::vector<MapPoint*> vpRefRaw = mpReferenceKF->GetMapPointMatches();
             std::vector<MapPoint*> vpRefUnique;
@@ -4075,28 +4472,6 @@ bool Tracking::TrackReferenceKeyFrame()
 
             MergeMatchesFillEmpty(mCurrentFrame.mvpMapPoints, vpMapPointMatches, projAdded, projConflict);
             nmatches = CountAssignedMatches(vpMapPointMatches);
-
-            if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-            {
-                std::cout << "[TrackRefKF] mode=ProjFallback nmatches=" << nmatchesProj
-                          << " added=" << projAdded
-                          << " conflict=" << projConflict
-                          << " th_high=" << GetXFeatThHighRefProjectionFallback()
-                          << " refKF=" << mpReferenceKF->mnId
-                          << " ref_unique_mp=" << refUniqueMP
-                          << std::endl;
-            }
-        }
-
-        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-        {
-            std::cout << "[TrackRefKF] fused_summary strict=" << nmatchesStrict
-                      << " relaxed=" << nmatchesRelaxed
-                      << " proj=" << nmatchesProj
-                      << " final=" << nmatches
-                      << " trig_relaxed=" << kRelaxedFuseTrigger
-                      << " trig_proj=" << kProjFuseTrigger
-                      << std::endl;
         }
         }
     }
@@ -4131,6 +4506,8 @@ bool Tracking::TrackReferenceKeyFrame()
     }
 
     mCurrentFrame.mvpMapPoints = vpMapPointMatches;
+    ClearXFeatMatchSources(mCurrentFrame);
+    MarkAssignedMatches(mCurrentFrame, bUsedLightGlueRef ? kXFeatMatchReferenceLightGlue : kXFeatMatchReference);
     mCurrentFrame.SetPose(mLastFrame.GetPose());
 
     //mCurrentFrame.PrintPointDistribution();
@@ -4138,7 +4515,6 @@ bool Tracking::TrackReferenceKeyFrame()
 
     // cout << " TrackReferenceKeyFrame mLastFrame.mTcw:  " << mLastFrame.mTcw << endl;
     Optimizer::PoseOptimization(&mCurrentFrame);
-    //调试: PoseOptimization 后的匹配统计。
     int assoc_cnt = 0, inlier_cnt = 0;
     for (int i = 0; i < mCurrentFrame.N; ++i)
     {
@@ -4147,14 +4523,6 @@ bool Tracking::TrackReferenceKeyFrame()
             assoc_cnt++;
             if (!mCurrentFrame.mvbOutlier[i]) inlier_cnt++;
         }
-    }
-
-    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-    {
-        std::cout << "[TrackRefKF] after PoseOptimization "
-                  << "assoc_cnt=" << assoc_cnt
-                  << " inlier_cnt=" << inlier_cnt
-                  << std::endl;
     }
 
     if(bUsedLightGlueRef && ShouldPrintXFeatDebug(mCurrentFrame.mnId))
@@ -4188,6 +4556,8 @@ bool Tracking::TrackReferenceKeyFrame()
 
                 mCurrentFrame.mvpMapPoints[i]=static_cast<MapPoint*>(NULL);
                 mCurrentFrame.mvbOutlier[i]=false;
+                EnsureXFeatMatchSourceSize(mCurrentFrame);
+                mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)] = kXFeatMatchUnknown;
                 if(i < mCurrentFrame.Nleft){
                     pMP->mbTrackInView = false;
                 }
@@ -4301,10 +4671,8 @@ bool Tracking::TrackWithMotionModel()
         mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
     }
 
-
-
-
     fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+    ClearXFeatMatchSources(mCurrentFrame);
 
     // Project points seen in previous frame
     int th;
@@ -4346,7 +4714,21 @@ bool Tracking::TrackWithMotionModel()
     }
     else
     {
-        if(IsEnvFlagEnabled("XFEAT_USE_LIGHTGLUE_MOTION"))
+        const bool bUseLightGlueMotion = IsEnvFlagEnabled("XFEAT_USE_LIGHTGLUE_MOTION");
+        const bool bProjectionFirstLightGlueMotion = bUseLightGlueMotion && UseXFeatLightGlueMotionProjectionFirst();
+        if(bProjectionFirstLightGlueMotion)
+        {
+            XFeatMatcher matcher(0.9f, false);
+            nmatches = matcher.SearchByProjection(mCurrentFrame,
+                                                  mLastFrame,
+                                                  th,
+                                                  mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR,
+                                                  GetXFeatThHighMotionProjection());
+        }
+
+        if(bUseLightGlueMotion &&
+           (!bProjectionFirstLightGlueMotion ||
+            nmatches < GetXFeatLightGlueMotionFallbackMinMatches()))
         {
             try
             {
@@ -4367,12 +4749,20 @@ bool Tracking::TrackWithMotionModel()
                           << e.what() << std::endl;
                 bUsedLightGlueMotion = false;
                 vpLightGlueMotionMatches.clear();
-                fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
-                nmatches = 0;
+                if(!bProjectionFirstLightGlueMotion)
+                {
+                    fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+                    ClearXFeatMatchSources(mCurrentFrame);
+                    nmatches = 0;
+                }
+                else
+                {
+                    nmatches = CountAssignedMatches(mCurrentFrame.mvpMapPoints);
+                }
             }
         }
 
-        if(!bUsedLightGlueMotion)
+        if(!bUsedLightGlueMotion && !bProjectionFirstLightGlueMotion)
         {
             XFeatMatcher matcher(0.9f, false);
             nmatches = matcher.SearchByProjection(mCurrentFrame,
@@ -4381,7 +4771,7 @@ bool Tracking::TrackWithMotionModel()
                                                   mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR,
                                                   GetXFeatThHighMotionProjection());
         }
-        else if(nmatches < 20)
+        else if(bUsedLightGlueMotion && nmatches < 20)
         {
             XFeatMatcher matcher(0.9f, false);
             matcher.SearchByProjection(mCurrentFrame,
@@ -4393,21 +4783,16 @@ bool Tracking::TrackWithMotionModel()
             nmatches = CountAssignedMatches(mCurrentFrame.mvpMapPoints);
         }
     }
-    //调试: 运动模型投影匹配摘要。
-    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-    {
-        std::cout << "[TrackMotion] proj_matches=" << nmatches
-              << " th_high=" << GetXFeatThHighMotionProjection()
-              << " frame=" << mCurrentFrame.mnId
-              << std::endl;
-    }
 
     // If few matches, uses a wider window search
     if(nmatches<20)
     {
         Verbose::PrintMess("Not enough matches, wider window search!!", Verbose::VERBOSITY_NORMAL);
         if(!bUsedLightGlueMotion)
+        {
             fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+            ClearXFeatMatchSources(mCurrentFrame);
+        }
 
         if(bUseORB)
         {
@@ -4435,6 +4820,26 @@ bool Tracking::TrackWithMotionModel()
 
     if(bUsedLightGlueMotion)
         lgMotionPrePoseObs = nmatches;
+
+    ClearXFeatMatchSources(mCurrentFrame);
+    if(bUsedLightGlueMotion)
+    {
+        EnsureXFeatMatchSourceSize(mCurrentFrame);
+        const size_t n = std::min(mCurrentFrame.mvpMapPoints.size(), mCurrentFrame.mvXFeatMatchSource.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            if(!mCurrentFrame.mvpMapPoints[i])
+                continue;
+            if(i < vpLightGlueMotionMatches.size() && vpLightGlueMotionMatches[i] == mCurrentFrame.mvpMapPoints[i])
+                mCurrentFrame.mvXFeatMatchSource[i] = kXFeatMatchMotionLightGlue;
+            else
+                mCurrentFrame.mvXFeatMatchSource[i] = kXFeatMatchMotionProjection;
+        }
+    }
+    else
+    {
+        MarkAssignedMatches(mCurrentFrame, kXFeatMatchMotionProjection);
+    }
 
     if(nmatches<20)
     {
@@ -4470,23 +4875,16 @@ bool Tracking::TrackWithMotionModel()
         if (mCurrentFrame.mvpMapPoints[i])
         {
             assoc_cnt++;
-            if (!mCurrentFrame.mvbOutlier[i]) inlier_cnt++;
+            if (!mCurrentFrame.mvbOutlier[i])
+                inlier_cnt++;
         }
     }
-
-    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-    {
-        std::cout << "[TrackMotion] after PoseOptimization "
-                  << "assoc_cnt=" << assoc_cnt
-                  << " inlier_cnt=" << inlier_cnt
-                  << std::endl;
-    }
+    const float outlierRatio = assoc_cnt > 0
+        ? static_cast<float>(assoc_cnt - inlier_cnt) / static_cast<float>(assoc_cnt)
+        : 0.0f;
 
     if(bUsedLightGlueMotion && ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
-        const float outlierRatio = assoc_cnt > 0
-            ? static_cast<float>(assoc_cnt - inlier_cnt) / static_cast<float>(assoc_cnt)
-            : 0.0f;
         const std::ios::fmtflags oldFlags = std::cout.flags();
         const std::streamsize oldPrecision = std::cout.precision();
         std::cout << std::fixed << std::setprecision(6)
@@ -4519,6 +4917,8 @@ bool Tracking::TrackWithMotionModel()
 
                 mCurrentFrame.mvpMapPoints[i]=static_cast<MapPoint*>(NULL);
                 mCurrentFrame.mvbOutlier[i]=false;
+                EnsureXFeatMatchSourceSize(mCurrentFrame);
+                mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)] = kXFeatMatchUnknown;
                 if(i < mCurrentFrame.Nleft){
                     pMP->mbTrackInView = false;
                 }
@@ -4553,17 +4953,34 @@ bool Tracking::TrackLocalMap()
     mTrackedFr++;
 
     UpdateLocalMap();
-    SearchLocalPoints();
-    //调试: 局部地图优化前匹配统计。
-    int assoc_before_opt = 0;
+    const size_t nLocalKFs = mvpLocalKeyFrames.size();
+    const size_t nLocalMPs = mvpLocalMapPoints.size();
+    int assoc_before_search = 0;
     for (int i = 0; i < mCurrentFrame.N; ++i)
     {
-        if (mCurrentFrame.mvpMapPoints[i]) assoc_before_opt++;
+        if (mCurrentFrame.mvpMapPoints[i])
+            assoc_before_search++;
     }
-    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+
+    SearchLocalPoints();
+    int assoc_before_opt = 0;
+    MapPointQualityStats mpQualityBeforeOpt;
+    for (int i = 0; i < mCurrentFrame.N; ++i)
     {
-        std::cout << "[TrackLocalMap] before optimization assoc_before_opt="
-                  << assoc_before_opt << std::endl;
+        if (mCurrentFrame.mvpMapPoints[i])
+        {
+            assoc_before_opt++;
+            float depth = -1.0f;
+            if(i >= 0 && i < static_cast<int>(mCurrentFrame.mvDepth.size()) && mCurrentFrame.mvDepth[i] > 0.0f)
+                depth = mCurrentFrame.mvDepth[i];
+            else
+                depth = mCurrentFrame.mvpMapPoints[i]->mTrackDepth;
+            AccumulateMapPointQuality(mpQualityBeforeOpt,
+                                      mCurrentFrame.mvpMapPoints[i],
+                                      mCurrentFrame.mnId,
+                                      depth,
+                                      mThDepth);
+        }
     }
 
     // TOO check outliers before PO
@@ -4580,25 +4997,6 @@ bool Tracking::TrackLocalMap()
     if (!mpAtlas->isImuInitialized())
     {
         Optimizer::PoseOptimization(&mCurrentFrame);
-        //调试: 局部地图优化后匹配统计。
-        int assoc_after_opt = 0, inlier_after_opt = 0;
-        for (int i = 0; i < mCurrentFrame.N; ++i)
-        {
-            if (mCurrentFrame.mvpMapPoints[i])
-            {
-                assoc_after_opt++;
-                if (!mCurrentFrame.mvbOutlier[i]) inlier_after_opt++;
-            }
-        }
-
-        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-        {
-            std::cout << "[TrackLocalMap] after optimization "
-                      << "assoc_after_opt=" << assoc_after_opt
-                      << " inlier_after_opt=" << inlier_after_opt
-                      << " mnMatchesInliers=" << mnMatchesInliers
-                      << std::endl;
-        }
     }
 
     else
@@ -4625,13 +5023,45 @@ bool Tracking::TrackLocalMap()
     }
 
     aux1 = 0, aux2 = 0;
+    MapPointQualityStats mpQualityInlierAfterOpt;
+    MapPointQualityStats mpQualityOutlierAfterOpt;
     for(int i=0; i<mCurrentFrame.N; i++)
         if( mCurrentFrame.mvpMapPoints[i])
         {
             aux1++;
+            float depth = -1.0f;
+            if(i >= 0 && i < static_cast<int>(mCurrentFrame.mvDepth.size()) && mCurrentFrame.mvDepth[i] > 0.0f)
+                depth = mCurrentFrame.mvDepth[i];
+            else
+                depth = mCurrentFrame.mvpMapPoints[i]->mTrackDepth;
+
             if(mCurrentFrame.mvbOutlier[i])
+            {
                 aux2++;
+                AccumulateMapPointQuality(mpQualityOutlierAfterOpt,
+                                          mCurrentFrame.mvpMapPoints[i],
+                                          mCurrentFrame.mnId,
+                                          depth,
+                                          mThDepth);
+            }
+            else
+            {
+                AccumulateMapPointQuality(mpQualityInlierAfterOpt,
+                                          mCurrentFrame.mvpMapPoints[i],
+                                          mCurrentFrame.mnId,
+                                          depth,
+                                          mThDepth);
+            }
         }
+    const int assoc_after_opt = aux1;
+    const int outlier_after_opt = aux2;
+    const int inlier_after_opt = assoc_after_opt - outlier_after_opt;
+    const float outlier_ratio_after_opt = assoc_after_opt > 0
+        ? static_cast<float>(outlier_after_opt) / static_cast<float>(assoc_after_opt)
+        : 0.0f;
+
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+        LogTrackLocalMapConstraintSourceDiagnostics(mCurrentFrame);
 
     mnMatchesInliers = 0;
 
@@ -4652,8 +5082,18 @@ bool Tracking::TrackLocalMap()
                     mnMatchesInliers++;
             }
             else if(mSensor==System::STEREO)
+            {
                 mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
+                EnsureXFeatMatchSourceSize(mCurrentFrame);
+                mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)] = kXFeatMatchUnknown;
+            }
         }
+    }
+    int assoc_after_discard = 0;
+    for(int i=0; i<mCurrentFrame.N; i++)
+    {
+        if(mCurrentFrame.mvpMapPoints[i])
+            assoc_after_discard++;
     }
 
     // Decide if the tracking was succesful
@@ -4661,7 +5101,50 @@ bool Tracking::TrackLocalMap()
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
     const bool bUseORB = (std::getenv("USE_ORB") != nullptr);
     const int recentRelocInlierTh = bUseORB ? 50 : GetXFeatRecentRelocInlierThreshold();
-    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<recentRelocInlierTh)
+    const bool bRecentRelocWindow = mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames;
+    auto LogTrackLocalMapSummary = [&](const bool bReturnValue, const int successThreshold, const char* decision)
+    {
+        if(!ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+            return;
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[TrackLocalMap][Diag]"
+                  << " frame_id=" << mCurrentFrame.mnId
+                  << " state=" << static_cast<int>(mState)
+                  << " mode=" << (bUseORB ? "ORB" : "XFeat")
+                  << " local_kfs=" << nLocalKFs
+                  << " local_mps=" << nLocalMPs
+                  << " assoc_before_search=" << assoc_before_search
+                  << " assoc_before_opt=" << assoc_before_opt
+                  << " assoc_added_by_local=" << (assoc_before_opt - assoc_before_search)
+                  << " assoc_after_opt=" << assoc_after_opt
+                  << " inlier_after_opt=" << inlier_after_opt
+                  << " outlier_after_opt=" << outlier_after_opt
+                  << " outlier_ratio_after_opt=" << outlier_ratio_after_opt
+                  << " assoc_after_discard=" << assoc_after_discard
+                  << " mnMatchesInliers=" << mnMatchesInliers
+                  << " success_threshold=" << successThreshold
+                  << " recent_reloc_window=" << (bRecentRelocWindow ? 1 : 0)
+                  << " mbOnlyTracking=" << (mbOnlyTracking ? 1 : 0)
+                  << " mbMapUpdated=" << (mbMapUpdated ? 1 : 0)
+                  << " return=" << (bReturnValue ? 1 : 0)
+                  << " decision=" << decision
+                  << std::endl;
+
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[TrackLocalMap][MPQuality]"
+                  << " frame_id=" << mCurrentFrame.mnId
+                  << " mThDepth=" << mThDepth;
+        AppendMapPointQualityStats(std::cout, "before", mpQualityBeforeOpt);
+        AppendMapPointQualityStats(std::cout, "inlier", mpQualityInlierAfterOpt);
+        AppendMapPointQualityStats(std::cout, "outlier", mpQualityOutlierAfterOpt);
+        std::cout << std::endl;
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    };
+    if(bRecentRelocWindow && mnMatchesInliers<recentRelocInlierTh)
     {
         //调试: 失败摘要限流。`XFEAT_DEBUG=1` 时由 XFEAT_DIAG_INTERVAL 控制频率，默认每10帧最多1条。
         static bool sTrackLocalFailLogInitialized = false;
@@ -4680,38 +5163,57 @@ bool Tracking::TrackLocalMap()
             sLastTrackLocalFailLogFrame = mCurrentFrame.mnId;
             sTrackLocalFailLogInitialized = true;
         }
+        LogTrackLocalMapSummary(false, recentRelocInlierTh, "fail_recent_reloc");
         return false;
     }
 
 
     if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
+    {
+        LogTrackLocalMapSummary(true, 10, "recently_lost_recovered");
         return true;
+    }
 
 
     if (mSensor == System::IMU_MONOCULAR)
     {
-        if((mnMatchesInliers<15 && mpAtlas->isImuInitialized())||(mnMatchesInliers<50 && !mpAtlas->isImuInitialized()))
+        const int successThreshold = mpAtlas->isImuInitialized() ? 15 : 50;
+        if(mnMatchesInliers<successThreshold)
         {
+            LogTrackLocalMapSummary(false, successThreshold, "fail_imu_mono");
             return false;
         }
         else
+        {
+            LogTrackLocalMapSummary(true, successThreshold, "ok_imu_mono");
             return true;
+        }
     }
     else if (mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
     {
         if(mnMatchesInliers<15)
         {
+            LogTrackLocalMapSummary(false, 15, "fail_imu_stereo_rgbd");
             return false;
         }
         else
+        {
+            LogTrackLocalMapSummary(true, 15, "ok_imu_stereo_rgbd");
             return true;
+        }
     }
     else
     {
         if(mnMatchesInliers<30)
+        {
+            LogTrackLocalMapSummary(false, 30, "fail_visual");
             return false;
+        }
         else
+        {
+            LogTrackLocalMapSummary(true, 30, "ok_visual");
             return true;
+        }
     }
 }
 
@@ -4852,9 +5354,13 @@ bool Tracking::NeedNewKeyFrame()
             if(mSensor!=System::MONOCULAR  && mSensor!=System::IMU_MONOCULAR)
             {
                 if(mpLocalMapper->KeyframesInQueue()<3)
+                {
                     return true;
+                }
                 else
+                {
                     return false;
+                }
             }
             else
             {
@@ -4864,7 +5370,9 @@ bool Tracking::NeedNewKeyFrame()
         }
     }
     else
+    {
         return false;
+    }
 }
 
 void Tracking::CreateNewKeyFrame()
@@ -4910,11 +5418,13 @@ void Tracking::CreateNewKeyFrame()
             maxPoint = 100;
 
         vector<pair<float,int> > vDepthIdx;
+        DepthDistributionStats createKFFrameDepthStats;
         int N = (mCurrentFrame.Nleft != -1) ? mCurrentFrame.Nleft : mCurrentFrame.N;
         vDepthIdx.reserve(mCurrentFrame.N);
         for(int i=0; i<N; i++)
         {
             float z = mCurrentFrame.mvDepth[i];
+            AccumulateDepthDistribution(createKFFrameDepthStats, z);
             if(z>0)
             {
                 vDepthIdx.push_back(make_pair(z,i));
@@ -4926,9 +5436,15 @@ void Tracking::CreateNewKeyFrame()
             sort(vDepthIdx.begin(),vDepthIdx.end());
 
             int nPoints = 0;
+            int nCreatedPoints = 0;
+            int nReusedPoints = 0;
+            DepthDistributionStats createKFSelectedDepthStats;
+            DepthDistributionStats createKFUsedDepthStats;
+            DepthDistributionStats createKFCreatedDepthStats;
             for(size_t j=0; j<vDepthIdx.size();j++)
             {
                 int i = vDepthIdx[j].second;
+                AccumulateDepthDistribution(createKFSelectedDepthStats, vDepthIdx[j].first);
 
                 bool bCreateNew = false;
 
@@ -4943,6 +5459,7 @@ void Tracking::CreateNewKeyFrame()
 
                 if(bCreateNew)
                 {
+                    AccumulateDepthDistribution(createKFCreatedDepthStats, vDepthIdx[j].first);
                     Eigen::Vector3f x3D;
 
                     if(mCurrentFrame.Nleft == -1){
@@ -4970,10 +5487,13 @@ void Tracking::CreateNewKeyFrame()
 
                     mCurrentFrame.mvpMapPoints[i]=pNewMP;
                     nPoints++;
+                    nCreatedPoints++;
                 }
                 else
                 {
+                    AccumulateDepthDistribution(createKFUsedDepthStats, vDepthIdx[j].first);
                     nPoints++;
+                    nReusedPoints++;
                 }
 
                 if(vDepthIdx[j].first>mThDepth && nPoints>maxPoint)
@@ -4981,7 +5501,48 @@ void Tracking::CreateNewKeyFrame()
                     break;
                 }
             }
+            if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+            {
+                const std::ios::fmtflags oldFlags = std::cout.flags();
+                const std::streamsize oldPrecision = std::cout.precision();
+                std::cout << std::fixed << std::setprecision(6)
+                          << "[DepthDiag][CreateKF]"
+                          << " frame_id=" << mCurrentFrame.mnId
+                          << " kf_id=" << pKF->mnId
+                          << " mThDepth=" << mThDepth
+                          << " maxPoint=" << maxPoint
+                          << " depth_candidates=" << vDepthIdx.size()
+                          << " used_or_created=" << nPoints
+                          << " created=" << nCreatedPoints
+                          << " reused=" << nReusedPoints;
+                AppendDepthDistributionStats(std::cout, "frame", createKFFrameDepthStats);
+                AppendDepthDistributionStats(std::cout, "selected_depth", createKFSelectedDepthStats);
+                AppendDepthDistributionStats(std::cout, "reused_depth", createKFUsedDepthStats);
+                AppendDepthDistributionStats(std::cout, "created_depth", createKFCreatedDepthStats);
+                std::cout << std::endl;
+                std::cout.flags(oldFlags);
+                std::cout.precision(oldPrecision);
+            }
             //Verbose::PrintMess("new mps for stereo KF: " + to_string(nPoints), Verbose::VERBOSITY_NORMAL);
+        }
+        else if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+        {
+            const std::ios::fmtflags oldFlags = std::cout.flags();
+            const std::streamsize oldPrecision = std::cout.precision();
+            std::cout << std::fixed << std::setprecision(6)
+                      << "[DepthDiag][CreateKF]"
+                      << " frame_id=" << mCurrentFrame.mnId
+                      << " kf_id=" << pKF->mnId
+                      << " mThDepth=" << mThDepth
+                      << " maxPoint=" << maxPoint
+                      << " depth_candidates=0"
+                      << " used_or_created=0"
+                      << " created=0"
+                      << " reused=0";
+            AppendDepthDistributionStats(std::cout, "frame", createKFFrameDepthStats);
+            std::cout << std::endl;
+            std::cout.flags(oldFlags);
+            std::cout.precision(oldPrecision);
         }
     }
 
@@ -4996,8 +5557,13 @@ void Tracking::CreateNewKeyFrame()
 
 void Tracking::SearchLocalPoints()
 {
+    EnsureXFeatMatchSourceSize(mCurrentFrame);
+    int nAlreadyMatched = 0;
+    int nBadAlreadyMatched = 0;
+    MapPointQualityStats mpQualityAlreadyMatched;
     // Do not search map points already matched
-    for(vector<MapPoint*>::iterator vit=mCurrentFrame.mvpMapPoints.begin(), vend=mCurrentFrame.mvpMapPoints.end(); vit!=vend; vit++)
+    int alreadyIdx = 0;
+    for(vector<MapPoint*>::iterator vit=mCurrentFrame.mvpMapPoints.begin(), vend=mCurrentFrame.mvpMapPoints.end(); vit!=vend; vit++, alreadyIdx++)
     {
         MapPoint* pMP = *vit;
         if(pMP)
@@ -5005,9 +5571,18 @@ void Tracking::SearchLocalPoints()
             if(pMP->isBad())
             {
                 *vit = static_cast<MapPoint*>(NULL);
+                if(alreadyIdx >= 0 && alreadyIdx < static_cast<int>(mCurrentFrame.mvXFeatMatchSource.size()))
+                    mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(alreadyIdx)] = kXFeatMatchUnknown;
+                nBadAlreadyMatched++;
             }
             else
             {
+                nAlreadyMatched++;
+                AccumulateMapPointQuality(mpQualityAlreadyMatched,
+                                          pMP,
+                                          mCurrentFrame.mnId,
+                                          pMP->mTrackDepth,
+                                          mThDepth);
                 pMP->IncreaseVisible();
                 pMP->mnLastFrameSeen = mCurrentFrame.mnId;
                 pMP->mbTrackInView = false;
@@ -5017,6 +5592,58 @@ void Tracking::SearchLocalPoints()
     }
 
     int nToMatch=0;
+    int nLocalAlreadySeen = 0;
+    int nLocalBad = 0;
+    int nLocalFoundRatioRejected = 0;
+    int nLocalInFrustum = 0;
+    int nLocalTrackInView = 0;
+    MapPointQualityStats mpQualityLocalAlreadySeen;
+    MapPointQualityStats mpQualityFoundRatioRejected;
+    MapPointQualityStats mpQualityLocalInFrustum;
+    MapPointQualityStats mpQualityLocalTrackInView;
+    const bool bUseORB = (std::getenv("USE_ORB") != nullptr);
+    const bool bUseLocalFoundRatioGate = false;
+    const float localMinFoundRatio = 0.0f;
+    const bool bUseLightGlueLocalMap = !bUseORB && IsXFeatLightGlueLocalMapEnabled();
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+    {
+        DepthDistributionStats frameDepthStats;
+        for(float depth : mCurrentFrame.mvDepth)
+            AccumulateDepthDistribution(frameDepthStats, depth);
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[DepthDiag][Frame]"
+                  << " frame_id=" << mCurrentFrame.mnId
+                  << " N=" << mCurrentFrame.N
+                  << " Nleft=" << mCurrentFrame.Nleft
+                  << " mThDepth=" << mThDepth;
+        AppendDepthDistributionStats(std::cout, "mvDepth", frameDepthStats);
+        std::cout << std::endl;
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    std::unordered_set<long unsigned int> localProjectedMapPointIds;
+    if(bUseLightGlueLocalMap)
+        localProjectedMapPointIds.reserve(mvpLocalMapPoints.size());
+
+    int lgLocalKFsUsed = 0;
+    int lgLocalRawMatches = 0;
+    int lgLocalMpValid = 0;
+    int lgLocalOneToOne = 0;
+    int lgLocalFilled = 0;
+    int lgLocalOccupied = 0;
+    int lgLocalDuplicateMP = 0;
+    int lgLocalNotProjected = 0;
+    int lgLocalProjReject = 0;
+    int lgLocalVerifyCandidates = 0;
+    int lgLocalVerified = 0;
+    int lgLocalRejected = 0;
+    int lgLocalMismatch = 0;
+    int lgLocalConflictLowScore = 0;
+    bool bLightGlueLocalFailed = false;
 
     // Project points in frame and check its visibility
     for(vector<MapPoint*>::iterator vit=mvpLocalMapPoints.begin(), vend=mvpLocalMapPoints.end(); vit!=vend; vit++)
@@ -5024,24 +5651,64 @@ void Tracking::SearchLocalPoints()
         MapPoint* pMP = *vit;
 
         if(pMP->mnLastFrameSeen == mCurrentFrame.mnId)
+        {
+            nLocalAlreadySeen++;
+            AccumulateMapPointQuality(mpQualityLocalAlreadySeen,
+                                      pMP,
+                                      mCurrentFrame.mnId,
+                                      pMP->mTrackDepth,
+                                      mThDepth);
             continue;
+        }
         if(pMP->isBad())
+        {
+            nLocalBad++;
             continue;
+        }
         // Project (this fills MapPoint variables for matching)
         if(mCurrentFrame.isInFrustum(pMP,0.5))
         {
+            if(bUseLocalFoundRatioGate)
+            {
+                const float foundRatio = pMP->GetFoundRatio();
+                if(std::isfinite(foundRatio) && foundRatio < localMinFoundRatio)
+                {
+                    nLocalFoundRatioRejected++;
+                    AccumulateMapPointQuality(mpQualityFoundRatioRejected,
+                                              pMP,
+                                              mCurrentFrame.mnId,
+                                              pMP->mTrackDepth,
+                                              mThDepth);
+                    pMP->mbTrackInView = false;
+                    pMP->mbTrackInViewR = false;
+                    continue;
+                }
+            }
             pMP->IncreaseVisible();
             nToMatch++;
+            nLocalInFrustum++;
+            AccumulateMapPointQuality(mpQualityLocalInFrustum,
+                                      pMP,
+                                      mCurrentFrame.mnId,
+                                      pMP->mTrackDepth,
+                                      mThDepth);
+            if(bUseLightGlueLocalMap && pMP->mbTrackInView)
+                localProjectedMapPointIds.insert(pMP->mnId);
         }
         if(pMP->mbTrackInView)
         {
+            nLocalTrackInView++;
+            AccumulateMapPointQuality(mpQualityLocalTrackInView,
+                                      pMP,
+                                      mCurrentFrame.mnId,
+                                      pMP->mTrackDepth,
+                                      mThDepth);
             mCurrentFrame.mmProjectPoints[pMP->mnId] = cv::Point2f(pMP->mTrackProjX, pMP->mTrackProjY);
         }
     }
 
     if(nToMatch>0)
     {
-        const bool bUseORB = (std::getenv("USE_ORB") != nullptr);
         const bool bMonocularVisual = (mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
         int th = 1;
         if(mSensor==System::RGBD || mSensor==System::IMU_RGBD)
@@ -5081,6 +5748,14 @@ void Tracking::SearchLocalPoints()
             }
         }
 
+        std::vector<unsigned char> vHadMapPointBeforeProjection(static_cast<size_t>(mCurrentFrame.N), 0);
+        EnsureXFeatMatchSourceSize(mCurrentFrame);
+        for(int i = 0; i < mCurrentFrame.N; ++i)
+        {
+            if(mCurrentFrame.mvpMapPoints[i])
+                vHadMapPointBeforeProjection[static_cast<size_t>(i)] = 1;
+        }
+
         int matches;
         if(bUseORB)
         {
@@ -5098,19 +5773,223 @@ void Tracking::SearchLocalPoints()
                                                  GetXFeatThHighLocalProjection());
         }
 
+        std::vector<unsigned char> vProjectionAdded(static_cast<size_t>(mCurrentFrame.N), 0);
+        std::vector<unsigned char> vProjectionVerified(static_cast<size_t>(mCurrentFrame.N), 0);
+        std::vector<unsigned char> vProjectionConflict(static_cast<size_t>(mCurrentFrame.N), 0);
+        for(int i = 0; i < mCurrentFrame.N; ++i)
+        {
+            if(!vHadMapPointBeforeProjection[static_cast<size_t>(i)] && mCurrentFrame.mvpMapPoints[i])
+            {
+                vProjectionAdded[static_cast<size_t>(i)] = 1;
+                if(i < static_cast<int>(mCurrentFrame.mvXFeatMatchSource.size()))
+                    mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)] = kXFeatMatchLocalProjection;
+                if(bUseLightGlueLocalMap)
+                    ++lgLocalVerifyCandidates;
+            }
+        }
+
+        if(bUseLightGlueLocalMap && !localProjectedMapPointIds.empty())
+        {
+            try
+            {
+                static XFeatLighterGlueMatcher lightGlueMatcher;
+                const float lgConf = GetEnvFloatInRange("XFEAT_LIGHTGLUE_CONF", 0.1f, 0.0f, 1.0f);
+                const int maxLocalKFs = GetXFeatLightGlueLocalMapMaxKFs();
+                const float projRadius = GetXFeatLightGlueLocalMapProjRadius();
+                const float projRadiusSq = projRadius * projRadius;
+                const float conflictMinScore = GetXFeatLightGlueLocalConflictMinScore();
+
+                std::vector<KeyFrame*> vpLightGlueKFs;
+                vpLightGlueKFs.reserve(static_cast<size_t>(maxLocalKFs));
+                std::unordered_set<long unsigned int> usedKFIds;
+                usedKFIds.reserve(static_cast<size_t>(maxLocalKFs) + 1);
+
+                auto AddLightGlueKF = [&](KeyFrame* pKF)
+                {
+                    if(!pKF || pKF->isBad())
+                        return;
+                    if(static_cast<int>(vpLightGlueKFs.size()) >= maxLocalKFs)
+                        return;
+                    if(!usedKFIds.insert(pKF->mnId).second)
+                        return;
+                    vpLightGlueKFs.push_back(pKF);
+                };
+
+                AddLightGlueKF(mpReferenceKF);
+
+                std::vector<KeyFrame*> vpSortedLocalKFs = mvpLocalKeyFrames;
+                std::sort(vpSortedLocalKFs.begin(), vpSortedLocalKFs.end(),
+                          [](const KeyFrame* a, const KeyFrame* b)
+                          {
+                              if(!a)
+                                  return false;
+                              if(!b)
+                                  return true;
+                              return a->mnId > b->mnId;
+                          });
+                for(KeyFrame* pKF : vpSortedLocalKFs)
+                {
+                    AddLightGlueKF(pKF);
+                    if(static_cast<int>(vpLightGlueKFs.size()) >= maxLocalKFs)
+                        break;
+                }
+
+                for(KeyFrame* pKF : vpLightGlueKFs)
+                {
+                    std::vector<MapPoint*> vpLightGlueMatches;
+                    std::vector<float> vLightGlueScores;
+                    lightGlueMatcher.SearchByLightGlue(pKF,
+                                                       mCurrentFrame,
+                                                       vpLightGlueMatches,
+                                                       lgConf,
+                                                       &vLightGlueScores);
+                    const XFeatLighterGlueMatcher::Stats& lgStats = lightGlueMatcher.LastStats();
+                    ++lgLocalKFsUsed;
+                    lgLocalRawMatches += lgStats.lg_raw_matches;
+                    lgLocalMpValid += lgStats.mp_valid;
+                    lgLocalOneToOne += lgStats.one_to_one;
+
+                    const size_t nMatches = std::min(vpLightGlueMatches.size(),
+                                                     mCurrentFrame.mvpMapPoints.size());
+                    for(size_t idx = 0; idx < nMatches; ++idx)
+                    {
+                        MapPoint* pMP = vpLightGlueMatches[idx];
+                        if(!pMP || pMP->isBad())
+                            continue;
+
+                        if(localProjectedMapPointIds.find(pMP->mnId) == localProjectedMapPointIds.end())
+                        {
+                            ++lgLocalNotProjected;
+                            continue;
+                        }
+
+                        if(idx >= mCurrentFrame.mvKeysUn.size())
+                            continue;
+                        const cv::Point2f& kp = mCurrentFrame.mvKeysUn[idx].pt;
+                        const float dx = pMP->mTrackProjX - kp.x;
+                        const float dy = pMP->mTrackProjY - kp.y;
+                        if(dx * dx + dy * dy > projRadiusSq)
+                        {
+                            ++lgLocalProjReject;
+                            continue;
+                        }
+
+                        if(mCurrentFrame.mvpMapPoints[idx])
+                        {
+                            if(vProjectionAdded[idx] && mCurrentFrame.mvpMapPoints[idx] == pMP)
+                            {
+                                if(!vProjectionVerified[idx])
+                                {
+                                    vProjectionVerified[idx] = 1;
+                                    if(idx < mCurrentFrame.mvXFeatMatchSource.size())
+                                        mCurrentFrame.mvXFeatMatchSource[idx] = kXFeatMatchLocalProjectionLightGlueVerified;
+                                    ++lgLocalVerified;
+                                }
+                            }
+                            else if(vProjectionAdded[idx])
+                            {
+                                const float lgScore = idx < vLightGlueScores.size()
+                                    ? vLightGlueScores[idx]
+                                    : -1.0f;
+                                if(lgScore >= conflictMinScore)
+                                {
+                                    vProjectionConflict[idx] = 1;
+                                    ++lgLocalMismatch;
+                                }
+                                else
+                                {
+                                    ++lgLocalConflictLowScore;
+                                }
+                            }
+                            ++lgLocalOccupied;
+                            continue;
+                        }
+
+                        // Verification mode does not add new matches; empty slots are left for the baseline path.
+                    }
+                }
+
+                for(int i = 0; i < mCurrentFrame.N; ++i)
+                {
+                    if(!vProjectionAdded[static_cast<size_t>(i)])
+                        continue;
+                    if(vProjectionVerified[static_cast<size_t>(i)] || !vProjectionConflict[static_cast<size_t>(i)])
+                        continue;
+                    mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
+                    if(i < static_cast<int>(mCurrentFrame.mvXFeatMatchSource.size()))
+                        mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)] = kXFeatMatchUnknown;
+                    ++lgLocalRejected;
+                }
+                matches = std::max(0, matches - lgLocalRejected);
+            }
+            catch(const std::exception& e)
+            {
+                bLightGlueLocalFailed = true;
+                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+                {
+                    std::cerr << "[SearchLocalPoints][LightGlue] failed, continuing with projection-only local map: "
+                              << e.what() << std::endl;
+                }
+            }
+        }
+
         //调试: 局部点投影匹配摘要（用于区分视锥筛选与描述子匹配问题）。
         if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         {
             std::cout << "[SearchLocalPoints] frame=" << mCurrentFrame.mnId
+                      << " local_mps=" << mvpLocalMapPoints.size()
+                      << " already_matched=" << nAlreadyMatched
+                      << " bad_already_matched=" << nBadAlreadyMatched
+                      << " local_already_seen=" << nLocalAlreadySeen
+                      << " local_bad=" << nLocalBad
+                      << " local_found_ratio_gate=" << (bUseLocalFoundRatioGate ? 1 : 0)
+                      << " local_min_found_ratio=" << localMinFoundRatio
+                      << " local_found_ratio_rejected=" << nLocalFoundRatioRejected
+                      << " local_in_frustum=" << nLocalInFrustum
+                      << " local_track_in_view=" << nLocalTrackInView
                       << " nToMatch=" << nToMatch
                       << " th=" << th
-                      << " mode=" << (bUseORB ? "ORBProj" : "XFeatProj")
+                      << " mode=" << (bUseORB ? "ORBProj" : (bUseLightGlueLocalMap ? "XFeatProj+LightGlueLocal" : "XFeatProj"))
                       << " th_high=" << (bUseORB ? -1.0f : GetXFeatThHighLocalProjection())
+                      << " lg_local_enabled=" << (bUseLightGlueLocalMap ? 1 : 0)
+                      << " lg_local_failed=" << (bLightGlueLocalFailed ? 1 : 0)
+                      << " lg_local_kfs=" << lgLocalKFsUsed
+                      << " lg_local_raw_matches=" << lgLocalRawMatches
+                      << " lg_local_mp_valid=" << lgLocalMpValid
+                      << " lg_local_one_to_one=" << lgLocalOneToOne
+                      << " lg_local_filled=" << lgLocalFilled
+                      << " lg_local_occupied=" << lgLocalOccupied
+                      << " lg_local_duplicate_mp=" << lgLocalDuplicateMP
+                      << " lg_local_not_projected=" << lgLocalNotProjected
+                      << " lg_local_proj_reject=" << lgLocalProjReject
+                      << " lg_local_verify_candidates=" << lgLocalVerifyCandidates
+                      << " lg_local_verified=" << lgLocalVerified
+                      << " lg_local_rejected=" << lgLocalRejected
+                      << " lg_local_mismatch=" << lgLocalMismatch
+                      << " lg_local_conflict_low_score=" << lgLocalConflictLowScore
+                      << " lg_local_conflict_min_score=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalConflictMinScore() : 0.0f)
+                      << " lg_local_proj_radius=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalMapProjRadius() : 0.0f)
                       << " far_filter=" << (bFarFilter ? "on" : "off")
                       << " far_th=" << thFarPoints
                       << " near_only_applied=" << (bNearOnlyApplied ? "true" : "false")
                       << " matches=" << matches
+                      << " matches_total_added=" << (matches + lgLocalFilled)
                       << std::endl;
+
+            const std::ios::fmtflags oldFlags = std::cout.flags();
+            const std::streamsize oldPrecision = std::cout.precision();
+            std::cout << std::fixed << std::setprecision(6)
+                      << "[SearchLocalPoints][MPQuality]"
+                      << " frame=" << mCurrentFrame.mnId
+                      << " mThDepth=" << mThDepth;
+            AppendMapPointQualityStats(std::cout, "already", mpQualityAlreadyMatched);
+            AppendMapPointQualityStats(std::cout, "seen", mpQualityLocalAlreadySeen);
+            AppendMapPointQualityStats(std::cout, "rejected", mpQualityFoundRatioRejected);
+            AppendMapPointQualityStats(std::cout, "frustum", mpQualityLocalInFrustum);
+            AppendMapPointQualityStats(std::cout, "trackview", mpQualityLocalTrackInView);
+            std::cout << std::endl;
+            std::cout.flags(oldFlags);
+            std::cout.precision(oldPrecision);
         }
 
         // if (std::getenv("USE_ORB") == nullptr)
@@ -5121,6 +6000,57 @@ void Tracking::SearchLocalPoints()
         // {
         //     matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
         // }     
+    }
+    else if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+    {
+        std::cout << "[SearchLocalPoints] frame=" << mCurrentFrame.mnId
+                  << " local_mps=" << mvpLocalMapPoints.size()
+                  << " already_matched=" << nAlreadyMatched
+                  << " bad_already_matched=" << nBadAlreadyMatched
+                  << " local_already_seen=" << nLocalAlreadySeen
+                  << " local_bad=" << nLocalBad
+                  << " local_found_ratio_gate=" << (bUseLocalFoundRatioGate ? 1 : 0)
+                  << " local_min_found_ratio=" << localMinFoundRatio
+                  << " local_found_ratio_rejected=" << nLocalFoundRatioRejected
+                  << " local_in_frustum=" << nLocalInFrustum
+                  << " local_track_in_view=" << nLocalTrackInView
+                  << " nToMatch=0"
+                  << " lg_local_enabled=" << (bUseLightGlueLocalMap ? 1 : 0)
+                  << " lg_local_failed=" << (bLightGlueLocalFailed ? 1 : 0)
+                  << " lg_local_kfs=" << lgLocalKFsUsed
+                  << " lg_local_raw_matches=" << lgLocalRawMatches
+                  << " lg_local_mp_valid=" << lgLocalMpValid
+                  << " lg_local_one_to_one=" << lgLocalOneToOne
+                  << " lg_local_filled=" << lgLocalFilled
+                  << " lg_local_occupied=" << lgLocalOccupied
+                  << " lg_local_duplicate_mp=" << lgLocalDuplicateMP
+                  << " lg_local_not_projected=" << lgLocalNotProjected
+                  << " lg_local_proj_reject=" << lgLocalProjReject
+                  << " lg_local_verify_candidates=" << lgLocalVerifyCandidates
+                  << " lg_local_verified=" << lgLocalVerified
+                  << " lg_local_rejected=" << lgLocalRejected
+                  << " lg_local_mismatch=" << lgLocalMismatch
+                  << " lg_local_conflict_low_score=" << lgLocalConflictLowScore
+                  << " lg_local_conflict_min_score=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalConflictMinScore() : 0.0f)
+                  << " lg_local_proj_radius=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalMapProjRadius() : 0.0f)
+                  << " matches=0"
+                  << " matches_total_added=" << lgLocalFilled
+                  << std::endl;
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[SearchLocalPoints][MPQuality]"
+                  << " frame=" << mCurrentFrame.mnId
+                  << " mThDepth=" << mThDepth;
+        AppendMapPointQualityStats(std::cout, "already", mpQualityAlreadyMatched);
+        AppendMapPointQualityStats(std::cout, "seen", mpQualityLocalAlreadySeen);
+        AppendMapPointQualityStats(std::cout, "rejected", mpQualityFoundRatioRejected);
+        AppendMapPointQualityStats(std::cout, "frustum", mpQualityLocalInFrustum);
+        AppendMapPointQualityStats(std::cout, "trackview", mpQualityLocalTrackInView);
+        std::cout << std::endl;
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
     }
 }
 
@@ -5318,9 +6248,6 @@ void Tracking::UpdateLocalKeyFrames()
 
 bool Tracking::Relocalization()
 {
-    //调试: 重定位入口。
-    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-        std::cout << "[Reloc] ENTER frame=" << mCurrentFrame.mnId << std::endl;
     Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
     // [XFEAT_RELOC_20260414] ORB keeps BoW pipeline; XFeat avoids BoW dependency in relocalization.
     const bool bUseORB = (std::getenv("USE_ORB") != nullptr);
@@ -5366,6 +6293,15 @@ bool Tracking::Relocalization()
     int relocBestInliers = 0;
     int relocBestKFId = -1;
     int relocPoseSolvedCount = 0;
+    const bool bUseLightGlueReloc = !bUseORB && IsXFeatLightGlueRelocEnabled();
+    const int lightGlueRelocFallbackMinMatches = GetXFeatLightGlueRelocFallbackMinMatches();
+    int lgRelocKFsTried = 0;
+    int lgRelocKFsUsed = 0;
+    int lgRelocFallbacks = 0;
+    int lgRelocFailures = 0;
+    int lgRelocRawMatches = 0;
+    int lgRelocMpValid = 0;
+    int lgRelocOneToOne = 0;
 
     for(int i=0; i<nKFs; i++)
     {
@@ -5379,10 +6315,53 @@ bool Tracking::Relocalization()
             if(bUseORB)
                 nmatches = matcherORB.SearchByBoW(pKF,mCurrentFrame,vvpMapPointMatches[i]);
             else
-                nmatches = matcherXF.SearchByNN(pKF,
-                                                mCurrentFrame,
-                                                vvpMapPointMatches[i],
-                                                GetXFeatThHighRelocNN());
+            {
+                bool bUsedLightGlueForCandidate = false;
+                if(bUseLightGlueReloc)
+                {
+                    ++lgRelocKFsTried;
+                    try
+                    {
+                        static XFeatLighterGlueMatcher lightGlueMatcher;
+                        const float lgConf = GetEnvFloatInRange("XFEAT_LIGHTGLUE_CONF", 0.1f, 0.0f, 1.0f);
+                        nmatches = lightGlueMatcher.SearchByLightGlue(pKF,
+                                                                      mCurrentFrame,
+                                                                      vvpMapPointMatches[i],
+                                                                      lgConf);
+                        const XFeatLighterGlueMatcher::Stats& lgStats = lightGlueMatcher.LastStats();
+                        lgRelocRawMatches += lgStats.lg_raw_matches;
+                        lgRelocMpValid += lgStats.mp_valid;
+                        lgRelocOneToOne += lgStats.one_to_one;
+                        bUsedLightGlueForCandidate = nmatches >= lightGlueRelocFallbackMinMatches;
+                        if(bUsedLightGlueForCandidate)
+                            ++lgRelocKFsUsed;
+                        else
+                            ++lgRelocFallbacks;
+                    }
+                    catch(const std::exception& e)
+                    {
+                        ++lgRelocFailures;
+                        bUsedLightGlueForCandidate = false;
+                        vvpMapPointMatches[i].clear();
+                        nmatches = 0;
+                        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+                        {
+                            std::cerr << "[Reloc][LightGlue] failed for KF "
+                                      << (pKF ? static_cast<long long>(pKF->mnId) : -1)
+                                      << ", falling back to XFeatMatcher: "
+                                      << e.what() << std::endl;
+                        }
+                    }
+                }
+
+                if(!bUsedLightGlueForCandidate)
+                {
+                    nmatches = matcherXF.SearchByNN(pKF,
+                                                    mCurrentFrame,
+                                                    vvpMapPointMatches[i],
+                                                    GetXFeatThHighRelocNN());
+                }
+            }
 
             if(nmatches<15)
             {
@@ -5397,18 +6376,6 @@ bool Tracking::Relocalization()
                 nCandidates++;
             }
         }
-    }
-
-    //调试: 重定位候选摘要（避免逐候选刷屏）。
-    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
-    {
-        std::cout << "[Reloc] candidates_total=" << nKFs
-                  << " candidates_with_pnp=" << nCandidates
-                  << " mode=" << (bUseORB ? "BoW" : "XFeatNN")
-                  << " th_high=" << (bUseORB ? -1.0f : GetXFeatThHighRelocNN())
-                  << " proj_coarse_th_high=" << (bUseORB ? -1.0f : GetXFeatThHighRelocProjCoarse())
-                  << " proj_fine_th_high=" << (bUseORB ? -1.0f : GetXFeatThHighRelocProjFine())
-                  << std::endl;
     }
 
     // Alternatively perform some iterations of P4P RANSAC
@@ -5551,6 +6518,14 @@ bool Tracking::Relocalization()
                       << " best_inliers=" << relocBestInliers
                       << " best_kf=" << relocBestKFId
                       << " solved_pose_cnt=" << relocPoseSolvedCount
+                      << " lg_enabled=" << (bUseLightGlueReloc ? 1 : 0)
+                      << " lg_kfs_tried=" << lgRelocKFsTried
+                      << " lg_kfs_used=" << lgRelocKFsUsed
+                      << " lg_fallbacks=" << lgRelocFallbacks
+                      << " lg_failures=" << lgRelocFailures
+                      << " lg_raw_matches=" << lgRelocRawMatches
+                      << " lg_mp_valid=" << lgRelocMpValid
+                      << " lg_one_to_one=" << lgRelocOneToOne
                       << std::endl;
         }
         return false;
@@ -5563,6 +6538,14 @@ bool Tracking::Relocalization()
                       << " best_inliers=" << relocBestInliers
                       << " best_kf=" << relocBestKFId
                       << " solved_pose_cnt=" << relocPoseSolvedCount
+                      << " lg_enabled=" << (bUseLightGlueReloc ? 1 : 0)
+                      << " lg_kfs_tried=" << lgRelocKFsTried
+                      << " lg_kfs_used=" << lgRelocKFsUsed
+                      << " lg_fallbacks=" << lgRelocFallbacks
+                      << " lg_failures=" << lgRelocFailures
+                      << " lg_raw_matches=" << lgRelocRawMatches
+                      << " lg_mp_valid=" << lgRelocMpValid
+                      << " lg_one_to_one=" << lgRelocOneToOne
                       << std::endl;
         }
         mnLastRelocFrameId = mCurrentFrame.mnId;

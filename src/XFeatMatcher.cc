@@ -29,8 +29,9 @@ bool IsEnvFlagEnabled(const char* key)
 
 bool IsXFeatMatcherDebugEnabled()
 {
-    //调试: Matcher 级调试开关，设置 `XFEAT_DEBUG_MATCHER=1` 或 `XFEAT_DEBUG=1` 启用。
-    static const bool enabled = IsEnvFlagEnabled("XFEAT_DEBUG_MATCHER") || IsEnvFlagEnabled("XFEAT_DEBUG");
+    //调试: Matcher 内部日志很细，单独用 `XFEAT_DEBUG_MATCHER=1` 启用，避免污染跟踪层摘要。
+    static const bool enabled = IsEnvFlagEnabled("XFEAT_DEBUG_MATCHER") ||
+        IsEnvFlagEnabled("XFEAT_DEBUG_MATCHER_VERBOSE");
     return enabled;
 }
 

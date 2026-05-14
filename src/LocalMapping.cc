@@ -21,6 +21,7 @@
 #include "LoopClosing.h"
 #include "ORBmatcher.h"
 #include "XFeatMatcher.h"
+#include "XFeatLighterGlueMatcher.h"
 #include "Optimizer.h"
 #include "Converter.h"
 #include "GeometricTools.h"
@@ -28,11 +29,41 @@
 #include<mutex>
 #include<chrono>
 #include<cstdlib>
+#include<cmath>
 #include<algorithm>
+#include<exception>
 #include<iostream>
+#include<string>
 
 namespace ORB_SLAM3
 {
+
+namespace
+{
+    bool IsLocalMappingEnvFlagEnabled(const char* key)
+    {
+        const char* env = std::getenv(key);
+        if(!env)
+            return false;
+        const std::string v(env);
+        return !(v.empty() || v == "0" || v == "false" || v == "FALSE");
+    }
+
+    bool UseXFeatLightGlueTriangulation()
+    {
+        return IsLocalMappingEnvFlagEnabled("XFEAT_USE_LIGHTGLUE_TRIANG");
+    }
+
+    float GetXFeatLightGlueTriangulationConfidence()
+    {
+        return 0.1f;
+    }
+
+    int GetXFeatLightGlueTriangulationFallbackMinMatches()
+    {
+        return 8;
+    }
+}
 
 LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName):
     mpSystem(pSys), mbMonocular(bMonocular), mbInertial(bInertial), mbResetRequested(false), mbResetRequestedActiveMap(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas), bInitializing(false),
@@ -467,9 +498,42 @@ void LocalMapping::CreateNewMapPoints()
         bool bCoarse = mbInertial && mpTracker->mState==Tracking::RECENTLY_LOST && mpCurrentKeyFrame->GetMap()->GetIniertialBA2();
 
         if(bUseORB)
+        {
             matcherORB.SearchForTriangulation(mpCurrentKeyFrame,pKF2,vMatchedIndices,false,bCoarse);
+        }
         else
-            matcherXFeat.SearchForTriangulation(mpCurrentKeyFrame,pKF2,vMatchedIndices,false,bCoarse);
+        {
+            bool bUsedLightGlueTriang = false;
+            if(UseXFeatLightGlueTriangulation())
+            {
+                try
+                {
+                    static XFeatLighterGlueMatcher lightGlueMatcher;
+                    const float lgConf = GetXFeatLightGlueTriangulationConfidence();
+                    const int nLightGlueMatches = lightGlueMatcher.SearchForTriangulation(mpCurrentKeyFrame,
+                                                                                          pKF2,
+                                                                                          vMatchedIndices,
+                                                                                          false,
+                                                                                          bCoarse,
+                                                                                          lgConf);
+                    bUsedLightGlueTriang =
+                        nLightGlueMatches >= GetXFeatLightGlueTriangulationFallbackMinMatches();
+                }
+                catch(const std::exception& e)
+                {
+                    vMatchedIndices.clear();
+                    if(IsLocalMappingEnvFlagEnabled("XFEAT_DEBUG") ||
+                       IsLocalMappingEnvFlagEnabled("XFEAT_DEBUG_MATCHER"))
+                    {
+                        std::cerr << "[LocalMapping][LightGlueTriang] failed, falling back to XFeatMatcher: "
+                                  << e.what() << std::endl;
+                    }
+                }
+            }
+
+            if(!bUsedLightGlueTriang)
+                matcherXFeat.SearchForTriangulation(mpCurrentKeyFrame,pKF2,vMatchedIndices,false,bCoarse);
+        }
 
         Sophus::SE3<float> sophTcw2 = pKF2->GetPose();
         Eigen::Matrix<float,3,4> eigTcw2 = sophTcw2.matrix3x4();

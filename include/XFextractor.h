@@ -45,6 +45,12 @@ public:
                     std::vector<cv::KeyPoint>& _keypoints,
                     cv::OutputArray _descriptors, std::vector<int> &vLappingArea);
 
+    void ExtractStereo(cv::InputArray _left, cv::InputArray _right,
+                       std::vector<cv::KeyPoint>& keypointsLeft, cv::Mat& descriptorsLeft,
+                       std::vector<cv::KeyPoint>& keypointsRight, cv::Mat& descriptorsRight,
+                       std::vector<int>& vLappingArea, std::vector<cv::Mat>& leftPyramid,
+                       int& monoLeft, int& monoRight);
+
     int inline GetLevels(){
         return nlevels;}
 
@@ -74,6 +80,17 @@ protected:
     void ComputePyramid(cv::Mat image);
     // [MultiScale-XFeat] Extract per-level keypoints/descriptors with octave/scale semantics.
     void ComputeKeyPointsMultiScale(std::vector<std::vector<cv::KeyPoint>>& allKeypoints, cv::Mat& desc);
+    void ComputeKeyPointsMultiScaleBatch(const std::vector<cv::Mat>& leftPyramid,
+                                         const std::vector<cv::Mat>& rightPyramid,
+                                         std::vector<std::vector<cv::KeyPoint>>& leftKeypoints,
+                                         cv::Mat& leftDesc,
+                                         std::vector<std::vector<cv::KeyPoint>>& rightKeypoints,
+                                         cv::Mat& rightDesc);
+    int PackKeypointsAndDescriptors(const std::vector<std::vector<cv::KeyPoint>>& allKeypoints,
+                                    const cv::Mat& multiScaleDesc,
+                                    std::vector<cv::KeyPoint>& keypoints,
+                                    cv::Mat& descriptors,
+                                    const std::vector<int>& vLappingArea) const;
 
     std::string getModelWeightsPath(std::string weights);
     torch::Tensor parseInput(cv::Mat& img, const torch::Device& device);

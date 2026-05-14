@@ -1202,10 +1202,10 @@ namespace ORB_SLAM3
         if (continuousImg.channels() == 1)
         {
             torch::Tensor tensor = torch::from_blob(continuousImg.data,
-                                                    {1, continuousImg.rows, continuousImg.cols, 1},
+                                                    {1, 1, continuousImg.rows, continuousImg.cols},
                                                     torch::kByte);
             tensor = tensor.to(torch::TensorOptions().device(device).dtype(torch::kByte), true, false);
-            tensor = tensor.permute({0, 3, 1, 2}).contiguous().to(torch::kFloat).div_(255.0);
+            tensor = tensor.to(torch::kFloat).div_(255.0);
             return tensor;
         }
 
@@ -1237,6 +1237,9 @@ namespace ORB_SLAM3
         // calculate resize ratios
         double rh = static_cast<double>(H) / _H;
         double rw = static_cast<double>(W) / _W;
+
+        if(_H == H && _W == W)
+            return std::make_tuple(x, rh, rw);
 
         std::vector<int64_t> size_array = {_H, _W};
         x = torch::nn::functional::interpolate(x, torch::nn::functional::InterpolateFuncOptions().size(size_array)
@@ -1335,7 +1338,7 @@ namespace ORB_SLAM3
 
             if(level == 0)
             {
-                mvImagePyramid[level] = image.clone();
+                mvImagePyramid[level] = image;
             }
             else
             {
@@ -1557,38 +1560,217 @@ namespace ORB_SLAM3
         }
     }
 
-    int XFextractor::operator()( InputArray _image, InputArray _mask, vector<KeyPoint>& _keypoints,
-                                  OutputArray _descriptors, std::vector<int> &vLappingArea)
+    void XFextractor::ComputeKeyPointsMultiScaleBatch(const std::vector<cv::Mat>& leftPyramid,
+                                                      const std::vector<cv::Mat>& rightPyramid,
+                                                      std::vector<std::vector<cv::KeyPoint>>& leftKeypoints,
+                                                      cv::Mat& leftDesc,
+                                                      std::vector<std::vector<cv::KeyPoint>>& rightKeypoints,
+                                                      cv::Mat& rightDesc)
     {
-        if(_image.empty())
-            return -1;
+        c10::InferenceMode inferenceGuard(true);
 
-        Mat image = _image.getMat();
-        assert(image.type() == CV_8UC1 || image.type() == CV_8UC3);
+        leftKeypoints.clear();
+        rightKeypoints.clear();
+        leftKeypoints.resize(nlevels);
+        rightKeypoints.resize(nlevels);
 
-        // [MultiScale-XFeat] Stage 1: core multi-scale extraction (without stereo overlap reordering).
-        ComputePyramid(image);
+        std::vector<cv::Mat> leftDescPerLevel;
+        std::vector<cv::Mat> rightDescPerLevel;
+        torch::Device device(device_);
 
-        std::vector<std::vector<cv::KeyPoint>> allKeypoints;
-        cv::Mat multiScaleDesc;
-        ComputeKeyPointsMultiScale(allKeypoints, multiScaleDesc);
+        const float maxXLeft = static_cast<float>(leftPyramid[0].cols - 1);
+        const float maxYLeft = static_cast<float>(leftPyramid[0].rows - 1);
+        const float maxXRight = static_cast<float>(rightPyramid[0].cols - 1);
+        const float maxYRight = static_cast<float>(rightPyramid[0].rows - 1);
 
+        for (int level = 0; level < nlevels; ++level)
+        {
+            if(leftPyramid[level].empty() || rightPyramid[level].empty())
+                continue;
+
+            cv::Mat leftLevelImage = leftPyramid[level];
+            cv::Mat rightLevelImage = rightPyramid[level];
+
+            torch::Tensor xLeft = parseInput(leftLevelImage, device);
+            torch::Tensor xRight = parseInput(rightLevelImage, device);
+
+            double rhLeft = 1.0;
+            double rwLeft = 1.0;
+            double rhRight = 1.0;
+            double rwRight = 1.0;
+            std::tie(xLeft, rhLeft, rwLeft) = preprocessTensor(xLeft);
+            std::tie(xRight, rhRight, rwRight) = preprocessTensor(xRight);
+
+            if(xLeft.size(2) != xRight.size(2) || xLeft.size(3) != xRight.size(3))
+                throw std::runtime_error("XFeat stereo batch requires matching preprocessed image sizes.");
+
+            torch::Tensor x = torch::cat({xLeft, xRight}, 0);
+            const int64_t H = x.size(2);
+            const int64_t W = x.size(3);
+
+            torch::Tensor M1, K1, H1;
+            std::tie(M1, K1, H1) = model->forward(x);
+            M1 = torch::nn::functional::normalize(M1, torch::nn::functional::NormalizeFuncOptions().dim(1));
+
+            auto appendBatchItem = [&](const int batchIndex,
+                                       const cv::Mat& levelImage,
+                                       const double rh,
+                                       const double rw,
+                                       const float maxX,
+                                       const float maxY,
+                                       std::vector<std::vector<cv::KeyPoint>>& allKeypoints,
+                                       std::vector<cv::Mat>& descPerLevel)
+            {
+                torch::Tensor M1Item = M1.index({torch::indexing::Slice(batchIndex, batchIndex + 1)});
+                torch::Tensor K1Item = K1.index({torch::indexing::Slice(batchIndex, batchIndex + 1)});
+                torch::Tensor H1Item = H1.index({torch::indexing::Slice(batchIndex, batchIndex + 1)});
+                torch::Tensor K1hItem = getKptsHeatmap(K1Item);
+
+                const int levelFeatureBudget = mnFeaturesPerLevel[level];
+                if(levelFeatureBudget <= 0)
+                    return;
+
+                const int nPixels = static_cast<int>(std::max<int64_t>(1, H * W));
+                const int requestedCandidates = std::max(levelFeatureBudget * GetXFeatFixedNMSCandidateFactor(),
+                                                         GetXFeatFixedNMSCandidateMin());
+                const int fixedCandidateK = std::min(nPixels, std::max(levelFeatureBudget, requestedCandidates));
+
+                std::vector<int64_t> fullSize = {H, W};
+                torch::Tensor H1Full = torch::nn::functional::interpolate(
+                    H1Item,
+                    torch::nn::functional::InterpolateFuncOptions().size(fullSize)
+                                                                   .mode(torch::kBilinear)
+                                                                   .align_corners(false));
+                torch::Tensor rankingScores = K1hItem * H1Full;
+
+                torch::Tensor mkpts, nmsScores;
+                std::tie(mkpts, nmsScores) = NMSFixedTopK(K1hItem, rankingScores, fixedCandidateK, 0.05f, 5);
+                if(mkpts.size(1) == 0)
+                    return;
+
+                torch::Tensor scores = (nearest->forward(K1hItem, mkpts, H, W) * bilinear->forward(H1Item, mkpts, H, W)).squeeze(-1);
+                scores.masked_fill_(nmsScores <= 0, -1);
+
+                const int topk = std::min(levelFeatureBudget, static_cast<int>(scores.size(1)));
+                if(topk <= 0)
+                    return;
+
+                auto finalTopk = scores.topk(topk, -1, true, true);
+                scores = std::get<0>(finalTopk);
+                torch::Tensor idxs = std::get<1>(finalTopk);
+                torch::Tensor gatherIdx = idxs.unsqueeze(-1).expand({-1, -1, 2});
+                mkpts = mkpts.gather(1, gatherIdx);
+
+                torch::Tensor feats = bilinear->forward(M1Item, mkpts, H, W);
+                feats = torch::nn::functional::normalize(feats, torch::nn::functional::NormalizeFuncOptions().dim(-1));
+
+                torch::Tensor packed = torch::cat({mkpts[0].to(torch::kFloat),
+                                                   scores[0].unsqueeze(1),
+                                                   feats[0]}, 1);
+                torch::Tensor packedCpu = packed.to(torch::kCPU).contiguous();
+
+                const int packedRows = static_cast<int>(packedCpu.size(0));
+                const float* packedPtr = packedCpu.data_ptr<float>();
+                std::vector<float> validKeypoints;
+                std::vector<float> validScores;
+                std::vector<int> validPackedRows;
+                validKeypoints.reserve(static_cast<size_t>(packedRows) * 2);
+                validScores.reserve(static_cast<size_t>(packedRows));
+                validPackedRows.reserve(static_cast<size_t>(packedRows));
+
+                for(int i = 0; i < packedRows; ++i)
+                {
+                    const float* row = packedPtr + i * 67;
+                    const float score = row[2];
+                    if(score <= 0.0f)
+                        continue;
+
+                    validKeypoints.push_back(row[0]);
+                    validKeypoints.push_back(row[1]);
+                    validScores.push_back(score);
+                    validPackedRows.push_back(i);
+                }
+
+                const int valid_cnt = static_cast<int>(validScores.size());
+                if(valid_cnt == 0)
+                    return;
+
+                const float* kptPtr = validKeypoints.data();
+                const float* scorePtr = validScores.data();
+
+                const std::vector<int> selectedIdx = SelectUniformTopKIndices(kptPtr,
+                                                                               scorePtr,
+                                                                               valid_cnt,
+                                                                               std::min(mnFeaturesPerLevel[level], valid_cnt),
+                                                                               levelImage.cols,
+                                                                               levelImage.rows);
+                if(selectedIdx.empty())
+                    return;
+
+                const int selected_cnt = static_cast<int>(selectedIdx.size());
+                const float levelScale = mvScaleFactor[level];
+                const float keypointSize = PATCH_SIZE * levelScale;
+
+                std::vector<cv::KeyPoint>& levelKpts = allKeypoints[level];
+                levelKpts.reserve(selected_cnt);
+
+                cv::Mat levelDesc(selected_cnt, 64, CV_32F);
+                for (int i = 0; i < selected_cnt; ++i)
+                {
+                    const int srcIdx = selectedIdx[i];
+                    const float xScaled = kptPtr[srcIdx * 2] * static_cast<float>(rw);
+                    const float yScaled = kptPtr[srcIdx * 2 + 1] * static_cast<float>(rh);
+                    const float score = scorePtr[srcIdx];
+
+                    float xOriginal = std::max(0.0f, std::min(xScaled * levelScale, maxX));
+                    float yOriginal = std::max(0.0f, std::min(yScaled * levelScale, maxY));
+
+                    cv::KeyPoint kp(xOriginal, yOriginal, keypointSize, -1.0f, score, level);
+                    levelKpts.push_back(kp);
+
+                    const int packedRow = validPackedRows[srcIdx];
+                    std::memcpy(levelDesc.ptr<float>(i), packedPtr + packedRow * 67 + 3, 64 * sizeof(float));
+                }
+
+                descPerLevel.push_back(levelDesc);
+            };
+
+            appendBatchItem(0, leftLevelImage, rhLeft, rwLeft, maxXLeft, maxYLeft, leftKeypoints, leftDescPerLevel);
+            appendBatchItem(1, rightLevelImage, rhRight, rwRight, maxXRight, maxYRight, rightKeypoints, rightDescPerLevel);
+        }
+
+        if(leftDescPerLevel.empty())
+            leftDesc.release();
+        else
+            cv::vconcat(leftDescPerLevel, leftDesc);
+
+        if(rightDescPerLevel.empty())
+            rightDesc.release();
+        else
+            cv::vconcat(rightDescPerLevel, rightDesc);
+    }
+
+    int XFextractor::PackKeypointsAndDescriptors(const std::vector<std::vector<cv::KeyPoint>>& allKeypoints,
+                                                 const cv::Mat& multiScaleDesc,
+                                                 std::vector<cv::KeyPoint>& keypoints,
+                                                 cv::Mat& descriptors,
+                                                 const std::vector<int>& vLappingArea) const
+    {
         int nkeypoints = 0;
         for (int level = 0; level < nlevels; ++level)
             nkeypoints += static_cast<int>(allKeypoints[level].size());
 
         if(nkeypoints == 0)
         {
-            _keypoints.clear();
-            _descriptors.release();
+            keypoints.clear();
+            descriptors.release();
             return 0;
         }
 
-        _keypoints = std::vector<cv::KeyPoint>(nkeypoints);
-        cv::Mat desc_mat(nkeypoints, 64, CV_32F);
+        keypoints = std::vector<cv::KeyPoint>(nkeypoints);
+        cv::Mat descMat(nkeypoints, 64, CV_32F);
         CV_Assert(multiScaleDesc.rows == nkeypoints);
 
-        // [MultiScale-XFeat] Stage 2: keep legacy stereo overlap packaging, after octave/size semantics are finalized.
         int monoIndex = 0;
         int stereoIndex = nkeypoints - 1;
         int rowOffset = 0;
@@ -1607,21 +1789,97 @@ namespace ORB_SLAM3
 
                 if(isStereoOverlap)
                 {
-                    _keypoints.at(stereoIndex) = kp;
-                    multiScaleDesc.row(srcRow).copyTo(desc_mat.row(stereoIndex));
+                    keypoints.at(stereoIndex) = kp;
+                    multiScaleDesc.row(srcRow).copyTo(descMat.row(stereoIndex));
                     --stereoIndex;
                 }
                 else
                 {
-                    _keypoints.at(monoIndex) = kp;
-                    multiScaleDesc.row(srcRow).copyTo(desc_mat.row(monoIndex));
+                    keypoints.at(monoIndex) = kp;
+                    multiScaleDesc.row(srcRow).copyTo(descMat.row(monoIndex));
                     ++monoIndex;
                 }
             }
             rowOffset += nlevel;
         }
 
-        desc_mat.copyTo(_descriptors);
+        descriptors = descMat;
+        return monoIndex;
+    }
+
+    void XFextractor::ExtractStereo(InputArray _left, InputArray _right,
+                                    std::vector<cv::KeyPoint>& keypointsLeft, cv::Mat& descriptorsLeft,
+                                    std::vector<cv::KeyPoint>& keypointsRight, cv::Mat& descriptorsRight,
+                                    std::vector<int>& vLappingArea, std::vector<cv::Mat>& leftPyramid,
+                                    int& monoLeft, int& monoRight)
+    {
+        monoLeft = -1;
+        monoRight = -1;
+
+        if(_left.empty() || _right.empty())
+            return;
+
+        Mat leftImage = _left.getMat();
+        Mat rightImage = _right.getMat();
+        assert(leftImage.type() == CV_8UC1 || leftImage.type() == CV_8UC3);
+        assert(rightImage.type() == CV_8UC1 || rightImage.type() == CV_8UC3);
+
+        if(leftImage.size() != rightImage.size() || leftImage.type() != rightImage.type())
+        {
+            monoLeft = (*this)(leftImage, cv::Mat(), keypointsLeft, descriptorsLeft, vLappingArea);
+            leftPyramid = mvImagePyramid;
+            monoRight = (*this)(rightImage, cv::Mat(), keypointsRight, descriptorsRight, vLappingArea);
+            return;
+        }
+
+        ComputePyramid(leftImage);
+        leftPyramid = mvImagePyramid;
+
+        ComputePyramid(rightImage);
+        std::vector<cv::Mat> rightPyramid = mvImagePyramid;
+
+        std::vector<std::vector<cv::KeyPoint>> allLeftKeypoints;
+        std::vector<std::vector<cv::KeyPoint>> allRightKeypoints;
+        cv::Mat leftMultiScaleDesc;
+        cv::Mat rightMultiScaleDesc;
+        ComputeKeyPointsMultiScaleBatch(leftPyramid, rightPyramid,
+                                        allLeftKeypoints, leftMultiScaleDesc,
+                                        allRightKeypoints, rightMultiScaleDesc);
+
+        monoLeft = PackKeypointsAndDescriptors(allLeftKeypoints, leftMultiScaleDesc,
+                                               keypointsLeft, descriptorsLeft, vLappingArea);
+        monoRight = PackKeypointsAndDescriptors(allRightKeypoints, rightMultiScaleDesc,
+                                                keypointsRight, descriptorsRight, vLappingArea);
+
+        mvImagePyramid = rightPyramid;
+    }
+
+    int XFextractor::operator()( InputArray _image, InputArray _mask, vector<KeyPoint>& _keypoints,
+                                  OutputArray _descriptors, std::vector<int> &vLappingArea)
+    {
+        if(_image.empty())
+            return -1;
+
+        Mat image = _image.getMat();
+        assert(image.type() == CV_8UC1 || image.type() == CV_8UC3);
+
+        // [MultiScale-XFeat] Stage 1: core multi-scale extraction (without stereo overlap reordering).
+        ComputePyramid(image);
+
+        std::vector<std::vector<cv::KeyPoint>> allKeypoints;
+        cv::Mat multiScaleDesc;
+        ComputeKeyPointsMultiScale(allKeypoints, multiScaleDesc);
+
+        cv::Mat descMat;
+        const int monoIndex = PackKeypointsAndDescriptors(allKeypoints, multiScaleDesc,
+                                                          _keypoints, descMat, vLappingArea);
+        if(_keypoints.empty())
+        {
+            _descriptors.release();
+            return 0;
+        }
+
+        descMat.copyTo(_descriptors);
         return monoIndex;
     }
 } //namespace ORB_SLAM
