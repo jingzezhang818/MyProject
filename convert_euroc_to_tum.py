@@ -529,11 +529,11 @@ def main() -> None:
         print(f"  corrected EST poses written: {corrected_count}")
 
     if gt_converted:
-        print(f"GT converted: {gt_count} poses -> {out_gt}")
+        print(f"GT converted: {gt_count} poses -> {out_gt.resolve()}")
     elif gt_input_tum:
-        print(f"GT input detected as TUM: {gt_for_right_rot}")
+        print(f"GT input detected as TUM: {gt_for_right_rot.resolve()}")
     if est_converted:
-        print(f"EST converted: {est_count} poses -> {out_est}")
+        print(f"EST converted: {est_count} poses -> {out_est.resolve()}")
     if gt_converted and gt_skipped > 0:
         print(f"GT skipped non-increasing timestamps: {gt_skipped}")
     if est_converted and est_skipped > 0:
@@ -547,15 +547,15 @@ def main() -> None:
         print("No conversion performed. Provide --est-traj and/or --gt.")
     print("Run evo example:")
     if est_converted and gt_for_right_rot is not None:
-        print(f"evo_ape tum {gt_for_right_rot} {out_est} -r trans_part -a -p")
-        print(f"evo_traj tum {out_est} --ref={gt_for_right_rot} -a -p")
+        print(f"evo_ape tum {gt_for_right_rot.resolve()} {out_est.resolve()} -r trans_part -a -p")
+        print(f"evo_traj tum {out_est.resolve()} --ref={gt_for_right_rot.resolve()} -a -p")
     elif gt_converted:
-        print(f"evo_traj tum {out_gt} -a -p")
+        print(f"evo_traj tum {out_gt.resolve()} -a -p")
     elif gt_input_tum:
-        print(f"evo_traj tum {gt_for_right_rot} -a -p")
+        print(f"evo_traj tum {gt_for_right_rot.resolve()} -a -p")
     elif est_converted:
-        print(f"evo_ape tum <gt_tum.txt> {out_est} -r trans_part -a -p")
-        print(f"evo_traj tum {out_est} --ref=<gt_tum.txt> -a -p")
+        print(f"evo_ape tum <gt_tum.txt> {out_est.resolve()} -r trans_part -a -p")
+        print(f"evo_traj tum {out_est.resolve()} --ref=<gt_tum.txt> -a -p")
     else:
         print("evo_ape tum <gt_tum.txt> <est_tum.txt> -r trans_part -a -p")
         print("evo_traj tum <est_tum.txt> --ref=<gt_tum.txt> -a -p")

@@ -47,6 +47,7 @@
 #include <iomanip>
 #include <functional>
 #include <unordered_set>
+#include <initializer_list>
 
 
 using namespace std;
@@ -161,6 +162,77 @@ namespace
     {
         static const bool enabled = IsEnvFlagEnabled("XFEAT_FPS") || IsEnvFlagEnabled("SLAM_FPS");
         return enabled;
+    }
+
+    float GetEnvFloat(const char* key, const float defaultValue, const float minValue, const float maxValue)
+    {
+        const char* env = std::getenv(key);
+        if(!env)
+            return defaultValue;
+
+        try
+        {
+            const float value = std::stof(std::string(env));
+            return std::max(minValue, std::min(maxValue, value));
+        }
+        catch(...)
+        {
+            return defaultValue;
+        }
+    }
+
+    std::string GetEnvLowerString(const char* key, const std::string& defaultValue)
+    {
+        const char* env = std::getenv(key);
+        if(!env)
+            return defaultValue;
+
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    }
+
+    bool IsLocalMapFoundRatioGateEnabled()
+    {
+        static const bool enabled = IsEnvFlagEnabled("XFEAT_LOCALMAP_FOUND_RATIO_GATE");
+        return enabled;
+    }
+
+    float GetLocalMapFoundRatioMin()
+    {
+        static const float minFoundRatio = GetEnvFloat("XFEAT_LOCALMAP_FOUND_RATIO_MIN", 0.25f, 0.0f, 1.0f);
+        return minFoundRatio;
+    }
+
+    float GetLocalMapFoundRatioMinDepth()
+    {
+        static const float minDepth = GetEnvFloat("XFEAT_LOCALMAP_FOUND_RATIO_MIN_DEPTH", -1.0f, -1.0f, 10000.0f);
+        return minDepth;
+    }
+
+    const std::string& GetLocalMapFoundRatioScope()
+    {
+        static const std::string scope = []()
+        {
+            const std::string envScope = GetEnvLowerString("XFEAT_LOCALMAP_FOUND_RATIO_SCOPE", "triang_only");
+            if(envScope == "all")
+                return std::string("all");
+            return std::string("triang_only");
+        }();
+        return scope;
+    }
+
+    bool ShouldGateLocalMapPointByFoundRatio(const MapPoint* pMP)
+    {
+        if(!pMP)
+            return false;
+
+        const std::string& scope = GetLocalMapFoundRatioScope();
+        if(scope == "all")
+            return true;
+
+        return pMP->GetCreationSource() == MapPoint::kCreationSourceLocalMappingTriangulation;
     }
 
     int GetRuntimeFpsInterval()
@@ -681,6 +753,95 @@ namespace
            << " " << prefix << "_gt1000=" << stats.gt1000;
     }
 
+    struct StereoDepthConstraintStats
+    {
+        int assoc = 0;
+        int stereoObs = 0;
+        int stereoDepth = 0;
+        int stereoClose = 0;
+        int stereoInlier = 0;
+        int stereoOutlier = 0;
+        int stereoCloseInlier = 0;
+        DepthDistributionStats allDepth;
+        DepthDistributionStats inlierDepth;
+        DepthDistributionStats outlierDepth;
+    };
+
+    void AccumulateStereoDepthConstraintStats(const Frame& F,
+                                              const float closeDepthThreshold,
+                                              const bool useOutlierState,
+                                              StereoDepthConstraintStats& stats)
+    {
+        const int n = std::min(F.N, static_cast<int>(F.mvpMapPoints.size()));
+        for(int i = 0; i < n; ++i)
+        {
+            if(!F.mvpMapPoints[i])
+                continue;
+
+            stats.assoc++;
+            const bool hasStereoObs = i < static_cast<int>(F.mvuRight.size()) && F.mvuRight[i] >= 0.0f;
+            if(!hasStereoObs)
+                continue;
+
+            stats.stereoObs++;
+            const bool hasDepth = i < static_cast<int>(F.mvDepth.size()) &&
+                                  std::isfinite(F.mvDepth[i]) &&
+                                  F.mvDepth[i] > 0.0f;
+            if(hasDepth)
+            {
+                stats.stereoDepth++;
+                AccumulateDepthDistribution(stats.allDepth, F.mvDepth[i]);
+                if(F.mvDepth[i] < closeDepthThreshold)
+                    stats.stereoClose++;
+            }
+
+            if(!useOutlierState)
+                continue;
+
+            if(F.mvbOutlier[i])
+            {
+                stats.stereoOutlier++;
+                if(hasDepth)
+                    AccumulateDepthDistribution(stats.outlierDepth, F.mvDepth[i]);
+            }
+            else
+            {
+                stats.stereoInlier++;
+                if(hasDepth)
+                {
+                    AccumulateDepthDistribution(stats.inlierDepth, F.mvDepth[i]);
+                    if(F.mvDepth[i] < closeDepthThreshold)
+                        stats.stereoCloseInlier++;
+                }
+            }
+        }
+    }
+
+    void AppendStereoDepthConstraintStats(std::ostream& os,
+                                          const char* prefix,
+                                          const StereoDepthConstraintStats& stats)
+    {
+        const float inlierRatio = stats.stereoObs > 0
+            ? static_cast<float>(stats.stereoInlier) / static_cast<float>(stats.stereoObs)
+            : 0.0f;
+        const float outlierRatio = stats.stereoObs > 0
+            ? static_cast<float>(stats.stereoOutlier) / static_cast<float>(stats.stereoObs)
+            : 0.0f;
+
+        os << " " << prefix << "_assoc=" << stats.assoc
+           << " " << prefix << "_stereo_obs=" << stats.stereoObs
+           << " " << prefix << "_stereo_depth=" << stats.stereoDepth
+           << " " << prefix << "_stereo_close=" << stats.stereoClose
+           << " " << prefix << "_stereo_inlier=" << stats.stereoInlier
+           << " " << prefix << "_stereo_outlier=" << stats.stereoOutlier
+           << " " << prefix << "_stereo_inlier_ratio=" << inlierRatio
+           << " " << prefix << "_stereo_outlier_ratio=" << outlierRatio
+           << " " << prefix << "_stereo_close_inlier=" << stats.stereoCloseInlier;
+        AppendDepthDistributionStats(os, (std::string(prefix) + "_depth").c_str(), stats.allDepth);
+        AppendDepthDistributionStats(os, (std::string(prefix) + "_inlier_depth").c_str(), stats.inlierDepth);
+        AppendDepthDistributionStats(os, (std::string(prefix) + "_outlier_depth").c_str(), stats.outlierDepth);
+    }
+
     struct MapPointQualityStats
     {
         int total = 0;
@@ -708,15 +869,34 @@ namespace
         std::vector<float> depthSamples;
     };
 
+    float ResolveMapPointQualityDepth(const Frame& F,
+                                      MapPoint* pMP,
+                                      const float depthHint)
+    {
+        if(pMP && F.isSet())
+        {
+            const Eigen::Vector3f x3Dc = F.GetPose() * pMP->GetWorldPos();
+            const float z = x3Dc(2);
+            if(std::isfinite(z) && z > 0.0f)
+                return z;
+        }
+
+        if(std::isfinite(depthHint) && depthHint > 0.0f)
+            return depthHint;
+
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+
     void AccumulateMapPointQuality(MapPointQualityStats& stats,
                                    MapPoint* pMP,
-                                   const long unsigned int frameId,
-                                   const float depth,
+                                   const Frame& F,
+                                   const float depthHint,
                                    const float closeDepthThreshold)
     {
         if(!pMP)
             return;
 
+        const long unsigned int frameId = F.mnId;
         stats.total++;
 
         const int obs = pMP->Observations();
@@ -744,6 +924,7 @@ namespace
                 stats.foundLt075++;
         }
 
+        const float depth = ResolveMapPointQualityDepth(F, pMP, depthHint);
         if(std::isfinite(depth) && depth > 0.0f)
         {
             stats.depthValid++;
@@ -893,6 +1074,34 @@ namespace
         }
     }
 
+    constexpr size_t kMapPointCreationSourceCount = 5;
+
+    size_t MapPointCreationSourceIndex(const MapPoint::CreationSource source)
+    {
+        const size_t idx = static_cast<size_t>(source);
+        if(idx >= kMapPointCreationSourceCount)
+            return static_cast<size_t>(MapPoint::kCreationSourceUnknown);
+        return idx;
+    }
+
+    const char* MapPointCreationSourceName(const MapPoint::CreationSource source)
+    {
+        switch(source)
+        {
+            case MapPoint::kCreationSourceTrackingStereo:
+                return "tracking_stereo";
+            case MapPoint::kCreationSourceLocalMappingTriangulation:
+                return "local_mapping_triangulation";
+            case MapPoint::kCreationSourceMonoInit:
+                return "mono_init";
+            case MapPoint::kCreationSourceStereoInit:
+                return "stereo_init";
+            case MapPoint::kCreationSourceUnknown:
+            default:
+                return "unknown";
+        }
+    }
+
     struct ReprojectionConstraintStats
     {
         int total = 0;
@@ -994,7 +1203,166 @@ namespace
            << " inlier_err_p50=" << (inlierErrSamples.empty() ? 0.0f : DepthPercentile(inlierErrSamples, 0.50f))
            << " inlier_err_p90=" << (inlierErrSamples.empty() ? 0.0f : DepthPercentile(inlierErrSamples, 0.90f))
            << " depth_avg=" << depthAvg
-           << " depth_p50=" << (depthSamples.empty() ? 0.0f : DepthPercentile(depthSamples, 0.50f));
+           << " depth_p50=" << (depthSamples.empty() ? 0.0f : DepthPercentile(depthSamples, 0.50f))
+           << " depth_p90=" << (depthSamples.empty() ? 0.0f : DepthPercentile(depthSamples, 0.90f));
+    }
+
+    struct MotionLightGlueGeometryStats
+    {
+        int total = 0;
+        int inlier = 0;
+        int outlier = 0;
+        int errValid = 0;
+        int gt10 = 0;
+        int gt20 = 0;
+        int gt50 = 0;
+        int inlierGt10 = 0;
+        int inlierGt20 = 0;
+        int inlierGt50 = 0;
+        int outlierGt10 = 0;
+        int outlierGt20 = 0;
+        int outlierGt50 = 0;
+        int depthValid = 0;
+        int closeDepth = 0;
+        int depthGt50 = 0;
+        int depthGt100 = 0;
+        std::vector<float> errSamples;
+        std::vector<float> inlierErrSamples;
+        std::vector<float> outlierErrSamples;
+        std::vector<float> depthSamples;
+        std::vector<float> inlierDepthSamples;
+        std::vector<float> outlierDepthSamples;
+    };
+
+    void AccumulateMotionLightGlueGeometry(MotionLightGlueGeometryStats& stats,
+                                           const float reprojErr,
+                                           const float depth,
+                                           const bool isInlier,
+                                           const float closeDepthThreshold)
+    {
+        stats.total++;
+        if(isInlier)
+            stats.inlier++;
+        else
+            stats.outlier++;
+
+        if(std::isfinite(reprojErr))
+        {
+            stats.errValid++;
+            stats.errSamples.push_back(reprojErr);
+            if(reprojErr > 10.0f)
+                stats.gt10++;
+            if(reprojErr > 20.0f)
+                stats.gt20++;
+            if(reprojErr > 50.0f)
+                stats.gt50++;
+
+            if(isInlier)
+            {
+                stats.inlierErrSamples.push_back(reprojErr);
+                if(reprojErr > 10.0f)
+                    stats.inlierGt10++;
+                if(reprojErr > 20.0f)
+                    stats.inlierGt20++;
+                if(reprojErr > 50.0f)
+                    stats.inlierGt50++;
+            }
+            else
+            {
+                stats.outlierErrSamples.push_back(reprojErr);
+                if(reprojErr > 10.0f)
+                    stats.outlierGt10++;
+                if(reprojErr > 20.0f)
+                    stats.outlierGt20++;
+                if(reprojErr > 50.0f)
+                    stats.outlierGt50++;
+            }
+        }
+
+        if(std::isfinite(depth) && depth > 0.0f)
+        {
+            stats.depthValid++;
+            stats.depthSamples.push_back(depth);
+            if(depth < closeDepthThreshold)
+                stats.closeDepth++;
+            if(depth > 50.0f)
+                stats.depthGt50++;
+            if(depth > 100.0f)
+                stats.depthGt100++;
+
+            if(isInlier)
+                stats.inlierDepthSamples.push_back(depth);
+            else
+                stats.outlierDepthSamples.push_back(depth);
+        }
+    }
+
+    void LogMotionLightGlueGeometryDiagnostics(const Frame& F,
+                                               const std::vector<unsigned char>& lgAssigned,
+                                               const std::vector<float>& initialProjErr,
+                                               const std::vector<float>& initialDepth,
+                                               const float closeDepthThreshold)
+    {
+        MotionLightGlueGeometryStats stats;
+        const size_t n = std::min({F.mvpMapPoints.size(),
+                                   F.mvbOutlier.size(),
+                                   lgAssigned.size(),
+                                   initialProjErr.size(),
+                                   initialDepth.size()});
+        for(size_t i = 0; i < n; ++i)
+        {
+            if(!lgAssigned[i] || !F.mvpMapPoints[i])
+                continue;
+            AccumulateMotionLightGlueGeometry(stats,
+                                              initialProjErr[i],
+                                              initialDepth[i],
+                                              !F.mvbOutlier[i],
+                                              closeDepthThreshold);
+        }
+
+        std::vector<float> errSamples = stats.errSamples;
+        std::vector<float> inlierErrSamples = stats.inlierErrSamples;
+        std::vector<float> outlierErrSamples = stats.outlierErrSamples;
+        std::vector<float> depthSamples = stats.depthSamples;
+        std::vector<float> inlierDepthSamples = stats.inlierDepthSamples;
+        std::vector<float> outlierDepthSamples = stats.outlierDepthSamples;
+
+        const double outlierRatio = stats.total > 0
+            ? static_cast<double>(stats.outlier) / static_cast<double>(stats.total)
+            : 0.0;
+
+        std::cout << "[TrackMotion][LGGeom]"
+                  << " frame_id=" << F.mnId
+                  << " total=" << stats.total
+                  << " inlier=" << stats.inlier
+                  << " outlier=" << stats.outlier
+                  << " outlier_ratio=" << outlierRatio
+                  << " proj_err_valid=" << stats.errValid
+                  << " proj_err_p50=" << (errSamples.empty() ? 0.0f : DepthPercentile(errSamples, 0.50f))
+                  << " proj_err_p90=" << (errSamples.empty() ? 0.0f : DepthPercentile(errSamples, 0.90f))
+                  << " proj_err_p99=" << (errSamples.empty() ? 0.0f : DepthPercentile(errSamples, 0.99f))
+                  << " proj_err_gt10=" << stats.gt10
+                  << " proj_err_gt20=" << stats.gt20
+                  << " proj_err_gt50=" << stats.gt50
+                  << " inlier_proj_err_p90=" << (inlierErrSamples.empty() ? 0.0f : DepthPercentile(inlierErrSamples, 0.90f))
+                  << " outlier_proj_err_p90=" << (outlierErrSamples.empty() ? 0.0f : DepthPercentile(outlierErrSamples, 0.90f))
+                  << " inlier_gt10=" << stats.inlierGt10
+                  << " inlier_gt20=" << stats.inlierGt20
+                  << " inlier_gt50=" << stats.inlierGt50
+                  << " outlier_gt10=" << stats.outlierGt10
+                  << " outlier_gt20=" << stats.outlierGt20
+                  << " outlier_gt50=" << stats.outlierGt50
+                  << " depth_valid=" << stats.depthValid
+                  << " close_depth=" << stats.closeDepth
+                  << " depth_gt50=" << stats.depthGt50
+                  << " depth_gt100=" << stats.depthGt100
+                  << " depth_p50=" << (depthSamples.empty() ? 0.0f : DepthPercentile(depthSamples, 0.50f))
+                  << " depth_p90=" << (depthSamples.empty() ? 0.0f : DepthPercentile(depthSamples, 0.90f))
+                  << " inlier_depth_p50=" << (inlierDepthSamples.empty() ? 0.0f : DepthPercentile(inlierDepthSamples, 0.50f))
+                  << " inlier_depth_p90=" << (inlierDepthSamples.empty() ? 0.0f : DepthPercentile(inlierDepthSamples, 0.90f))
+                  << " outlier_depth_p50=" << (outlierDepthSamples.empty() ? 0.0f : DepthPercentile(outlierDepthSamples, 0.50f))
+                  << " outlier_depth_p90=" << (outlierDepthSamples.empty() ? 0.0f : DepthPercentile(outlierDepthSamples, 0.90f))
+                  << std::endl;
     }
 
     void LogTrackLocalMapConstraintSourceDiagnostics(const Frame& F)
@@ -1039,22 +1407,176 @@ namespace
             std::cout << std::endl;
         }
 
-        for(int source = 0; source < kNumSources; ++source)
+        if(IsXFeatFeatureDiagEnabled())
         {
+            for(int source = 0; source < kNumSources; ++source)
+            {
+                for(int bin = 0; bin < kNumDepthBins; ++bin)
+                {
+                    if(bySourceDepth[source][bin].total <= 0)
+                        continue;
+                    std::cout << "[TrackLocalMap][SourceDepthError]"
+                              << " frame_id=" << F.mnId
+                              << " source=" << XFeatMatchSourceName(static_cast<unsigned char>(source))
+                              << " depth_bin=" << DepthBinName(bin);
+                    AppendReprojectionConstraintStats(std::cout, bySourceDepth[source][bin]);
+                    std::cout << std::endl;
+                }
+            }
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    void LogTrackLocalMapMapPointSourceDiagnostics(const Frame& F)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+
+        static constexpr int kNumDepthBins = 6;
+        ReprojectionConstraintStats bySource[kMapPointCreationSourceCount];
+        ReprojectionConstraintStats bySourceDepth[kMapPointCreationSourceCount][kNumDepthBins];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP)
+                continue;
+
+            const MapPoint::CreationSource source = pMP->GetCreationSource();
+            const size_t sourceIdx = MapPointCreationSourceIndex(source);
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            const bool isInlier = !F.mvbOutlier[i];
+            AccumulateReprojectionConstraint(bySource[sourceIdx], reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(bySourceDepth[sourceIdx][DepthBinIndex(depth)], reprojErr, depth, isInlier);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(size_t sourceIdx = 0; sourceIdx < kMapPointCreationSourceCount; ++sourceIdx)
+        {
+            if(bySource[sourceIdx].total <= 0)
+                continue;
+            const MapPoint::CreationSource source = static_cast<MapPoint::CreationSource>(sourceIdx);
+            std::cout << "[TrackLocalMap][MPSourceError]"
+                      << " frame_id=" << F.mnId
+                      << " source=" << MapPointCreationSourceName(source);
+            AppendReprojectionConstraintStats(std::cout, bySource[sourceIdx]);
+            std::cout << std::endl;
+        }
+
+        for(size_t sourceIdx = 0; sourceIdx < kMapPointCreationSourceCount; ++sourceIdx)
+        {
+            const MapPoint::CreationSource source = static_cast<MapPoint::CreationSource>(sourceIdx);
             for(int bin = 0; bin < kNumDepthBins; ++bin)
             {
-                if(bySourceDepth[source][bin].total <= 0)
+                if(bySourceDepth[sourceIdx][bin].total <= 0)
                     continue;
-                std::cout << "[TrackLocalMap][SourceDepthError]"
+                std::cout << "[TrackLocalMap][MPSourceDepthError]"
                           << " frame_id=" << F.mnId
-                          << " source=" << XFeatMatchSourceName(static_cast<unsigned char>(source))
+                          << " source=" << MapPointCreationSourceName(source)
                           << " depth_bin=" << DepthBinName(bin);
-                AppendReprojectionConstraintStats(std::cout, bySourceDepth[source][bin]);
+                AppendReprojectionConstraintStats(std::cout, bySourceDepth[sourceIdx][bin]);
                 std::cout << std::endl;
             }
         }
         std::cout.flags(oldFlags);
         std::cout.precision(oldPrecision);
+    }
+
+    void LogTrackLocalMapJointSourceDiagnostics(const Frame& F)
+    {
+        static constexpr int kNumSources = 8;
+        ReprojectionConstraintStats joint[kNumSources][kMapPointCreationSourceCount];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP)
+                continue;
+
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+            if(matchSource >= kNumSources)
+                matchSource = kXFeatMatchUnknown;
+
+            const size_t mpSourceIdx = MapPointCreationSourceIndex(pMP->GetCreationSource());
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            AccumulateReprojectionConstraint(joint[matchSource][mpSourceIdx],
+                                             reprojErr,
+                                             depth,
+                                             !F.mvbOutlier[i]);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int matchSource = 0; matchSource < kNumSources; ++matchSource)
+        {
+            for(size_t mpSourceIdx = 0; mpSourceIdx < kMapPointCreationSourceCount; ++mpSourceIdx)
+            {
+                if(joint[matchSource][mpSourceIdx].total <= 0)
+                    continue;
+                std::cout << "[TrackLocalMap][SourceMPJointError]"
+                          << " frame_id=" << F.mnId
+                          << " match_source=" << XFeatMatchSourceName(static_cast<unsigned char>(matchSource))
+                          << " mp_source=" << MapPointCreationSourceName(static_cast<MapPoint::CreationSource>(mpSourceIdx));
+                AppendReprojectionConstraintStats(std::cout, joint[matchSource][mpSourceIdx]);
+                std::cout << std::endl;
+            }
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    void LogTrackLocalMapInlierMix(const Frame& F)
+    {
+        int totalInliers = 0;
+        int motionLgInliers = 0;
+        int localProjTrackingStereoInliers = 0;
+        int localProjTriangulationInliers = 0;
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP || F.mvbOutlier[i])
+                continue;
+
+            totalInliers++;
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+
+            if(matchSource == kXFeatMatchMotionLightGlue)
+                motionLgInliers++;
+
+            if(matchSource == kXFeatMatchLocalProjection)
+            {
+                const MapPoint::CreationSource mpSource = pMP->GetCreationSource();
+                if(mpSource == MapPoint::kCreationSourceTrackingStereo)
+                    localProjTrackingStereoInliers++;
+                else if(mpSource == MapPoint::kCreationSourceLocalMappingTriangulation)
+                    localProjTriangulationInliers++;
+            }
+        }
+
+        std::cout << "[TrackLocalMap][InlierMix]"
+                  << " frame_id=" << F.mnId
+                  << " total_inliers=" << totalInliers
+                  << " motion_lg=" << motionLgInliers
+                  << " local_proj_tracking_stereo=" << localProjTrackingStereoInliers
+                  << " local_proj_local_mapping_triangulation=" << localProjTriangulationInliers
+                  << std::endl;
     }
 
     bool IsXFeatLightGlueLocalMapEnabled()
@@ -1121,7 +1643,7 @@ namespace
 
     float GetXFeatThHighLocalProjection()
     {
-        //调试: LocalMap 投影阈值（默认略严），直接影响 inlier ratio 和平移精度。
+        //调试: LocalMap 投影阈值。默认保持宽松，优先保留足够的局部地图约束。
         return GetEnvFloatInRange("XFEAT_TH_HIGH_LOCAL_PROJ", 1.35f, 0.05f, 2.0f);
     }
 
@@ -3886,6 +4408,7 @@ void Tracking::StereoInitialization()
                     Eigen::Vector3f x3D;
                     mCurrentFrame.UnprojectStereo(i, x3D);
                     MapPoint* pNewMP = new MapPoint(x3D, pKFini, mpAtlas->GetCurrentMap());
+                    pNewMP->SetCreationSource(MapPoint::kCreationSourceStereoInit);
                     pNewMP->AddObservation(pKFini,i);
                     pKFini->AddMapPoint(pNewMP,i);
                     pNewMP->ComputeDistinctiveDescriptors();
@@ -3902,6 +4425,7 @@ void Tracking::StereoInitialization()
                     Eigen::Vector3f x3D = mCurrentFrame.mvStereo3Dpoints[i];
 
                     MapPoint* pNewMP = new MapPoint(x3D, pKFini, mpAtlas->GetCurrentMap());
+                    pNewMP->SetCreationSource(MapPoint::kCreationSourceStereoInit);
 
                     pNewMP->AddObservation(pKFini,i);
                     pNewMP->AddObservation(pKFini,rightIndex + mCurrentFrame.Nleft);
@@ -4124,6 +4648,7 @@ void Tracking::CreateInitialMapMonocular()
         Eigen::Vector3f worldPos;
         worldPos << mvIniP3D[i].x, mvIniP3D[i].y, mvIniP3D[i].z;
         MapPoint* pMP = new MapPoint(worldPos,pKFcur,mpAtlas->GetCurrentMap());
+        pMP->SetCreationSource(MapPoint::kCreationSourceMonoInit);
 
         pKFini->AddMapPoint(pMP,i);
         pKFcur->AddMapPoint(pMP,mvIniMatches[i]);
@@ -4636,6 +5161,7 @@ void Tracking::UpdateLastFrame()
             }
 
             MapPoint* pNewMP = new MapPoint(x3D,mpAtlas->GetCurrentMap(),&mLastFrame,i);
+            pNewMP->SetCreationSource(MapPoint::kCreationSourceTrackingStereo);
             mLastFrame.mvpMapPoints[i]=pNewMP;
 
             mlpTemporalPoints.push_back(pNewMP);
@@ -4866,6 +5392,36 @@ bool Tracking::TrackWithMotionModel()
             return false;
     }
 
+    StereoDepthConstraintStats motionStereoBeforeOpt;
+    AccumulateStereoDepthConstraintStats(mCurrentFrame, mThDepth, false, motionStereoBeforeOpt);
+    std::vector<unsigned char> lgMotionGeomAssigned;
+    std::vector<float> lgMotionInitialProjErr;
+    std::vector<float> lgMotionInitialDepth;
+    if(bUsedLightGlueMotion)
+    {
+        lgMotionGeomAssigned.assign(static_cast<size_t>(mCurrentFrame.N), 0);
+        lgMotionInitialProjErr.assign(static_cast<size_t>(mCurrentFrame.N),
+                                      std::numeric_limits<float>::quiet_NaN());
+        lgMotionInitialDepth.assign(static_cast<size_t>(mCurrentFrame.N),
+                                    std::numeric_limits<float>::quiet_NaN());
+        const size_t n = std::min({mCurrentFrame.mvpMapPoints.size(),
+                                   mCurrentFrame.mvXFeatMatchSource.size(),
+                                   lgMotionGeomAssigned.size()});
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+            if(!pMP || mCurrentFrame.mvXFeatMatchSource[i] != kXFeatMatchMotionLightGlue)
+                continue;
+
+            lgMotionGeomAssigned[i] = 1;
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(mCurrentFrame, static_cast<int>(i), pMP, reprojErr, depth);
+            lgMotionInitialProjErr[i] = reprojErr;
+            lgMotionInitialDepth[i] = depth;
+        }
+    }
+
     // Optimize frame pose with all matches
     Optimizer::PoseOptimization(&mCurrentFrame);
     //调试: PoseOptimization 后的匹配统计。
@@ -4882,6 +5438,8 @@ bool Tracking::TrackWithMotionModel()
     const float outlierRatio = assoc_cnt > 0
         ? static_cast<float>(assoc_cnt - inlier_cnt) / static_cast<float>(assoc_cnt)
         : 0.0f;
+    StereoDepthConstraintStats motionStereoAfterOpt;
+    AccumulateStereoDepthConstraintStats(mCurrentFrame, mThDepth, true, motionStereoAfterOpt);
 
     if(bUsedLightGlueMotion && ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
@@ -4901,6 +5459,18 @@ bool Tracking::TrackWithMotionModel()
                   << " post_pose_inliers=" << inlier_cnt
                   << " outlier_ratio=" << outlierRatio
                   << std::endl;
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[TrackMotion][StereoDepth]"
+                  << " frame_id=" << mCurrentFrame.mnId
+                  << " mThDepth=" << mThDepth;
+        AppendStereoDepthConstraintStats(std::cout, "before", motionStereoBeforeOpt);
+        AppendStereoDepthConstraintStats(std::cout, "after", motionStereoAfterOpt);
+        std::cout << std::endl;
+        LogMotionLightGlueGeometryDiagnostics(mCurrentFrame,
+                                              lgMotionGeomAssigned,
+                                              lgMotionInitialProjErr,
+                                              lgMotionInitialDepth,
+                                              mThDepth);
         std::cout.flags(oldFlags);
         std::cout.precision(oldPrecision);
     }
@@ -4975,13 +5545,15 @@ bool Tracking::TrackLocalMap()
                 depth = mCurrentFrame.mvDepth[i];
             else
                 depth = mCurrentFrame.mvpMapPoints[i]->mTrackDepth;
-            AccumulateMapPointQuality(mpQualityBeforeOpt,
-                                      mCurrentFrame.mvpMapPoints[i],
-                                      mCurrentFrame.mnId,
-                                      depth,
-                                      mThDepth);
+                AccumulateMapPointQuality(mpQualityBeforeOpt,
+                                          mCurrentFrame.mvpMapPoints[i],
+                                          mCurrentFrame,
+                                          depth,
+                                          mThDepth);
         }
     }
+    StereoDepthConstraintStats localStereoBeforeOpt;
+    AccumulateStereoDepthConstraintStats(mCurrentFrame, mThDepth, false, localStereoBeforeOpt);
 
     // TOO check outliers before PO
     int aux1 = 0, aux2=0;
@@ -5040,7 +5612,7 @@ bool Tracking::TrackLocalMap()
                 aux2++;
                 AccumulateMapPointQuality(mpQualityOutlierAfterOpt,
                                           mCurrentFrame.mvpMapPoints[i],
-                                          mCurrentFrame.mnId,
+                                          mCurrentFrame,
                                           depth,
                                           mThDepth);
             }
@@ -5048,7 +5620,7 @@ bool Tracking::TrackLocalMap()
             {
                 AccumulateMapPointQuality(mpQualityInlierAfterOpt,
                                           mCurrentFrame.mvpMapPoints[i],
-                                          mCurrentFrame.mnId,
+                                          mCurrentFrame,
                                           depth,
                                           mThDepth);
             }
@@ -5059,9 +5631,16 @@ bool Tracking::TrackLocalMap()
     const float outlier_ratio_after_opt = assoc_after_opt > 0
         ? static_cast<float>(outlier_after_opt) / static_cast<float>(assoc_after_opt)
         : 0.0f;
+    StereoDepthConstraintStats localStereoAfterOpt;
+    AccumulateStereoDepthConstraintStats(mCurrentFrame, mThDepth, true, localStereoAfterOpt);
 
     if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+    {
         LogTrackLocalMapConstraintSourceDiagnostics(mCurrentFrame);
+        LogTrackLocalMapMapPointSourceDiagnostics(mCurrentFrame);
+        LogTrackLocalMapJointSourceDiagnostics(mCurrentFrame);
+        LogTrackLocalMapInlierMix(mCurrentFrame);
+    }
 
     mnMatchesInliers = 0;
 
@@ -5133,14 +5712,24 @@ bool Tracking::TrackLocalMap()
                   << " decision=" << decision
                   << std::endl;
 
-        std::cout << std::fixed << std::setprecision(6)
-                  << "[TrackLocalMap][MPQuality]"
-                  << " frame_id=" << mCurrentFrame.mnId
-                  << " mThDepth=" << mThDepth;
-        AppendMapPointQualityStats(std::cout, "before", mpQualityBeforeOpt);
-        AppendMapPointQualityStats(std::cout, "inlier", mpQualityInlierAfterOpt);
-        AppendMapPointQualityStats(std::cout, "outlier", mpQualityOutlierAfterOpt);
-        std::cout << std::endl;
+        if(IsXFeatFeatureDiagEnabled())
+        {
+            std::cout << std::fixed << std::setprecision(6)
+                      << "[TrackLocalMap][MPQuality]"
+                      << " frame_id=" << mCurrentFrame.mnId
+                      << " mThDepth=" << mThDepth;
+            AppendMapPointQualityStats(std::cout, "before", mpQualityBeforeOpt);
+            AppendMapPointQualityStats(std::cout, "inlier", mpQualityInlierAfterOpt);
+            AppendMapPointQualityStats(std::cout, "outlier", mpQualityOutlierAfterOpt);
+            std::cout << std::endl;
+            std::cout << std::fixed << std::setprecision(6)
+                      << "[TrackLocalMap][StereoDepth]"
+                      << " frame_id=" << mCurrentFrame.mnId
+                      << " mThDepth=" << mThDepth;
+            AppendStereoDepthConstraintStats(std::cout, "before", localStereoBeforeOpt);
+            AppendStereoDepthConstraintStats(std::cout, "after", localStereoAfterOpt);
+            std::cout << std::endl;
+        }
         std::cout.flags(oldFlags);
         std::cout.precision(oldPrecision);
     };
@@ -5408,6 +5997,9 @@ void Tracking::CreateNewKeyFrame()
 
     if(mSensor!=System::MONOCULAR && mSensor != System::IMU_MONOCULAR) // TODO check if incluide imu_stereo
     {
+        const bool bUseStereoBirthQuality =
+            (mSensor == System::STEREO || mSensor == System::IMU_STEREO) &&
+            mCurrentFrame.Nleft == -1;
         mCurrentFrame.UpdatePoseMatrices();
         // cout << "create new MPs" << endl;
         // We sort points by the measured depth by the stereo/RGBD sensor.
@@ -5438,6 +6030,9 @@ void Tracking::CreateNewKeyFrame()
             int nPoints = 0;
             int nCreatedPoints = 0;
             int nReusedPoints = 0;
+            int nTrackingStereoCreatedTotal = 0;
+            int nTrackingStereoCreatedCloseHighConf = 0;
+            int nTrackingStereoSkippedCloseLowConf = 0;
             DepthDistributionStats createKFSelectedDepthStats;
             DepthDistributionStats createKFUsedDepthStats;
             DepthDistributionStats createKFCreatedDepthStats;
@@ -5459,6 +6054,19 @@ void Tracking::CreateNewKeyFrame()
 
                 if(bCreateNew)
                 {
+                    const bool bCloseDepth = vDepthIdx[j].first > 0.0f && vDepthIdx[j].first <= mThDepth;
+                    const bool bSkipLowConfCloseStereo =
+                        bUseStereoBirthQuality &&
+                        bCloseDepth &&
+                        i >= 0 &&
+                        i < static_cast<int>(mCurrentFrame.mvStereoBirthQuality.size()) &&
+                        mCurrentFrame.mvStereoBirthQuality[static_cast<size_t>(i)] == Frame::kStereoBirthCloseLowConf;
+                    if(bSkipLowConfCloseStereo)
+                    {
+                        ++nTrackingStereoSkippedCloseLowConf;
+                        continue;
+                    }
+
                     AccumulateDepthDistribution(createKFCreatedDepthStats, vDepthIdx[j].first);
                     Eigen::Vector3f x3D;
 
@@ -5470,6 +6078,7 @@ void Tracking::CreateNewKeyFrame()
                     }
 
                     MapPoint* pNewMP = new MapPoint(x3D,pKF,mpAtlas->GetCurrentMap());
+                    pNewMP->SetCreationSource(MapPoint::kCreationSourceTrackingStereo);
                     pNewMP->AddObservation(pKF,i);
 
                     //Check if it is a stereo observation in order to not
@@ -5488,6 +6097,15 @@ void Tracking::CreateNewKeyFrame()
                     mCurrentFrame.mvpMapPoints[i]=pNewMP;
                     nPoints++;
                     nCreatedPoints++;
+                    ++nTrackingStereoCreatedTotal;
+                    if(bUseStereoBirthQuality &&
+                       bCloseDepth &&
+                       i >= 0 &&
+                       i < static_cast<int>(mCurrentFrame.mvStereoBirthQuality.size()) &&
+                       mCurrentFrame.mvStereoBirthQuality[static_cast<size_t>(i)] == Frame::kStereoBirthCloseHighConf)
+                    {
+                        ++nTrackingStereoCreatedCloseHighConf;
+                    }
                 }
                 else
                 {
@@ -5514,7 +6132,11 @@ void Tracking::CreateNewKeyFrame()
                           << " depth_candidates=" << vDepthIdx.size()
                           << " used_or_created=" << nPoints
                           << " created=" << nCreatedPoints
-                          << " reused=" << nReusedPoints;
+                          << " reused=" << nReusedPoints
+                          << " tracking_stereo_created_total=" << nTrackingStereoCreatedTotal
+                          << " tracking_stereo_created_close_high_conf=" << nTrackingStereoCreatedCloseHighConf
+                          << " tracking_stereo_skipped_close_low_conf=" << nTrackingStereoSkippedCloseLowConf
+                          << " stereo_birth_quality_enabled=" << (bUseStereoBirthQuality ? 1 : 0);
                 AppendDepthDistributionStats(std::cout, "frame", createKFFrameDepthStats);
                 AppendDepthDistributionStats(std::cout, "selected_depth", createKFSelectedDepthStats);
                 AppendDepthDistributionStats(std::cout, "reused_depth", createKFUsedDepthStats);
@@ -5538,7 +6160,11 @@ void Tracking::CreateNewKeyFrame()
                       << " depth_candidates=0"
                       << " used_or_created=0"
                       << " created=0"
-                      << " reused=0";
+                      << " reused=0"
+                      << " tracking_stereo_created_total=0"
+                      << " tracking_stereo_created_close_high_conf=0"
+                      << " tracking_stereo_skipped_close_low_conf=0"
+                      << " stereo_birth_quality_enabled=" << (bUseStereoBirthQuality ? 1 : 0);
             AppendDepthDistributionStats(std::cout, "frame", createKFFrameDepthStats);
             std::cout << std::endl;
             std::cout.flags(oldFlags);
@@ -5580,7 +6206,7 @@ void Tracking::SearchLocalPoints()
                 nAlreadyMatched++;
                 AccumulateMapPointQuality(mpQualityAlreadyMatched,
                                           pMP,
-                                          mCurrentFrame.mnId,
+                                          mCurrentFrame,
                                           pMP->mTrackDepth,
                                           mThDepth);
                 pMP->IncreaseVisible();
@@ -5602,10 +6228,21 @@ void Tracking::SearchLocalPoints()
     MapPointQualityStats mpQualityLocalInFrustum;
     MapPointQualityStats mpQualityLocalTrackInView;
     const bool bUseORB = (std::getenv("USE_ORB") != nullptr);
-    const bool bUseLocalFoundRatioGate = false;
-    const float localMinFoundRatio = 0.0f;
+    const bool bUseLocalFoundRatioGate = IsLocalMapFoundRatioGateEnabled();
+    const float localMinFoundRatio = GetLocalMapFoundRatioMin();
+    const float localMinFoundRatioDepth = GetLocalMapFoundRatioMinDepth() > 0.0f
+        ? GetLocalMapFoundRatioMinDepth()
+        : mThDepth;
+    const std::string localFoundRatioScope = GetLocalMapFoundRatioScope();
     const bool bUseLightGlueLocalMap = !bUseORB && IsXFeatLightGlueLocalMapEnabled();
-    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+    int localFoundRatioRejectedBySource[kMapPointCreationSourceCount] = {};
+    int localFoundRatioRejectedDepthQualified = 0;
+    int localFoundRatioRejectedDepthQualifiedBySource[kMapPointCreationSourceCount] = {};
+    int localProjCloseTrackingStereoCandidates = 0;
+    int localProjCloseTrackingStereoGeomAccept = 0;
+    int localProjCloseTrackingStereoRejectUr = 0;
+    int localProjCloseTrackingStereoRejectDepth = 0;
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId) && IsXFeatFeatureDiagEnabled())
     {
         DepthDistributionStats frameDepthStats;
         for(float depth : mCurrentFrame.mvDepth)
@@ -5644,6 +6281,12 @@ void Tracking::SearchLocalPoints()
     int lgLocalMismatch = 0;
     int lgLocalConflictLowScore = 0;
     bool bLightGlueLocalFailed = false;
+    int projectionMatches = 0;
+    int projectionTh = 0;
+    bool bProjectionRun = false;
+    bool projectionFarFilter = false;
+    float projectionFarPoints = 0.0f;
+    bool projectionNearOnlyApplied = false;
 
     // Project points in frame and check its visibility
     for(vector<MapPoint*>::iterator vit=mvpLocalMapPoints.begin(), vend=mvpLocalMapPoints.end(); vit!=vend; vit++)
@@ -5655,7 +6298,7 @@ void Tracking::SearchLocalPoints()
             nLocalAlreadySeen++;
             AccumulateMapPointQuality(mpQualityLocalAlreadySeen,
                                       pMP,
-                                      mCurrentFrame.mnId,
+                                      mCurrentFrame,
                                       pMP->mTrackDepth,
                                       mThDepth);
             continue;
@@ -5668,29 +6311,43 @@ void Tracking::SearchLocalPoints()
         // Project (this fills MapPoint variables for matching)
         if(mCurrentFrame.isInFrustum(pMP,0.5))
         {
+            const float resolvedDepth = ResolveMapPointQualityDepth(mCurrentFrame, pMP, pMP->mTrackDepth);
             if(bUseLocalFoundRatioGate)
             {
+                const bool bGateThisMapPoint = ShouldGateLocalMapPointByFoundRatio(pMP);
                 const float foundRatio = pMP->GetFoundRatio();
-                if(std::isfinite(foundRatio) && foundRatio < localMinFoundRatio)
+                const bool bDepthQualified = std::isfinite(resolvedDepth) && resolvedDepth > localMinFoundRatioDepth;
+                if(bGateThisMapPoint && std::isfinite(foundRatio) && foundRatio < localMinFoundRatio)
                 {
-                    nLocalFoundRatioRejected++;
-                    AccumulateMapPointQuality(mpQualityFoundRatioRejected,
-                                              pMP,
-                                              mCurrentFrame.mnId,
-                                              pMP->mTrackDepth,
-                                              mThDepth);
-                    pMP->mbTrackInView = false;
-                    pMP->mbTrackInViewR = false;
-                    continue;
+                    if(bDepthQualified)
+                    {
+                        nLocalFoundRatioRejected++;
+                        localFoundRatioRejectedBySource[MapPointCreationSourceIndex(pMP->GetCreationSource())]++;
+                        localFoundRatioRejectedDepthQualified++;
+                        localFoundRatioRejectedDepthQualifiedBySource[MapPointCreationSourceIndex(pMP->GetCreationSource())]++;
+                        AccumulateMapPointQuality(mpQualityFoundRatioRejected,
+                                                  pMP,
+                                                  mCurrentFrame,
+                                                  resolvedDepth,
+                                                  mThDepth);
+                        pMP->mbTrackInView = false;
+                        pMP->mbTrackInViewR = false;
+                        continue;
+                    }
                 }
             }
             pMP->IncreaseVisible();
             nToMatch++;
             nLocalInFrustum++;
+            if(pMP->GetCreationSource() == MapPoint::kCreationSourceTrackingStereo &&
+               std::isfinite(resolvedDepth) && resolvedDepth <= mThDepth)
+            {
+                localProjCloseTrackingStereoCandidates++;
+            }
             AccumulateMapPointQuality(mpQualityLocalInFrustum,
                                       pMP,
-                                      mCurrentFrame.mnId,
-                                      pMP->mTrackDepth,
+                                      mCurrentFrame,
+                                      resolvedDepth,
                                       mThDepth);
             if(bUseLightGlueLocalMap && pMP->mbTrackInView)
                 localProjectedMapPointIds.insert(pMP->mnId);
@@ -5700,7 +6357,7 @@ void Tracking::SearchLocalPoints()
             nLocalTrackInView++;
             AccumulateMapPointQuality(mpQualityLocalTrackInView,
                                       pMP,
-                                      mCurrentFrame.mnId,
+                                      mCurrentFrame,
                                       pMP->mTrackDepth,
                                       mThDepth);
             mCurrentFrame.mmProjectPoints[pMP->mnId] = cv::Point2f(pMP->mTrackProjX, pMP->mTrackProjY);
@@ -5747,6 +6404,11 @@ void Tracking::SearchLocalPoints()
                 bNearOnlyApplied = true;
             }
         }
+        projectionTh = th;
+        bProjectionRun = true;
+        projectionFarFilter = bFarFilter;
+        projectionFarPoints = thFarPoints;
+        projectionNearOnlyApplied = bNearOnlyApplied;
 
         std::vector<unsigned char> vHadMapPointBeforeProjection(static_cast<size_t>(mCurrentFrame.N), 0);
         EnsureXFeatMatchSourceSize(mCurrentFrame);
@@ -5771,7 +6433,11 @@ void Tracking::SearchLocalPoints()
                                                  bFarFilter,
                                                  thFarPoints,
                                                  GetXFeatThHighLocalProjection());
+            const XFeatMatcher::ProjectionMapPointStats& projStats = matcher.LastProjectionMapPointStats();
+            localProjCloseTrackingStereoRejectUr = projStats.close_tracking_stereo_reject_ur;
+            localProjCloseTrackingStereoRejectDepth = projStats.close_tracking_stereo_reject_depth;
         }
+        projectionMatches = matches;
 
         std::vector<unsigned char> vProjectionAdded(static_cast<size_t>(mCurrentFrame.N), 0);
         std::vector<unsigned char> vProjectionVerified(static_cast<size_t>(mCurrentFrame.N), 0);
@@ -5921,6 +6587,7 @@ void Tracking::SearchLocalPoints()
                     ++lgLocalRejected;
                 }
                 matches = std::max(0, matches - lgLocalRejected);
+                projectionMatches = matches;
             }
             catch(const std::exception& e)
             {
@@ -5933,63 +6600,17 @@ void Tracking::SearchLocalPoints()
             }
         }
 
-        //调试: 局部点投影匹配摘要（用于区分视锥筛选与描述子匹配问题）。
-        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+        for(int i = 0; i < mCurrentFrame.N; ++i)
         {
-            std::cout << "[SearchLocalPoints] frame=" << mCurrentFrame.mnId
-                      << " local_mps=" << mvpLocalMapPoints.size()
-                      << " already_matched=" << nAlreadyMatched
-                      << " bad_already_matched=" << nBadAlreadyMatched
-                      << " local_already_seen=" << nLocalAlreadySeen
-                      << " local_bad=" << nLocalBad
-                      << " local_found_ratio_gate=" << (bUseLocalFoundRatioGate ? 1 : 0)
-                      << " local_min_found_ratio=" << localMinFoundRatio
-                      << " local_found_ratio_rejected=" << nLocalFoundRatioRejected
-                      << " local_in_frustum=" << nLocalInFrustum
-                      << " local_track_in_view=" << nLocalTrackInView
-                      << " nToMatch=" << nToMatch
-                      << " th=" << th
-                      << " mode=" << (bUseORB ? "ORBProj" : (bUseLightGlueLocalMap ? "XFeatProj+LightGlueLocal" : "XFeatProj"))
-                      << " th_high=" << (bUseORB ? -1.0f : GetXFeatThHighLocalProjection())
-                      << " lg_local_enabled=" << (bUseLightGlueLocalMap ? 1 : 0)
-                      << " lg_local_failed=" << (bLightGlueLocalFailed ? 1 : 0)
-                      << " lg_local_kfs=" << lgLocalKFsUsed
-                      << " lg_local_raw_matches=" << lgLocalRawMatches
-                      << " lg_local_mp_valid=" << lgLocalMpValid
-                      << " lg_local_one_to_one=" << lgLocalOneToOne
-                      << " lg_local_filled=" << lgLocalFilled
-                      << " lg_local_occupied=" << lgLocalOccupied
-                      << " lg_local_duplicate_mp=" << lgLocalDuplicateMP
-                      << " lg_local_not_projected=" << lgLocalNotProjected
-                      << " lg_local_proj_reject=" << lgLocalProjReject
-                      << " lg_local_verify_candidates=" << lgLocalVerifyCandidates
-                      << " lg_local_verified=" << lgLocalVerified
-                      << " lg_local_rejected=" << lgLocalRejected
-                      << " lg_local_mismatch=" << lgLocalMismatch
-                      << " lg_local_conflict_low_score=" << lgLocalConflictLowScore
-                      << " lg_local_conflict_min_score=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalConflictMinScore() : 0.0f)
-                      << " lg_local_proj_radius=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalMapProjRadius() : 0.0f)
-                      << " far_filter=" << (bFarFilter ? "on" : "off")
-                      << " far_th=" << thFarPoints
-                      << " near_only_applied=" << (bNearOnlyApplied ? "true" : "false")
-                      << " matches=" << matches
-                      << " matches_total_added=" << (matches + lgLocalFilled)
-                      << std::endl;
-
-            const std::ios::fmtflags oldFlags = std::cout.flags();
-            const std::streamsize oldPrecision = std::cout.precision();
-            std::cout << std::fixed << std::setprecision(6)
-                      << "[SearchLocalPoints][MPQuality]"
-                      << " frame=" << mCurrentFrame.mnId
-                      << " mThDepth=" << mThDepth;
-            AppendMapPointQualityStats(std::cout, "already", mpQualityAlreadyMatched);
-            AppendMapPointQualityStats(std::cout, "seen", mpQualityLocalAlreadySeen);
-            AppendMapPointQualityStats(std::cout, "rejected", mpQualityFoundRatioRejected);
-            AppendMapPointQualityStats(std::cout, "frustum", mpQualityLocalInFrustum);
-            AppendMapPointQualityStats(std::cout, "trackview", mpQualityLocalTrackInView);
-            std::cout << std::endl;
-            std::cout.flags(oldFlags);
-            std::cout.precision(oldPrecision);
+            if(!vProjectionAdded[static_cast<size_t>(i)] || !mCurrentFrame.mvpMapPoints[i])
+                continue;
+            MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+            const float resolvedDepth = ResolveMapPointQualityDepth(mCurrentFrame, pMP, pMP->mTrackDepth);
+            if(pMP->GetCreationSource() == MapPoint::kCreationSourceTrackingStereo &&
+               std::isfinite(resolvedDepth) && resolvedDepth <= mThDepth)
+            {
+                localProjCloseTrackingStereoGeomAccept++;
+            }
         }
 
         // if (std::getenv("USE_ORB") == nullptr)
@@ -6001,8 +6622,17 @@ void Tracking::SearchLocalPoints()
         //     matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
         // }     
     }
-    else if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+    auto LogSearchLocalPointsDiagnostics = [&](const int matchesValue,
+                                               const int nToMatchValue,
+                                               const int thValue,
+                                               const bool bProjectionRun,
+                                               const bool bFarFilterValue,
+                                               const float thFarPointsValue,
+                                               const bool bNearOnlyAppliedValue)
     {
+        if(!ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+            return;
+
         std::cout << "[SearchLocalPoints] frame=" << mCurrentFrame.mnId
                   << " local_mps=" << mvpLocalMapPoints.size()
                   << " already_matched=" << nAlreadyMatched
@@ -6011,10 +6641,32 @@ void Tracking::SearchLocalPoints()
                   << " local_bad=" << nLocalBad
                   << " local_found_ratio_gate=" << (bUseLocalFoundRatioGate ? 1 : 0)
                   << " local_min_found_ratio=" << localMinFoundRatio
+                  << " local_found_ratio_min_depth=" << localMinFoundRatioDepth
+                  << " local_found_ratio_scope=" << localFoundRatioScope
                   << " local_found_ratio_rejected=" << nLocalFoundRatioRejected
+                  << " local_found_ratio_rejected_depth_qualified=" << localFoundRatioRejectedDepthQualified
+                  << " local_found_ratio_rejected_depth_qualified_local_mapping_triangulation="
+                  << localFoundRatioRejectedDepthQualifiedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceLocalMappingTriangulation)]
+                  << " local_found_ratio_rejected_tracking_stereo="
+                  << localFoundRatioRejectedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceTrackingStereo)]
+                  << " local_found_ratio_rejected_local_mapping_triangulation="
+                  << localFoundRatioRejectedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceLocalMappingTriangulation)]
+                  << " local_found_ratio_rejected_mono_init="
+                  << localFoundRatioRejectedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceMonoInit)]
+                  << " local_found_ratio_rejected_stereo_init="
+                  << localFoundRatioRejectedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceStereoInit)]
+                  << " local_found_ratio_rejected_unknown="
+                  << localFoundRatioRejectedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceUnknown)]
                   << " local_in_frustum=" << nLocalInFrustum
                   << " local_track_in_view=" << nLocalTrackInView
-                  << " nToMatch=0"
+                  << " local_proj_close_tracking_stereo_candidates=" << localProjCloseTrackingStereoCandidates
+                  << " local_proj_close_tracking_stereo_geom_accept=" << localProjCloseTrackingStereoGeomAccept
+                  << " local_proj_close_tracking_stereo_reject_ur=" << localProjCloseTrackingStereoRejectUr
+                  << " local_proj_close_tracking_stereo_reject_depth=" << localProjCloseTrackingStereoRejectDepth
+                  << " nToMatch=" << nToMatchValue
+                  << " th=" << thValue
+                  << " mode=" << (bUseORB ? "ORBProj" : (bUseLightGlueLocalMap ? "XFeatProj+LightGlueLocal" : "XFeatProj"))
+                  << " th_high=" << (bUseORB ? -1.0f : GetXFeatThHighLocalProjection())
                   << " lg_local_enabled=" << (bUseLightGlueLocalMap ? 1 : 0)
                   << " lg_local_failed=" << (bLightGlueLocalFailed ? 1 : 0)
                   << " lg_local_kfs=" << lgLocalKFsUsed
@@ -6032,10 +6684,19 @@ void Tracking::SearchLocalPoints()
                   << " lg_local_mismatch=" << lgLocalMismatch
                   << " lg_local_conflict_low_score=" << lgLocalConflictLowScore
                   << " lg_local_conflict_min_score=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalConflictMinScore() : 0.0f)
-                  << " lg_local_proj_radius=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalMapProjRadius() : 0.0f)
-                  << " matches=0"
-                  << " matches_total_added=" << lgLocalFilled
+                  << " lg_local_proj_radius=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalMapProjRadius() : 0.0f);
+        if(bProjectionRun)
+        {
+            std::cout << " far_filter=" << (bFarFilterValue ? "on" : "off")
+                      << " far_th=" << thFarPointsValue
+                      << " near_only_applied=" << (bNearOnlyAppliedValue ? "true" : "false");
+        }
+        std::cout << " matches=" << matchesValue
+                  << " matches_total_added=" << (matchesValue + lgLocalFilled)
                   << std::endl;
+
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
 
         const std::ios::fmtflags oldFlags = std::cout.flags();
         const std::streamsize oldPrecision = std::cout.precision();
@@ -6051,7 +6712,15 @@ void Tracking::SearchLocalPoints()
         std::cout << std::endl;
         std::cout.flags(oldFlags);
         std::cout.precision(oldPrecision);
-    }
+    };
+
+    LogSearchLocalPointsDiagnostics(projectionMatches,
+                                    nToMatch,
+                                    projectionTh,
+                                    bProjectionRun,
+                                    projectionFarFilter,
+                                    projectionFarPoints,
+                                    projectionNearOnlyApplied);
 }
 
 void Tracking::UpdateLocalMap()

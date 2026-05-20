@@ -101,6 +101,7 @@ public:
     void NewDataset();
     int GetNumberDataset();
     int GetMatchesInliers();
+    float GetDepthThreshold() const { return mThDepth; }
 
     //DEBUG
     void SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, string strFolder="");

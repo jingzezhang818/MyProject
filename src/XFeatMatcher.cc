@@ -183,6 +183,42 @@ bool UseXFeatProjectionLevelGate()
     return enabled;
 }
 
+float ResolveMapPointDepthInFrame(const Frame& F, MapPoint* pMP)
+{
+    if(!pMP)
+        return std::numeric_limits<float>::quiet_NaN();
+
+    try
+    {
+        const Eigen::Vector3f pc = F.GetPose() * pMP->GetWorldPos();
+        return pc[2];
+    }
+    catch(...)
+    {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+}
+
+bool ShouldApplyCloseTrackingStereoGeometryGate(const Frame& F, MapPoint* pMP)
+{
+    if(!pMP)
+        return false;
+    if(F.Nleft != -1)
+        return false;
+    if(pMP->GetCreationSource() != MapPoint::kCreationSourceTrackingStereo)
+        return false;
+
+    const float depth = ResolveMapPointDepthInFrame(F, pMP);
+    return std::isfinite(depth) && depth > 0.0f && depth <= F.mThDepth;
+}
+
+bool HasValidStereoObservation(const Frame& F, const size_t idx)
+{
+    return idx < F.mvuRight.size() && idx < F.mvDepth.size() &&
+           F.mvuRight[idx] > 0.0f &&
+           std::isfinite(F.mvDepth[idx]) && F.mvDepth[idx] > 0.0f;
+}
+
 int GetXFeatProjMapMinOffset()
 {
     //调试: MapPoint投影路径的最小层级偏移（相对预测层）。
@@ -1556,6 +1592,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
     const float thHigh = (std::isfinite(thHighOverride) && thHighOverride > 0.0f)
         ? std::min(2.0f, std::max(0.05f, thHighOverride))
         : TH_HIGH;
+    mLastProjectionMapPointStats = ProjectionMapPointStats();
 
     int rawMatches = 0;
     int ratioMatches = 0;
@@ -1624,6 +1661,10 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             continue;
         }
         ++projectedMapPoints;
+        const bool useCloseTrackingStereoGeomGate = ShouldApplyCloseTrackingStereoGeometryGate(F, pMP);
+        const float projDepthZ = useCloseTrackingStereoGeomGate
+            ? ResolveMapPointDepthInFrame(F, pMP)
+            : std::numeric_limits<float>::quiet_NaN();
 
         if(pMP->mbTrackInView)
         {
@@ -1673,8 +1714,29 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 if(F.Nleft == -1 && idx < F.mvuRight.size() && F.mvuRight[idx] > 0)
                 {
                     const float er = std::fabs(pMP->mTrackProjXR - F.mvuRight[idx]);
-                    if(er > r * F.mvScaleFactors[nPredictedLevel])
+                    const float baseUrThreshold = r * F.mvScaleFactors[nPredictedLevel];
+                    const float urThreshold = useCloseTrackingStereoGeomGate ? (0.5f * baseUrThreshold) : baseUrThreshold;
+                    if(er > urThreshold)
+                    {
+                        if(useCloseTrackingStereoGeomGate)
+                            ++mLastProjectionMapPointStats.close_tracking_stereo_reject_ur;
                         continue;
+                    }
+                }
+
+                if(useCloseTrackingStereoGeomGate && HasValidStereoObservation(F, idx))
+                {
+                    const float obsDepth = F.mvDepth[idx];
+                    const float denom = std::max(obsDepth, projDepthZ);
+                    if(std::isfinite(projDepthZ) && denom > 0.0f)
+                    {
+                        const float relDepthErr = std::fabs(obsDepth - projDepthZ) / denom;
+                        if(relDepthErr > 0.35f)
+                        {
+                            ++mLastProjectionMapPointStats.close_tracking_stereo_reject_depth;
+                            continue;
+                        }
+                    }
                 }
 
                 const float dist = candidateDistances[iC];
@@ -1845,7 +1907,15 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             continue;
 
         if(assignIfFree(featIdx, c.pMP))
+        {
             ++finalMatches;
+            if(c.pMP->GetCreationSource() == MapPoint::kCreationSourceTrackingStereo)
+            {
+                const float acceptedDepth = ResolveMapPointDepthInFrame(F, c.pMP);
+                if(std::isfinite(acceptedDepth) && acceptedDepth > 0.0f && acceptedDepth <= F.mThDepth)
+                    ++mLastProjectionMapPointStats.close_tracking_stereo_accepted;
+            }
+        }
         else
             ++assignRejectMatches;
 
@@ -1913,6 +1983,8 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                       << " projected_mp=" << projectedMapPoints
                       << " reject_empty_area=" << emptyAreaRejectMatches
                       << " reject_dist=" << distRejectMatches
+                      << " reject_geom_stereo_ur=" << mLastProjectionMapPointStats.close_tracking_stereo_reject_ur
+                      << " reject_geom_stereo_depth=" << mLastProjectionMapPointStats.close_tracking_stereo_reject_depth
                       << " reject_ratio=" << ratioRejectMatches
                       << " reject_assign=" << assignRejectMatches
                       << " reject_spatial=" << spatialStats.dropped

@@ -17,6 +17,13 @@ namespace ORB_SLAM3
 class XFeatMatcher
 {
 public:
+    struct ProjectionMapPointStats
+    {
+        int close_tracking_stereo_reject_ur = 0;
+        int close_tracking_stereo_reject_depth = 0;
+        int close_tracking_stereo_accepted = 0;
+    };
+
     XFeatMatcher(float nnratio = 0.8f, bool checkOri = false);
 
     // Computes the L2 distance between two float descriptors.
@@ -64,6 +71,8 @@ public:
                    std::vector<MapPoint*> &vpMapPointMatches,
                    const float thHighOverride = -1.0f);
 
+    const ProjectionMapPointStats& LastProjectionMapPointStats() const { return mLastProjectionMapPointStats; }
+
 public:
     static const float TH_LOW;
     static const float TH_HIGH;
@@ -75,6 +84,7 @@ protected:
 
     float mfNNratio;
     bool mbCheckOrientation;
+    ProjectionMapPointStats mLastProjectionMapPointStats;
 };
 
 } // namespace ORB_SLAM3

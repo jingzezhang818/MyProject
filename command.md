@@ -27,8 +27,6 @@
 
 ```bash
 mkdir -p experiment_logs/Monocular/EuRoC/MH_01_easy
-XFEAT_DEVICE=auto \
-XFEAT_CUDA_DEVICE=0 \
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
@@ -45,6 +43,7 @@ XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 
 ```bash
 python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/MH_01_easy.tum \
   --est-traj f_EuRoC_MH_01_easy_mono.txt \
   --out-est experiment_logs/Monocular/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_mono.tum \
   --timestamp-unit ns
@@ -63,14 +62,10 @@ evo_traj tum experiment_logs/Monocular/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_M
 
 ```bash
 mkdir -p experiment_logs/Stereo/EuRoC/MH_01_easy
-XFEAT_DEVICE=auto \
-XFEAT_CUDA_DEVICE=0 \
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 XFEAT_USE_LIGHTGLUE_MOTION=1 \
-XFEAT_LG_MOTION_POLICY=projection_first \
-XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/EuRoC.yaml \
@@ -84,6 +79,7 @@ XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
 
 ```bash
 python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/MH_01_easy.tum \
   --est-traj f_EuRoC_MH_01_easy_stereo.txt \
   --out-est experiment_logs/Stereo/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_stereo.tum \
   --timestamp-unit ns
@@ -102,8 +98,6 @@ evo_traj tum experiment_logs/Stereo/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_0
 
 ```bash
 mkdir -p experiment_logs/Monocular/EuRoC/MH_04_difficult
-XFEAT_DEVICE=auto \
-XFEAT_CUDA_DEVICE=0 \
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
@@ -120,6 +114,7 @@ XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 
 ```bash
 python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/MH_04_difficult.tum \
   --est-traj f_EuRoC_MH_04_difficult_mono.txt \
   --out-est experiment_logs/Monocular/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_mono.tum \
   --timestamp-unit ns
@@ -138,14 +133,10 @@ evo_traj tum experiment_logs/Monocular/EuRoC/MH_04_difficult/CameraTrajectory_Eu
 
 ```bash
 mkdir -p experiment_logs/Stereo/EuRoC/MH_04_difficult
-XFEAT_DEVICE=auto \
-XFEAT_CUDA_DEVICE=0 \
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 XFEAT_USE_LIGHTGLUE_MOTION=1 \
-XFEAT_LG_MOTION_POLICY=projection_first \
-XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/EuRoC.yaml \
@@ -159,6 +150,7 @@ XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
 
 ```bash
 python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/MH_04_difficult.tum \
   --est-traj f_EuRoC_MH_04_difficult_stereo.txt \
   --out-est experiment_logs/Stereo/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_stereo.tum \
   --timestamp-unit ns
@@ -177,8 +169,6 @@ evo_traj tum experiment_logs/Stereo/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC
 
 ```bash
 mkdir -p experiment_logs/Monocular/EuRoC/V2_03_difficult
-XFEAT_DEVICE=auto \
-XFEAT_CUDA_DEVICE=0 \
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
@@ -195,6 +185,7 @@ XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 
 ```bash
 python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V2_03_difficult.tum \
   --est-traj f_EuRoC_V2_03_difficult_mono.txt \
   --out-est experiment_logs/Monocular/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_mono.tum \
   --timestamp-unit ns
@@ -213,14 +204,10 @@ evo_traj tum experiment_logs/Monocular/EuRoC/V2_03_difficult/CameraTrajectory_Eu
 
 ```bash
 mkdir -p experiment_logs/Stereo/EuRoC/V2_03_difficult
-XFEAT_DEVICE=auto \
-XFEAT_CUDA_DEVICE=0 \
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 XFEAT_USE_LIGHTGLUE_MOTION=1 \
-XFEAT_LG_MOTION_POLICY=projection_first \
-XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/EuRoC.yaml \
@@ -234,6 +221,7 @@ XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
 
 ```bash
 python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V2_03_difficult.tum \
   --est-traj f_EuRoC_V2_03_difficult_stereo.txt \
   --out-est experiment_logs/Stereo/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_stereo.tum \
   --timestamp-unit ns
@@ -274,6 +262,7 @@ XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 
 ```bash
 python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/SePT01/SePT01.tum \
   --est-traj f_SePT01_mono.txt \
   --out-est experiment_logs/Monocular/SePT01/SePT01/CameraTrajectory_SePT01_mono.tum \
   --timestamp-unit ns
@@ -288,18 +277,19 @@ evo_traj tum experiment_logs/Monocular/SePT01/SePT01/CameraTrajectory_SePT01_mon
 
 #### 双目
 
-运行命令：
+日志阅读层级：
+
+- 默认摘要：`XFEAT_DEBUG=1` 时重点看 `[SearchLocalPoints]`、`[TrackLocalMap][Diag]`、`[TrackLocalMap][SourceError]`、`[TrackLocalMap][SourceMPJointError]`、`[TrackLocalMap][InlierMix]`、`[LocalMapping][LongWeakMP]`、`[PoseOptimization][Weight]`
+- 扩展细节：需要抽样看深度/质量分桶时，再临时加 `XFEAT_DIAG_FEATURE_DISTRIBUTION=1`，重点看 `[SearchLocalPoints][MPQuality]`、`[TrackLocalMap][MPQuality]`、`[TrackLocalMap][StereoDepth]`、`[TrackLocalMap][SourceDepthError]`、`[TrackLocalMap][MPSourceDepthError]`、`[LocalMapping][LongWeakMPQuality]`、`[LocalMapping][LongWeakMPSource]`
+
+`baseline`：
 
 ```bash
-mkdir -p experiment_logs/Stereo/SePT/SePT01
-XFEAT_DEVICE=auto \
-XFEAT_CUDA_DEVICE=0 \
-XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DEBUG_MATCHER_VERBOSE=1 \
+XFEAT_DEBUG=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 XFEAT_USE_LIGHTGLUE_MOTION=1 \
-XFEAT_LG_MOTION_POLICY=projection_first \
-XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/SePT01.yaml \
@@ -313,9 +303,66 @@ XFEAT_LG_MOTION_USE_PROJ_GATE=1 \
 
 ```bash
 python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/SePT01/SePT01.tum \
   --est-traj f_SePT01_stereo.txt \
   --out-est experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum \
-  --timestamp-unit ns
+  --timestamp-unit ns \
+  --estimate-right-rot
+```
+
+`map_hygiene`：
+
+```bash
+XFEAT_DEBUG_MATCHER_VERBOSE=1 \
+XFEAT_DEBUG=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+XFEAT_LOCALMAP_FOUND_RATIO_GATE=1 \
+XFEAT_LOCALMAP_FOUND_RATIO_MIN=0.25 \
+XFEAT_LOCALMAP_FOUND_RATIO_MIN_DEPTH=-1 \
+XFEAT_LOCALMAP_FOUND_RATIO_SCOPE=triang_only \
+XFEAT_LOCALMAP_LONG_WEAK_MP_CULL=1 \
+XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_AGE_KF=10 \
+XFEAT_LOCALMAP_LONG_WEAK_MP_MAX_FOUND_RATIO=0.25 \
+XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_DEPTH=-1 \
+XFEAT_LOCALMAP_LONG_WEAK_MP_SCOPE=triang_only \
+XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL=5 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/SePT01.yaml \
+  /mnt/d/data_set/SePT01/mav0 \
+  examples/Stereo/SePT01_TimeStamps/times.txt \
+  SePT01_stereo \
+  2>&1 | tee experiment_logs/Stereo/SePT/SePT01/run_SePT01_stereo_local_fr_depth_longweak.log
+```
+
+`local_proj_precision`（close tracking-stereo geometry screening + close/mid stereo cost volume / coarse-to-fine refinement / LR-aware sigma modeling，命令不变，无新增环境变量）：
+
+```bash
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DEBUG_MATCHER_VERBOSE=1 \
+XFEAT_DEBUG=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+XFEAT_LOCALMAP_FOUND_RATIO_GATE=1 \
+XFEAT_LOCALMAP_FOUND_RATIO_MIN=0.25 \
+XFEAT_LOCALMAP_FOUND_RATIO_MIN_DEPTH=-1 \
+XFEAT_LOCALMAP_FOUND_RATIO_SCOPE=triang_only \
+XFEAT_LOCALMAP_LONG_WEAK_MP_CULL=1 \
+XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_AGE_KF=10 \
+XFEAT_LOCALMAP_LONG_WEAK_MP_MAX_FOUND_RATIO=0.25 \
+XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_DEPTH=-1 \
+XFEAT_LOCALMAP_LONG_WEAK_MP_SCOPE=triang_only \
+XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL=5 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/SePT01.yaml \
+  /mnt/d/data_set/SePT01/mav0 \
+  examples/Stereo/SePT01_TimeStamps/times.txt \
+  SePT01_stereo \
+  2>&1 | tee experiment_logs/Stereo/SePT/SePT01/run_SePT01_stereo_local_proj_precision.log
 ```
 
 轨迹评估命令：
@@ -324,6 +371,7 @@ python convert_euroc_to_tum.py \
 evo_ape tum examples/GroundTruth/SePT01/SePT01.tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum -r trans_part -a -p
 evo_traj tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum --ref=examples/GroundTruth/SePT01/SePT01.tum -a -p
 ```
+
 
 ## 2. 环境变量参考
 
@@ -336,12 +384,24 @@ evo_traj tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.t
 |---|---|---|---|---|
 | `USE_ORB` | 切换到 ORB 前端 | 未设置 | — | `src/Tracking.cc:2328-2350` |
 | `XFEAT_DEBUG` | 全局调试输出（高频） | 关 | — | `src/Tracking.cc:65-69`, `src/Frame.cc:43-53` |
-| `XFEAT_DIAG_FEATURE_DISTRIBUTION` | 特征分布诊断日志 | 关 | — | `src/Tracking.cc:72-77,3322-3327` |
+| `XFEAT_DIAG_FEATURE_DISTRIBUTION` | 扩展细节诊断日志；关闭时保留摘要，开启时再打印质量/深度分桶 | 关 | — | `src/Tracking.cc:72-77,3322-3327` |
 | `XFEAT_DIAG_INTERVAL` | 诊断日志间隔帧数 | `1` | `[1,500]` | `src/Tracking.cc:79-99` |
 | `XFEAT_DIAG_GRID_COLS` | 诊断空间网格列数 | `8` | `[2,64]` | `src/Tracking.cc:102-123` |
 | `XFEAT_DIAG_GRID_ROWS` | 诊断空间网格行数 | `6` | `[2,64]` | `src/Tracking.cc:125-146` |
 | `XFEAT_FPS` / `SLAM_FPS` | RuntimeFPS 日志 | 关 | — | `src/Tracking.cc:148-152` |
 | `XFEAT_FPS_INTERVAL` / `SLAM_FPS_INTERVAL` | RuntimeFPS 输出间隔 | `30` | `[1,1000]` | `src/Tracking.cc:154-176` |
+| `XFEAT_LOCALMAP_FOUND_RATIO_GATE` | `SearchLocalPoints` 中启用 LocalMap found-ratio gate | 关 | — | `src/Tracking.cc` |
+| `XFEAT_LOCALMAP_FOUND_RATIO_MIN` | LocalMap found-ratio gate 最小阈值 | `0.25` | `[0,1]` | `src/Tracking.cc` |
+| `XFEAT_LOCALMAP_FOUND_RATIO_MIN_DEPTH` | LocalMap found-ratio gate 最小深度阈值；`<=0` 时复用当前帧 `mThDepth` | `-1` | `[-1,10000]` | `src/Tracking.cc` |
+| `XFEAT_LOCALMAP_FOUND_RATIO_SCOPE` | LocalMap found-ratio gate 作用范围；`triang_only`/`all` | `triang_only` | — | `src/Tracking.cc` |
+| `XFEAT_LOCALMAP_LONG_WEAK_MP_CULL` | 在 LocalMapping 中启用长期弱点地图点清理 | 关 | — | `src/LocalMapping.cc` |
+| `XFEAT_LOCALMAP_LONG_WEAK_MP_SCOPE` | 长期弱点清理作用范围；`triang_only`/`all` | `triang_only` | — | `src/LocalMapping.cc` |
+| `XFEAT_LOCALMAP_LONG_WEAK_MP_MAX_FOUND_RATIO` | 长期弱点清理的最大 found-ratio 阈值 | `0.25` | `[0,1]` | `src/LocalMapping.cc` |
+| `XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_DEPTH` | 长期弱点清理最小深度阈值；`<=0` 时复用 `mThDepth` | `-1` | `[-1,10000]` | `src/LocalMapping.cc` |
+| `XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_AGE_KF` | 长期弱点清理最小关键帧年龄 | `10` | `[1,1000000]` | `src/LocalMapping.cc` |
+| `XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL` | 长期弱点清理执行间隔（keyframe） | `5` | `[1,1000000]` | `src/LocalMapping.cc` |
+| `XFEAT_LOCALMAP_TRIANG_PO_WEIGHT` | 对 `local_proj + local_mapping_triangulation + far` 观测在 PoseOptimization 中做额外降权；`1.0` 为关闭。当前实验已验证收益有限 | `1.0` | `(0,1]` | `src/Optimizer.cc` |
+| `XFEAT_LOCALMAP_TRIANG_PO_MIN_DEPTH` | 上述降权的最小深度阈值；`<=0` 时复用当前帧 `mThDepth` | `-1` | `[-1,10000]` | `src/Optimizer.cc` |
 
 ### 2.2 跟踪 / 重定位
 
@@ -351,8 +411,10 @@ evo_traj tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.t
 | `XFEAT_MONO_NEAR_DEPTH_FACTOR` | near-only 深度阈值系数 | `2.5` | `>0` | `src/Tracking.cc:682-700` |
 | `XFEAT_RELOC_INLIER_TH` | 重定位后内点阈值 | `35` | `>0` | `src/Tracking.cc:635-653,4475-4477` |
 | `XFEAT_INIT_MIN_BASELINE_DEPTH_RATIO` | 单目初始化 baseline/medianDepth 下限 | `0.01` | `>0` | `src/Tracking.cc:655-673` |
-| `XFEAT_STEREO_DESC_TH` | 立体描述子阈值 | `1.35` | `[0.05,2.0]` | `src/Frame.cc:56-71` |
-| `XFEAT_STEREO_MIN_DISPARITY` | 最小视差（像素） | `1.0` | `[0,100]` | `src/Frame.cc:73-91` |
+| `XFEAT_STEREO_DESC_TH` | 立体描述子阈值 | `1.35` | `[0.05,2.0]` | `src/Frame.cc` |
+| `XFEAT_STEREO_MIN_DISPARITY` | 最小视差（像素），控制远深度尾部 | `1.5` | `[0,100]` | `src/Frame.cc` |
+| `XFEAT_STEREO_MAX_Y_ERR` | 双目极线 y 误差阈值（按 octave scale 放大） | `1.5` | `[0,20]` | `src/Frame.cc` |
+| `XFEAT_STEREO_MAX_REL_DEPTH_SIGMA` | 相对深度不确定性上限，`<=0` 关闭 | `0.50` | `[-1,10]` | `src/Frame.cc` |
 | `XFEAT_PIXEL_SIGMA` | 视觉误差像素 sigma | `1.0` | `[0.5,5.0]` | `src/Optimizer.cc:59-77` |
 
 #### XFeat 阈值

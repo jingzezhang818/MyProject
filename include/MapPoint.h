@@ -107,6 +107,15 @@ class MapPoint
 
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    enum CreationSource : unsigned char
+    {
+        kCreationSourceUnknown = 0,
+        kCreationSourceTrackingStereo = 1,
+        kCreationSourceLocalMappingTriangulation = 2,
+        kCreationSourceMonoInit = 3,
+        kCreationSourceStereoInit = 4
+    };
+
     MapPoint();
 
     MapPoint(const Eigen::Vector3f &Pos, KeyFrame* pRefKF, Map* pMap);
@@ -167,6 +176,8 @@ public:
 
     Map* GetMap();
     void UpdateMap(Map* pMap);
+    void SetCreationSource(const CreationSource source);
+    CreationSource GetCreationSource() const;
 
     void PrintObservations();
 
@@ -179,6 +190,7 @@ public:
     long int mnFirstKFid;
     long int mnFirstFrame;
     int nObs;
+    CreationSource mCreationSource;
 
     // Variables used by the tracking
     float mTrackProjX;

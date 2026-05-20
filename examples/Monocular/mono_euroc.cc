@@ -52,6 +52,7 @@ int main(int argc, char **argv)
     int seq;
     vector< vector<string> > vstrImageFilenames;
     vector< vector<double> > vTimestampsCam;
+    
     vector<int> nImages;
 
     vstrImageFilenames.resize(num_seq);

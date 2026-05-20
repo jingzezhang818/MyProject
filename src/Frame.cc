@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace ORB_SLAM3
 {
@@ -102,7 +103,7 @@ namespace
     {
         //最小视差阈值(像素),过滤远距离"假立体"点.
         //视差小于该阈值时深度不确定性极高,立体观测退化为噪声.
-        //对于SePT01(fx=610,基线=0.15m): 1.0px视差→深度≈91.5m, 2.0px→45.8m.
+        //对于SePT01(fx=610,基线=0.15m): 1.0px视差→深度≈91.5m, 1.5px→61.0m, 2.0px→45.8m.
         static const float minDisp = []() {
             float value = 1.0f;
             const char* env = std::getenv("XFEAT_STEREO_MIN_DISPARITY");
@@ -116,6 +117,70 @@ namespace
             return std::max(0.0f, std::min(100.0f, value));
         }();
         return minDisp;
+    }
+
+    float GetXFeatStereoMaxYError()
+    {
+        // XFeat双目极线一致性阈值,会按keypoint octave scale放大. <=0关闭该过滤.
+        static const float maxYErr = []() {
+            float value = 0.0f;
+            const char* env = std::getenv("XFEAT_STEREO_MAX_Y_ERR");
+            if(env && env[0] != '\0')
+            {
+                char* end = nullptr;
+                const float parsed = std::strtof(env, &end);
+                if(end != env && std::isfinite(parsed))
+                    value = parsed;
+            }
+            return std::max(0.0f, std::min(20.0f, value));
+        }();
+        return maxYErr;
+    }
+
+    float GetXFeatStereoMaxRelativeDepthSigma()
+    {
+        // sigma_z / z ~= sigma_disp / disparity. <=0关闭该过滤.
+        static const float maxRelSigma = []() {
+            float value = 0.0f;
+            const char* env = std::getenv("XFEAT_STEREO_MAX_REL_DEPTH_SIGMA");
+            if(env && env[0] != '\0')
+            {
+                char* end = nullptr;
+                const float parsed = std::strtof(env, &end);
+                if(end != env && std::isfinite(parsed))
+                    value = parsed;
+            }
+            return std::max(-1.0f, std::min(10.0f, value));
+        }();
+        return maxRelSigma;
+    }
+
+    float GetXFeatStereoBirthCloseMaxYError()
+    {
+        const float base = GetXFeatStereoMaxYError();
+        if(base > 0.0f)
+            return std::max(0.1f, 0.5f * base);
+        return 1.0f;
+    }
+
+    float GetXFeatStereoBirthCloseMaxRelativeDepthSigma()
+    {
+        const float base = GetXFeatStereoMaxRelativeDepthSigma();
+        if(base > 0.0f)
+            return std::max(1e-3f, 0.5f * base);
+        return 0.15f;
+    }
+
+    bool IsXFeatStereoSubpixelEnabled()
+    {
+        static const bool enabled = []() {
+            const char* env = std::getenv("XFEAT_STEREO_SUBPIXEL");
+            if(!env)
+                return false;
+            const std::string value(env);
+            return !(value.empty() || value == "0" || value == "false" || value == "FALSE");
+        }();
+        return enabled;
     }
 
     float GetXFeatStereoRatio()
@@ -135,6 +200,16 @@ namespace
             return std::max(0.0f, std::min(1.0f, value));
         }();
         return ratio;
+    }
+
+    float PercentileFromSorted(const std::vector<float>& sortedValues, const float percentile)
+    {
+        if(sortedValues.empty())
+            return -1.0f;
+        const float clamped = std::max(0.0f, std::min(1.0f, percentile));
+        const size_t idx = std::min(sortedValues.size() - 1,
+                                    static_cast<size_t>(std::round(clamped * static_cast<float>(sortedValues.size() - 1))));
+        return sortedValues[idx];
     }
 
     bool IsXFeatStereoMutualEnabled()
@@ -188,6 +263,772 @@ namespace
             return DescriptorDistanceFloatMat(a, b);
         return static_cast<float>(ORBmatcher::DescriptorDistance(a, b));
     }
+
+    float ZeroMeanPatchDistanceL1(const cv::Mat& patchA, const cv::Mat& patchB)
+    {
+        if(patchA.empty() || patchB.empty() || patchA.size() != patchB.size())
+            return std::numeric_limits<float>::infinity();
+
+        cv::Mat patchA32;
+        cv::Mat patchB32;
+        patchA.convertTo(patchA32, CV_32F);
+        patchB.convertTo(patchB32, CV_32F);
+
+        const cv::Scalar meanA = cv::mean(patchA32);
+        const cv::Scalar meanB = cv::mean(patchB32);
+        patchA32 -= meanA;
+        patchB32 -= meanB;
+
+        return static_cast<float>(cv::norm(patchA32, patchB32, cv::NORM_L1));
+    }
+
+    float ZeroMeanPatchZNCC(const cv::Mat& patchA, const cv::Mat& patchB)
+    {
+        if(patchA.empty() || patchB.empty() || patchA.size() != patchB.size())
+            return -std::numeric_limits<float>::infinity();
+
+        cv::Mat patchA32;
+        cv::Mat patchB32;
+        patchA.convertTo(patchA32, CV_32F);
+        patchB.convertTo(patchB32, CV_32F);
+
+        const cv::Scalar meanA = cv::mean(patchA32);
+        const cv::Scalar meanB = cv::mean(patchB32);
+        patchA32 -= meanA;
+        patchB32 -= meanB;
+
+        const double normA = cv::norm(patchA32, cv::NORM_L2);
+        const double normB = cv::norm(patchB32, cv::NORM_L2);
+        if(!std::isfinite(normA) || !std::isfinite(normB) || normA <= 1e-6 || normB <= 1e-6)
+            return -std::numeric_limits<float>::infinity();
+
+        const double zncc = patchA32.dot(patchB32) / (normA * normB);
+        return static_cast<float>(zncc);
+    }
+
+    struct XFeatStereoSubpixelRefinement
+    {
+        bool success = false;
+        float refinedUR = 0.0f;
+        float cost1 = std::numeric_limits<float>::infinity();
+        float cost2 = std::numeric_limits<float>::infinity();
+        float cost3 = std::numeric_limits<float>::infinity();
+        float combined1 = std::numeric_limits<float>::infinity();
+        float combined2 = std::numeric_limits<float>::infinity();
+        float combined3 = std::numeric_limits<float>::infinity();
+        float score1 = -std::numeric_limits<float>::infinity();
+        float score2 = -std::numeric_limits<float>::infinity();
+        float score3 = -std::numeric_limits<float>::infinity();
+        float curvatureCost = std::numeric_limits<float>::quiet_NaN();
+        float marginCost = std::numeric_limits<float>::quiet_NaN();
+        float curvatureCombined = std::numeric_limits<float>::quiet_NaN();
+        float marginCombined = std::numeric_limits<float>::quiet_NaN();
+        float peakScore = std::numeric_limits<float>::quiet_NaN();
+    };
+
+    struct XFeatStereoPatchSearchResult
+    {
+        bool success = false;
+        float seedUR = 0.0f;
+        float coarseWinnerUR = 0.0f;
+        float secondBestUR = 0.0f;
+        float winnerShift = 0.0f;
+        float bandWidth = 0.0f;
+        float bestCombined = std::numeric_limits<float>::infinity();
+        float secondBestCombined = std::numeric_limits<float>::infinity();
+        XFeatStereoSubpixelRefinement refinement;
+    };
+
+    float SmoothCombinedSample(const std::vector<float>& combineds, const int idx)
+    {
+        if(idx <= 0 || idx >= static_cast<int>(combineds.size()) - 1)
+            return std::numeric_limits<float>::infinity();
+
+        const float left = combineds[idx - 1];
+        const float center = combineds[idx];
+        const float right = combineds[idx + 1];
+        if(!std::isfinite(left) || !std::isfinite(center) || !std::isfinite(right))
+            return std::numeric_limits<float>::infinity();
+
+        return 0.25f * left + 0.5f * center + 0.25f * right;
+    }
+
+    bool ComputeRobustFiniteRange(const std::vector<float>& values,
+                                  const float /*lowerQuantile*/,
+                                  const float /*upperQuantile*/,
+                                  float& lower,
+                                  float& upper)
+    {
+        lower = std::numeric_limits<float>::infinity();
+        upper = -std::numeric_limits<float>::infinity();
+        bool hasFinite = false;
+        for(const float value : values)
+        {
+            if(std::isfinite(value))
+            {
+                lower = std::min(lower, value);
+                upper = std::max(upper, value);
+                hasFinite = true;
+            }
+        }
+
+        if(!hasFinite)
+            return false;
+
+        return std::isfinite(lower) && std::isfinite(upper);
+    }
+
+    float NormalizeFiniteValueClamped(const float value, const float lower, const float upper)
+    {
+        if(!std::isfinite(value))
+            return std::numeric_limits<float>::infinity();
+
+        const float range = upper - lower;
+        if(!std::isfinite(range) || range <= 1e-4f)
+            return 0.5f;
+
+        const float normalized = (value - lower) / range;
+        return std::max(0.0f, std::min(1.0f, normalized));
+    }
+
+    float ComputeStereoPeakScore(const float score1, const float score2, const float score3)
+    {
+        if(!std::isfinite(score1) || !std::isfinite(score2) || !std::isfinite(score3))
+            return -std::numeric_limits<float>::infinity();
+
+        return score2 - std::max(score1, score3);
+    }
+
+    bool ExtractPatchAtFloatCenter(const cv::Mat& image,
+                                   const cv::Point2f& center,
+                                   const int halfWindow,
+                                   cv::Mat& patch)
+    {
+        if(image.empty())
+            return false;
+
+        if(center.x - static_cast<float>(halfWindow) < 0.0f ||
+           center.x + static_cast<float>(halfWindow) >= static_cast<float>(image.cols) ||
+           center.y - static_cast<float>(halfWindow) < 0.0f ||
+           center.y + static_cast<float>(halfWindow) >= static_cast<float>(image.rows))
+        {
+            return false;
+        }
+
+        cv::getRectSubPix(image, cv::Size(2 * halfWindow + 1, 2 * halfWindow + 1), center, patch);
+        return !patch.empty();
+    }
+
+    bool RefineXFeatStereoSubpixel(const std::vector<cv::Mat>* pLeftPyramid,
+                                   const std::vector<cv::Mat>* pRightPyramid,
+                                   const std::vector<float>& scaleFactors,
+                                   const std::vector<float>& invScaleFactors,
+                                   const cv::KeyPoint& kpL,
+                                   const cv::KeyPoint& kpR,
+                                   XFeatStereoSubpixelRefinement& refinement)
+    {
+        if(!pLeftPyramid || !pRightPyramid)
+            return false;
+
+        const int level = kpL.octave;
+        if(level < 0 ||
+           level >= static_cast<int>(pLeftPyramid->size()) ||
+           level >= static_cast<int>(pRightPyramid->size()) ||
+           level >= static_cast<int>(scaleFactors.size()) ||
+           level >= static_cast<int>(invScaleFactors.size()))
+        {
+            return false;
+        }
+
+        const cv::Mat& imL = (*pLeftPyramid)[level];
+        const cv::Mat& imR = (*pRightPyramid)[level];
+        if(imL.empty() || imR.empty())
+            return false;
+
+        const int w = 5;
+        const int L = 3;
+        const float invScale = invScaleFactors[level];
+        const int scaleduL = cvRound(kpL.pt.x * invScale);
+        const int scaledvL = cvRound(kpL.pt.y * invScale);
+        const int scaleduR0 = cvRound(kpR.pt.x * invScale);
+        const int scaledvR = cvRound(kpR.pt.y * invScale);
+
+        if(scaledvL - w < 0 || scaledvL + w + 1 > imL.rows ||
+           scaleduL - w < 0 || scaleduL + w + 1 > imL.cols ||
+           scaledvR - w < 0 || scaledvR + w + 1 > imR.rows ||
+           scaleduR0 - L - w < 0 || scaleduR0 + L + w + 1 > imR.cols)
+        {
+            return false;
+        }
+
+        const cv::Mat patchL = imL.rowRange(scaledvL - w, scaledvL + w + 1)
+                                  .colRange(scaleduL - w, scaleduL + w + 1);
+
+        int bestIncR = 0;
+        float bestCombined = std::numeric_limits<float>::infinity();
+        std::vector<float> patchDists(2 * L + 1, std::numeric_limits<float>::infinity());
+        std::vector<float> patchScores(2 * L + 1, -std::numeric_limits<float>::infinity());
+        for(int incR = -L; incR <= L; ++incR)
+        {
+            const cv::Mat patchR = imR.rowRange(scaledvR - w, scaledvR + w + 1)
+                                      .colRange(scaleduR0 + incR - w, scaleduR0 + incR + w + 1);
+            const float dist = ZeroMeanPatchDistanceL1(patchL, patchR);
+            const float score = ZeroMeanPatchZNCC(patchL, patchR);
+            patchDists[L + incR] = dist;
+            patchScores[L + incR] = score;
+        }
+
+        float minCost = std::numeric_limits<float>::infinity();
+        float maxCost = -std::numeric_limits<float>::infinity();
+        std::vector<float> znccPenalties(2 * L + 1, std::numeric_limits<float>::infinity());
+        for(const float dist : patchDists)
+        {
+            if(std::isfinite(dist))
+            {
+                minCost = std::min(minCost, dist);
+                maxCost = std::max(maxCost, dist);
+            }
+        }
+        if(!std::isfinite(minCost) || !std::isfinite(maxCost))
+            return false;
+
+        for(int incR = -L; incR <= L; ++incR)
+        {
+            const float score = patchScores[L + incR];
+            if(!std::isfinite(score))
+                continue;
+
+            const float clampedZncc = std::max(-1.0f, std::min(1.0f, score));
+            znccPenalties[L + incR] = 0.5f * (1.0f - clampedZncc);
+        }
+
+        float costLower = minCost;
+        float costUpper = maxCost;
+        float znccPenaltyLower = 0.0f;
+        float znccPenaltyUpper = 1.0f;
+        ComputeRobustFiniteRange(patchDists, 0.1f, 0.9f, costLower, costUpper);
+        ComputeRobustFiniteRange(znccPenalties, 0.1f, 0.9f, znccPenaltyLower, znccPenaltyUpper);
+
+        std::vector<float> combinedScores(2 * L + 1, std::numeric_limits<float>::infinity());
+        for(int incR = -L; incR <= L; ++incR)
+        {
+            const float dist = patchDists[L + incR];
+            const float score = patchScores[L + incR];
+            if(!std::isfinite(dist) || !std::isfinite(score))
+                continue;
+
+            const float normalizedCost = NormalizeFiniteValueClamped(dist, costLower, costUpper);
+            const float normalizedZnccPenalty =
+                NormalizeFiniteValueClamped(znccPenalties[L + incR], znccPenaltyLower, znccPenaltyUpper);
+            const float combined = 0.5f * normalizedCost + 0.5f * normalizedZnccPenalty;
+            combinedScores[L + incR] = combined;
+            if(combined < bestCombined)
+            {
+                bestCombined = combined;
+                bestIncR = incR;
+            }
+        }
+
+        if(bestIncR == -L || bestIncR == L)
+            return false;
+
+        const float cost1 = patchDists[L + bestIncR - 1];
+        const float cost2 = patchDists[L + bestIncR];
+        const float cost3 = patchDists[L + bestIncR + 1];
+        const float score1 = patchScores[L + bestIncR - 1];
+        const float score2 = patchScores[L + bestIncR];
+        const float score3 = patchScores[L + bestIncR + 1];
+        const float combined1 = combinedScores[L + bestIncR - 1];
+        const float combined2 = combinedScores[L + bestIncR];
+        const float combined3 = combinedScores[L + bestIncR + 1];
+        const float curvatureCost = cost1 + cost3 - 2.0f * cost2;
+        const float marginCost = std::min(cost1, cost3) - cost2;
+        const float curvatureCombined = combined1 + combined3 - 2.0f * combined2;
+        const float marginCombined = std::min(combined1, combined3) - combined2;
+        const float peakScore = ComputeStereoPeakScore(score1, score2, score3);
+        const float denom = 2.0f * curvatureCombined;
+        if(std::fabs(denom) < 1e-6f)
+            return false;
+
+        const float deltaR = (combined1 - combined3) / denom;
+        if(!std::isfinite(deltaR) || deltaR < -1.0f || deltaR > 1.0f)
+            return false;
+
+        refinement.refinedUR = scaleFactors[level] * (static_cast<float>(scaleduR0) + static_cast<float>(bestIncR) + deltaR);
+        refinement.cost1 = cost1;
+        refinement.cost2 = cost2;
+        refinement.cost3 = cost3;
+        refinement.combined1 = combined1;
+        refinement.combined2 = combined2;
+        refinement.combined3 = combined3;
+        refinement.score1 = score1;
+        refinement.score2 = score2;
+        refinement.score3 = score3;
+        refinement.curvatureCost = curvatureCost;
+        refinement.marginCost = marginCost;
+        refinement.curvatureCombined = curvatureCombined;
+        refinement.marginCombined = marginCombined;
+        refinement.peakScore = peakScore;
+        refinement.success = std::isfinite(refinement.refinedUR) &&
+                             std::isfinite(score2) &&
+                             std::isfinite(curvatureCombined) &&
+                             curvatureCombined > 0.0f;
+        return refinement.success;
+    }
+
+    bool SearchXFeatStereoPatchLocal(const std::vector<cv::Mat>* pRefPyramid,
+                                     const std::vector<cv::Mat>* pTargetPyramid,
+                                     const std::vector<float>& scaleFactors,
+                                     const std::vector<float>& invScaleFactors,
+                                     const int level,
+                                     const float uRef,
+                                     const float vRef,
+                                     const float uTargetSeed,
+                                     XFeatStereoPatchSearchResult& result)
+    {
+        if(!pRefPyramid || !pTargetPyramid)
+            return false;
+
+        if(level < 0 ||
+           level >= static_cast<int>(pRefPyramid->size()) ||
+           level >= static_cast<int>(pTargetPyramid->size()) ||
+           level >= static_cast<int>(scaleFactors.size()) ||
+           level >= static_cast<int>(invScaleFactors.size()))
+        {
+            return false;
+        }
+
+        const cv::Mat& imRef = (*pRefPyramid)[level];
+        const cv::Mat& imTarget = (*pTargetPyramid)[level];
+        if(imRef.empty() || imTarget.empty())
+            return false;
+
+        const int halfWindow = 5;
+        const float searchRadius = 8.0f;
+        const float searchStep = 0.5f;
+        const int nSamples = static_cast<int>(2.0f * searchRadius / searchStep) + 1;
+        const float invScale = invScaleFactors[level];
+        const float uRefScaled = uRef * invScale;
+        const float vRefScaled = vRef * invScale;
+        const float uSeedScaled = uTargetSeed * invScale;
+
+        cv::Mat patchRef;
+        if(!ExtractPatchAtFloatCenter(imRef, cv::Point2f(uRefScaled, vRefScaled), halfWindow, patchRef))
+            return false;
+
+        if(uSeedScaled - searchRadius - static_cast<float>(halfWindow) < 0.0f ||
+           uSeedScaled + searchRadius + static_cast<float>(halfWindow) >= static_cast<float>(imTarget.cols) ||
+           vRefScaled - static_cast<float>(halfWindow) < 0.0f ||
+           vRefScaled + static_cast<float>(halfWindow) >= static_cast<float>(imTarget.rows))
+        {
+            return false;
+        }
+
+        std::vector<float> offsets;
+        std::vector<float> costs(nSamples, std::numeric_limits<float>::infinity());
+        std::vector<float> scores(nSamples, -std::numeric_limits<float>::infinity());
+        std::vector<float> combineds(nSamples, std::numeric_limits<float>::infinity());
+        offsets.reserve(nSamples);
+
+        float minCost = std::numeric_limits<float>::infinity();
+        float maxCost = -std::numeric_limits<float>::infinity();
+        std::vector<float> znccPenalties(nSamples, std::numeric_limits<float>::infinity());
+        for(int sampleIdx = 0; sampleIdx < nSamples; ++sampleIdx)
+        {
+            const float offset = -searchRadius + searchStep * static_cast<float>(sampleIdx);
+            offsets.push_back(offset);
+
+            cv::Mat patchTarget;
+            if(!ExtractPatchAtFloatCenter(imTarget,
+                                          cv::Point2f(uSeedScaled + offset, vRefScaled),
+                                          halfWindow,
+                                          patchTarget))
+            {
+                continue;
+            }
+
+            const float cost = ZeroMeanPatchDistanceL1(patchRef, patchTarget);
+            const float score = ZeroMeanPatchZNCC(patchRef, patchTarget);
+            costs[sampleIdx] = cost;
+            scores[sampleIdx] = score;
+            if(std::isfinite(score))
+            {
+                const float clampedZncc = std::max(-1.0f, std::min(1.0f, score));
+                znccPenalties[sampleIdx] = 0.5f * (1.0f - clampedZncc);
+            }
+            if(std::isfinite(cost))
+            {
+                minCost = std::min(minCost, cost);
+                maxCost = std::max(maxCost, cost);
+            }
+        }
+
+        if(!std::isfinite(minCost) || !std::isfinite(maxCost))
+            return false;
+
+        float costLower = minCost;
+        float costUpper = maxCost;
+        float znccPenaltyLower = 0.0f;
+        float znccPenaltyUpper = 1.0f;
+        ComputeRobustFiniteRange(costs, 0.1f, 0.9f, costLower, costUpper);
+        ComputeRobustFiniteRange(znccPenalties, 0.1f, 0.9f, znccPenaltyLower, znccPenaltyUpper);
+        int bestIdx = -1;
+        int secondBestIdx = -1;
+        float bestCombined = std::numeric_limits<float>::infinity();
+        float secondBestCombined = std::numeric_limits<float>::infinity();
+        for(int sampleIdx = 0; sampleIdx < nSamples; ++sampleIdx)
+        {
+            const float cost = costs[sampleIdx];
+            const float score = scores[sampleIdx];
+            if(!std::isfinite(cost) || !std::isfinite(score))
+                continue;
+
+            const float normalizedCost = NormalizeFiniteValueClamped(cost, costLower, costUpper);
+            const float normalizedZnccPenalty =
+                NormalizeFiniteValueClamped(znccPenalties[sampleIdx], znccPenaltyLower, znccPenaltyUpper);
+            const float combined = 0.5f * normalizedCost + 0.5f * normalizedZnccPenalty;
+            combineds[sampleIdx] = combined;
+
+            if(combined < bestCombined)
+            {
+                secondBestCombined = bestCombined;
+                secondBestIdx = bestIdx;
+                bestCombined = combined;
+                bestIdx = sampleIdx;
+            }
+            else if(combined < secondBestCombined)
+            {
+                secondBestCombined = combined;
+                secondBestIdx = sampleIdx;
+            }
+        }
+
+        if(bestIdx <= 0 || bestIdx >= nSamples - 1)
+            return false;
+
+        const float combined1 = combineds[bestIdx - 1];
+        const float combined2 = combineds[bestIdx];
+        const float combined3 = combineds[bestIdx + 1];
+        const float cost1 = costs[bestIdx - 1];
+        const float cost2 = costs[bestIdx];
+        const float cost3 = costs[bestIdx + 1];
+        const float score1 = scores[bestIdx - 1];
+        const float score2 = scores[bestIdx];
+        const float score3 = scores[bestIdx + 1];
+        if(!std::isfinite(combined1) || !std::isfinite(combined2) || !std::isfinite(combined3))
+            return false;
+
+        const float curvatureCost = cost1 + cost3 - 2.0f * cost2;
+        const float marginCost = std::min(cost1, cost3) - cost2;
+        const float curvatureCombined = combined1 + combined3 - 2.0f * combined2;
+        const float marginCombined = std::min(combined1, combined3) - combined2;
+        const float peakScore = ComputeStereoPeakScore(score1, score2, score3);
+        const float denom = 2.0f * curvatureCombined;
+        if(std::fabs(denom) < 1e-6f)
+            return false;
+
+        const float deltaSamples = (combined1 - combined3) / denom;
+        if(!std::isfinite(deltaSamples) || deltaSamples < -1.0f || deltaSamples > 1.0f)
+            return false;
+
+        result.seedUR = uTargetSeed;
+        result.bestCombined = bestCombined;
+        result.secondBestCombined = secondBestCombined;
+        result.coarseWinnerUR = scaleFactors[level] * (uSeedScaled + offsets[bestIdx]);
+        result.secondBestUR = (secondBestIdx >= 0)
+            ? scaleFactors[level] * (uSeedScaled + offsets[secondBestIdx])
+            : std::numeric_limits<float>::quiet_NaN();
+        result.winnerShift = result.coarseWinnerUR - uTargetSeed;
+        result.refinement.refinedUR =
+            scaleFactors[level] * (uSeedScaled + offsets[bestIdx] + deltaSamples * searchStep);
+        result.refinement.cost1 = cost1;
+        result.refinement.cost2 = cost2;
+        result.refinement.cost3 = cost3;
+        result.refinement.combined1 = combined1;
+        result.refinement.combined2 = combined2;
+        result.refinement.combined3 = combined3;
+        result.refinement.score1 = score1;
+        result.refinement.score2 = score2;
+        result.refinement.score3 = score3;
+        result.refinement.curvatureCost = curvatureCost;
+        result.refinement.marginCost = marginCost;
+        result.refinement.curvatureCombined = curvatureCombined;
+        result.refinement.marginCombined = marginCombined;
+        result.refinement.peakScore = peakScore;
+        result.refinement.success = std::isfinite(result.refinement.refinedUR) &&
+                                    std::isfinite(score2) &&
+                                    std::isfinite(curvatureCombined) &&
+                                    curvatureCombined > 0.0f;
+        result.success = result.refinement.success;
+        return result.success;
+    }
+
+    bool SearchXFeatStereoPatchBand(const std::vector<cv::Mat>* pRefPyramid,
+                                    const std::vector<cv::Mat>* pTargetPyramid,
+                                    const std::vector<float>& scaleFactors,
+                                    const std::vector<float>& invScaleFactors,
+                                    const int level,
+                                    const float uRef,
+                                    const float vRef,
+                                    const float uTargetSeed,
+                                    const std::vector<float>& uTargetSeeds,
+                                    XFeatStereoPatchSearchResult& result)
+    {
+        if(!pRefPyramid || !pTargetPyramid || uTargetSeeds.empty())
+            return false;
+
+        if(level < 0 ||
+           level >= static_cast<int>(pRefPyramid->size()) ||
+           level >= static_cast<int>(pTargetPyramid->size()) ||
+           level >= static_cast<int>(scaleFactors.size()) ||
+           level >= static_cast<int>(invScaleFactors.size()))
+        {
+            return false;
+        }
+
+        const cv::Mat& imRef = (*pRefPyramid)[level];
+        const cv::Mat& imTarget = (*pTargetPyramid)[level];
+        if(imRef.empty() || imTarget.empty())
+            return false;
+
+        const int halfWindow = 5;
+        const float minBandWidth = 8.0f;
+        const float maxBandWidth = 20.0f;
+        const float seedPad = 2.0f;
+        const float invScale = invScaleFactors[level];
+        const float uRefScaled = uRef * invScale;
+        const float vRefScaled = vRef * invScale;
+        const float uSeedScaled = uTargetSeed * invScale;
+
+        cv::Mat patchRef;
+        if(!ExtractPatchAtFloatCenter(imRef, cv::Point2f(uRefScaled, vRefScaled), halfWindow, patchRef))
+            return false;
+
+        float bandMin = std::numeric_limits<float>::infinity();
+        float bandMax = -std::numeric_limits<float>::infinity();
+        for(const float uSeed : uTargetSeeds)
+        {
+            const float uSeedScaledCandidate = uSeed * invScale;
+            bandMin = std::min(bandMin, uSeedScaledCandidate);
+            bandMax = std::max(bandMax, uSeedScaledCandidate);
+        }
+        if(!std::isfinite(bandMin) || !std::isfinite(bandMax))
+            return false;
+
+        bandMin -= seedPad;
+        bandMax += seedPad;
+        float bandWidth = bandMax - bandMin;
+        if(bandWidth < minBandWidth)
+        {
+            bandMin = uSeedScaled - 0.5f * minBandWidth;
+            bandMax = uSeedScaled + 0.5f * minBandWidth;
+        }
+        else if(bandWidth > maxBandWidth)
+        {
+            bandMin = uSeedScaled - 0.5f * maxBandWidth;
+            bandMax = uSeedScaled + 0.5f * maxBandWidth;
+        }
+        bandWidth = bandMax - bandMin;
+
+        if(bandMin - static_cast<float>(halfWindow) < 0.0f ||
+           bandMax + static_cast<float>(halfWindow) >= static_cast<float>(imTarget.cols) ||
+           vRefScaled - static_cast<float>(halfWindow) < 0.0f ||
+           vRefScaled + static_cast<float>(halfWindow) >= static_cast<float>(imTarget.rows))
+        {
+            return false;
+        }
+
+        const int sampleMin = static_cast<int>(std::ceil(bandMin));
+        const int sampleMax = static_cast<int>(std::floor(bandMax));
+        const int nSamples = sampleMax - sampleMin + 1;
+        if(nSamples < 3)
+            return false;
+
+        std::vector<float> costs(nSamples, std::numeric_limits<float>::infinity());
+        std::vector<float> scores(nSamples, -std::numeric_limits<float>::infinity());
+        std::vector<float> combineds(nSamples, std::numeric_limits<float>::infinity());
+        std::vector<float> smoothedCombineds(nSamples, std::numeric_limits<float>::infinity());
+        std::vector<float> znccPenalties(nSamples, std::numeric_limits<float>::infinity());
+
+        float minCost = std::numeric_limits<float>::infinity();
+        float maxCost = -std::numeric_limits<float>::infinity();
+        for(int sampleIdx = 0; sampleIdx < nSamples; ++sampleIdx)
+        {
+            const float uTargetScaled = static_cast<float>(sampleMin + sampleIdx);
+
+            cv::Mat patchTarget;
+            if(!ExtractPatchAtFloatCenter(imTarget,
+                                          cv::Point2f(uTargetScaled, vRefScaled),
+                                          halfWindow,
+                                          patchTarget))
+            {
+                continue;
+            }
+
+            const float cost = ZeroMeanPatchDistanceL1(patchRef, patchTarget);
+            const float score = ZeroMeanPatchZNCC(patchRef, patchTarget);
+            costs[sampleIdx] = cost;
+            scores[sampleIdx] = score;
+            if(std::isfinite(score))
+            {
+                const float clampedZncc = std::max(-1.0f, std::min(1.0f, score));
+                znccPenalties[sampleIdx] = 0.5f * (1.0f - clampedZncc);
+            }
+            if(std::isfinite(cost))
+            {
+                minCost = std::min(minCost, cost);
+                maxCost = std::max(maxCost, cost);
+            }
+        }
+
+        if(!std::isfinite(minCost) || !std::isfinite(maxCost))
+            return false;
+
+        float costLower = minCost;
+        float costUpper = maxCost;
+        float znccPenaltyLower = 0.0f;
+        float znccPenaltyUpper = 1.0f;
+        ComputeRobustFiniteRange(costs, 0.1f, 0.9f, costLower, costUpper);
+        ComputeRobustFiniteRange(znccPenalties, 0.1f, 0.9f, znccPenaltyLower, znccPenaltyUpper);
+        for(int sampleIdx = 0; sampleIdx < nSamples; ++sampleIdx)
+        {
+            const float cost = costs[sampleIdx];
+            const float score = scores[sampleIdx];
+            if(!std::isfinite(cost) || !std::isfinite(score))
+                continue;
+
+            const float normalizedCost = NormalizeFiniteValueClamped(cost, costLower, costUpper);
+            const float normalizedZnccPenalty =
+                NormalizeFiniteValueClamped(znccPenalties[sampleIdx], znccPenaltyLower, znccPenaltyUpper);
+            combineds[sampleIdx] = 0.5f * normalizedCost + 0.5f * normalizedZnccPenalty;
+        }
+
+        for(int sampleIdx = 1; sampleIdx < nSamples - 1; ++sampleIdx)
+            smoothedCombineds[sampleIdx] = SmoothCombinedSample(combineds, sampleIdx);
+
+        int bestIdx = -1;
+        float bestCombined = std::numeric_limits<float>::infinity();
+        for(int sampleIdx = 1; sampleIdx < nSamples - 1; ++sampleIdx)
+        {
+            const float combined = smoothedCombineds[sampleIdx];
+            if(!std::isfinite(combined))
+                continue;
+
+            if(combined < bestCombined)
+            {
+                bestCombined = combined;
+                bestIdx = sampleIdx;
+            }
+        }
+
+        if(bestIdx <= 0 || bestIdx >= nSamples - 1)
+            return false;
+
+        int secondBestIdx = -1;
+        float secondBestCombined = std::numeric_limits<float>::infinity();
+        for(int sampleIdx = 1; sampleIdx < nSamples - 1; ++sampleIdx)
+        {
+            if(std::abs(sampleIdx - bestIdx) < 2)
+                continue;
+
+            const float combined = smoothedCombineds[sampleIdx];
+            if(!std::isfinite(combined))
+                continue;
+
+            if(combined < secondBestCombined)
+            {
+                secondBestCombined = combined;
+                secondBestIdx = sampleIdx;
+            }
+        }
+
+        const float combined1 = smoothedCombineds[bestIdx - 1];
+        const float combined2 = smoothedCombineds[bestIdx];
+        const float combined3 = smoothedCombineds[bestIdx + 1];
+        const float cost1 = costs[bestIdx - 1];
+        const float cost2 = costs[bestIdx];
+        const float cost3 = costs[bestIdx + 1];
+        const float score1 = scores[bestIdx - 1];
+        const float score2 = scores[bestIdx];
+        const float score3 = scores[bestIdx + 1];
+        if(!std::isfinite(combined1) || !std::isfinite(combined2) || !std::isfinite(combined3))
+            return false;
+
+        const float curvatureCost = cost1 + cost3 - 2.0f * cost2;
+        const float marginCost = secondBestCombined - bestCombined;
+        const float curvatureCombined = combined1 + combined3 - 2.0f * combined2;
+        const float marginCombined = secondBestCombined - combined2;
+        const float peakScore = ComputeStereoPeakScore(score1, score2, score3);
+        const float denom = 2.0f * curvatureCombined;
+        if(std::fabs(denom) < 1e-6f)
+            return false;
+
+        const float deltaSamples = (combined1 - combined3) / denom;
+        if(!std::isfinite(deltaSamples) || deltaSamples < -1.0f || deltaSamples > 1.0f)
+            return false;
+
+        const float coarseWinnerScaled = static_cast<float>(sampleMin + bestIdx);
+        result.seedUR = uTargetSeed;
+        result.bandWidth = scaleFactors[level] * bandWidth;
+        result.bestCombined = bestCombined;
+        result.secondBestCombined = secondBestCombined;
+        result.coarseWinnerUR = scaleFactors[level] * coarseWinnerScaled;
+        result.secondBestUR = (secondBestIdx >= 0)
+            ? scaleFactors[level] * static_cast<float>(sampleMin + secondBestIdx)
+            : std::numeric_limits<float>::quiet_NaN();
+        result.winnerShift = result.coarseWinnerUR - uTargetSeed;
+        result.refinement.refinedUR = scaleFactors[level] * (coarseWinnerScaled + deltaSamples);
+        result.refinement.cost1 = cost1;
+        result.refinement.cost2 = cost2;
+        result.refinement.cost3 = cost3;
+        result.refinement.combined1 = combined1;
+        result.refinement.combined2 = combined2;
+        result.refinement.combined3 = combined3;
+        result.refinement.score1 = score1;
+        result.refinement.score2 = score2;
+        result.refinement.score3 = score3;
+        result.refinement.curvatureCost = curvatureCost;
+        result.refinement.marginCost = marginCost;
+        result.refinement.curvatureCombined = curvatureCombined;
+        result.refinement.marginCombined = marginCombined;
+        result.refinement.peakScore = peakScore;
+        result.refinement.success = std::isfinite(result.refinement.refinedUR) &&
+                                    std::isfinite(score2) &&
+                                    std::isfinite(curvatureCombined) &&
+                                    curvatureCombined > 0.0f;
+        result.success = result.refinement.success;
+        return result.success;
+    }
+
+    bool EstimateXFeatStereoSigmaDisp(const float scale,
+                                      const XFeatStereoSubpixelRefinement& refinement,
+                                      const float backprojErr,
+                                      float& curvatureFactor,
+                                      float& marginFactor,
+                                      float& scoreFactor,
+                                      float& lrFactor,
+                                      float& sigmaDisp)
+    {
+        if(!refinement.success ||
+           !std::isfinite(refinement.curvatureCombined) ||
+           refinement.curvatureCombined <= 0.0f ||
+           !std::isfinite(refinement.marginCombined) ||
+           refinement.marginCombined <= 0.0f ||
+           !std::isfinite(refinement.peakScore) ||
+           refinement.peakScore <= 0.0f ||
+           !std::isfinite(backprojErr) ||
+           backprojErr < 0.0f)
+            return false;
+
+        const float baseSigma = 0.25f * std::max(scale, 1e-3f);
+        curvatureFactor = std::max(0.5f, std::min(4.0f, 8.0f / refinement.curvatureCombined));
+        marginFactor = std::max(0.5f, std::min(4.0f, 4.0f / std::max(refinement.marginCombined, 1e-4f)));
+        scoreFactor = std::max(0.5f, std::min(4.0f, 0.15f / std::max(refinement.peakScore, 1e-4f)));
+        lrFactor = std::max(0.5f, std::min(4.0f, backprojErr / std::max(0.5f * scale, 1e-4f)));
+        sigmaDisp = baseSigma * std::max(std::max(curvatureFactor, marginFactor),
+                                         std::max(scoreFactor, lrFactor));
+        return std::isfinite(sigmaDisp) && sigmaDisp > 0.0f;
+    }
 }
 
 long unsigned int Frame::nNextId=0;
@@ -216,7 +1057,7 @@ Frame::Frame(const Frame &frame)
      mTimeStamp(frame.mTimeStamp), mK(frame.mK.clone()), mK_(Converter::toMatrix3f(frame.mK)), mDistCoef(frame.mDistCoef.clone()),
      mbf(frame.mbf), mb(frame.mb), mThDepth(frame.mThDepth), N(frame.N), mvKeys(frame.mvKeys),
      mvKeysRight(frame.mvKeysRight), mvKeysUn(frame.mvKeysUn), mvuRight(frame.mvuRight),
-     mvDepth(frame.mvDepth), mBowVec(frame.mBowVec), mFeatVec(frame.mFeatVec),
+     mvDepth(frame.mvDepth), mvStereoBirthQuality(frame.mvStereoBirthQuality), mBowVec(frame.mBowVec), mFeatVec(frame.mFeatVec),
      mDescriptors(frame.mDescriptors.clone()), mDescriptorsRight(frame.mDescriptorsRight.clone()),
      mvpMapPoints(frame.mvpMapPoints), mvbOutlier(frame.mvbOutlier), mvXFeatMatchSource(frame.mvXFeatMatchSource), mImuCalib(frame.mImuCalib), mnCloseMPs(frame.mnCloseMPs),
      mpImuPreintegrated(frame.mpImuPreintegrated), mpImuPreintegratedFrame(frame.mpImuPreintegratedFrame), mImuBias(frame.mImuBias),
@@ -675,6 +1516,7 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
     // Set no stereo information
     mvuRight = vector<float>(N,-1);
     mvDepth = vector<float>(N,-1);
+    mvStereoBirthQuality = vector<unsigned char>(N, kStereoBirthInvalid);
     mnCloseMPs = 0;
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
@@ -782,6 +1624,7 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, XFextractor* extrac
     // Set no stereo information
     mvuRight = vector<float>(N,-1);
     mvDepth = vector<float>(N,-1);
+    mvStereoBirthQuality = vector<unsigned char>(N, kStereoBirthInvalid);
     mnCloseMPs = 0;
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
@@ -1279,10 +2122,17 @@ void Frame::ComputeStereoMatches()
 {
     mvuRight = vector<float>(N,-1.0f);
     mvDepth = vector<float>(N,-1.0f);
+    mvStereoBirthQuality = vector<unsigned char>(N, kStereoBirthInvalid);
 
     const bool bFloatDescriptors = IsFloatDescriptorMat(mDescriptors) || IsFloatDescriptorMat(mDescriptorsRight);
     const float thDescDist = bFloatDescriptors ? GetXFeatStereoDescThreshold()
                                                : static_cast<float>((ORBmatcher::TH_HIGH+ORBmatcher::TH_LOW)/2);
+    const std::vector<cv::Mat>* pLeftXFeatPyramid = nullptr;
+    if(!mvImagePyramidLeft.empty() && !mvImagePyramidLeft[0].empty())
+        pLeftXFeatPyramid = &mvImagePyramidLeft;
+    else if(mpXFextractor && !mpXFextractor->mvImagePyramid.empty() && !mpXFextractor->mvImagePyramid[0].empty())
+        pLeftXFeatPyramid = &mpXFextractor->mvImagePyramid;
+
     const std::vector<cv::Mat>* pRightXFeatPyramid = nullptr;
     if(mpXFextractorRight && !mpXFextractorRight->mvImagePyramid.empty() && !mpXFextractorRight->mvImagePyramid[0].empty())
         pRightXFeatPyramid = &mpXFextractorRight->mvImagePyramid;
@@ -1309,6 +2159,10 @@ void Frame::ComputeStereoMatches()
     const float stereoRatio = GetXFeatStereoRatio();
     const bool bStereoMutual = IsXFeatStereoMutualEnabled();
     const bool bUseStereoRatio = (stereoRatio > 0.0f);
+    const float stereoMaxYErr = GetXFeatStereoMaxYError();
+    const float stereoMaxRelDepthSigma = GetXFeatStereoMaxRelativeDepthSigma();
+    const bool bUseStereoUncertainty = (stereoMaxRelDepthSigma > 0.0f);
+    const bool bUseXFeatStereoSubpixel = IsXFeatStereoSubpixelEnabled();
 
     // Reverse best match arrays for mutual check (built during forward search)
     std::vector<float> reverseBestDist;
@@ -1321,11 +2175,13 @@ void Frame::ComputeStereoMatches()
     std::vector<float> xfeatBestDist;
     std::vector<float> xfeatBestDist2;
     std::vector<int> xfeatBestIdxR;
+    std::vector<std::vector<std::pair<float, int>>> xfeatTopKCandidates;
     if(bFloatDescriptors)
     {
         xfeatBestDist.assign(N, std::numeric_limits<float>::infinity());
         xfeatBestDist2.assign(N, std::numeric_limits<float>::infinity());
         xfeatBestIdxR.assign(N, -1);
+        xfeatTopKCandidates.assign(N, std::vector<std::pair<float, int>>());
     }
 
     for(int iR=0; iR<Nr; iR++)
@@ -1350,9 +2206,45 @@ void Frame::ComputeStereoMatches()
     int nRatioReject = 0;
     int nMutualReject = 0;
     int nDisparityReject = 0;
+    int nEpipolarReject = 0;
+    int nUncertaintyReject = 0;
+    int nSubpixelRefined = 0;
+    int nSubpixelFallback = 0;
     int nAccepted = 0;
     int nForwardCandidates = 0;
     int nMedianReject = 0;
+    int nCloseCandidates = 0;
+    int nCloseHighConf = 0;
+    int nCloseLowConf = 0;
+    int nRejectCloseY = 0;
+    int nRejectCloseLR = 0;
+    int nCloseSubpixelAttempt = 0;
+    int nCloseSubpixelRefined = 0;
+    int nCloseSubpixelReject = 0;
+    int nCloseUncertaintyReject = 0;
+    int nCloseFlatCurveReject = 0;
+    int nCloseCombinedCurveReject = 0;
+    int nCloseLowMarginReject = 0;
+    int nCloseLRConsistencyReject = 0;
+    int nCloseLowPeakReject = 0;
+    int nCloseSigmaModelReject = 0;
+    int nCloseQualitySigmaReject = 0;
+    int nCloseScoreSigmaReject = 0;
+    int nCloseCombinedSigmaReject = 0;
+    int nCloseTopKCandidates = 0;
+    int nCloseCandidateAmbiguousReject = 0;
+    int nCloseCandidateRescoreWinnerNonBestIdx = 0;
+    int nClosePatchSearchAttempt = 0;
+    int nClosePatchSearchAmbiguousReject = 0;
+    int nClosePatchSearchWinnerShiftGt1Px = 0;
+    int nClosePatchSigmaReject = 0;
+    int nCloseBandSearchAttempt = 0;
+    int nCloseBandSearchAmbiguousReject = 0;
+    int nCloseBandSearchWidthGt12Px = 0;
+    int nCloseBandSigmaReject = 0;
+    int nCloseCostVolumeAttempt = 0;
+    int nCloseCostVolumeAmbiguousReject = 0;
+    int nCloseCostVolumeSigmaReject = 0;
 
     // For each left keypoint search a match in the right image
     vector<pair<float, int> > vDistIdx;
@@ -1396,6 +2288,19 @@ void Frame::ComputeStereoMatches()
 
             if(uR>=minU && uR<=maxU)
             {
+                if(bFloatDescriptors && stereoMaxYErr > 0.0f)
+                {
+                    const int maxLevel = std::max(levelL, kpR.octave);
+                    const float scale = (maxLevel >= 0 && maxLevel < static_cast<int>(mvScaleFactors.size()))
+                        ? mvScaleFactors[maxLevel]
+                        : 1.0f;
+                    if(std::fabs(vL - kpR.pt.y) > stereoMaxYErr * scale)
+                    {
+                        ++nEpipolarReject;
+                        continue;
+                    }
+                }
+
                 const cv::Mat &dR = mDescriptorsRight.row(iR);
                 const float dist = StereoDescriptorDistance(dL,dR,bFloatDescriptors);
 
@@ -1415,6 +2320,21 @@ void Frame::ComputeStereoMatches()
                 {
                     reverseBestDist[iR] = dist;
                     reverseBestIdx[iR] = iL;
+                }
+
+                if(bFloatDescriptors)
+                {
+                    auto& topk = xfeatTopKCandidates[iL];
+                    topk.emplace_back(dist, static_cast<int>(iR));
+                    std::sort(topk.begin(), topk.end(),
+                              [](const std::pair<float, int>& a, const std::pair<float, int>& b)
+                              {
+                                  if(a.first != b.first)
+                                      return a.first < b.first;
+                                  return a.second < b.second;
+                              });
+                    if(topk.size() > 4)
+                        topk.resize(4);
                 }
             }
         }
@@ -1495,8 +2415,12 @@ void Frame::ComputeStereoMatches()
                     disparity=0.01;
                     bestuR = uL-0.01;
                 }
-                mvDepth[iL]=mbf/disparity;
+                const float depth = mbf/disparity;
+                mvDepth[iL]=depth;
                 mvuRight[iL] = bestuR;
+                mvStereoBirthQuality[iL] = (depth > 0.0f && depth <= mThDepth)
+                    ? kStereoBirthCloseHighConf
+                    : kStereoBirthValid;
                 vDistIdx.push_back(pair<float,int>(static_cast<float>(bestPatchDist),iL));
             }
         }
@@ -1536,19 +2460,284 @@ void Frame::ComputeStereoMatches()
                 }
             }
 
-            const float uL = mvKeys[iL].pt.x;
-            const float uR0 = mvKeysRight[static_cast<size_t>(bestIdxR)].pt.x;
-            float disparity = (uL - uR0);
+            const cv::KeyPoint& kpL = mvKeys[iL];
+            const cv::KeyPoint& kpR = mvKeysRight[static_cast<size_t>(bestIdxR)];
+            const float uL = kpL.pt.x;
+            const float uR0 = kpR.pt.x;
+            float bestuR = uR0;
+            float disparity = (uL - bestuR);
             if(disparity < minD || disparity >= maxD)
             {
                 nDisparityReject++;
                 continue;
             }
 
-            nAccepted++;
+            const float tentativeDepth = mbf / std::max(disparity, 1e-4f);
+            const bool bCloseCandidate = std::isfinite(tentativeDepth) &&
+                                         tentativeDepth > 0.0f &&
+                                         tentativeDepth <= mThDepth;
+            const bool bRequireCloseSubpixel = bCloseCandidate;
+
+            XFeatStereoSubpixelRefinement refinement;
+            refinement.refinedUR = bestuR;
+            if(bRequireCloseSubpixel)
+            {
+                ++nCloseSubpixelAttempt;
+                ++nCloseBandSearchAttempt;
+                ++nCloseCostVolumeAttempt;
+                nCloseTopKCandidates += static_cast<int>(xfeatTopKCandidates[iL].size());
+                const int maxLevel = std::max(kpL.octave, kpR.octave);
+                const float scale = (maxLevel >= 0 && maxLevel < static_cast<int>(mvScaleFactors.size()))
+                    ? mvScaleFactors[maxLevel]
+                    : 1.0f;
+                std::vector<float> topkSeeds;
+                topkSeeds.reserve(xfeatTopKCandidates[iL].size());
+                for(const auto& cand : xfeatTopKCandidates[iL])
+                {
+                    const int candIdxR = cand.second;
+                    if(candIdxR < 0 || candIdxR >= Nr)
+                        continue;
+                    topkSeeds.push_back(mvKeysRight[static_cast<size_t>(candIdxR)].pt.x);
+                }
+                if(topkSeeds.empty())
+                    topkSeeds.push_back(bestuR);
+                XFeatStereoPatchSearchResult patchSearch;
+                if(!SearchXFeatStereoPatchBand(pLeftXFeatPyramid,
+                                              pRightXFeatPyramid,
+                                              mvScaleFactors,
+                                              mvInvScaleFactors,
+                                              kpL.octave,
+                                              kpL.pt.x,
+                                              kpL.pt.y,
+                                              bestuR,
+                                              topkSeeds,
+                                              patchSearch))
+                {
+                    ++nCloseLowConf;
+                    ++nRejectCloseLR;
+                    ++nCloseSubpixelReject;
+                    mvStereoBirthQuality[iL] = kStereoBirthInvalid;
+                    continue;
+                }
+
+                if(patchSearch.bandWidth > 12.0f)
+                    ++nCloseBandSearchWidthGt12Px;
+                if(std::isfinite(patchSearch.secondBestCombined) &&
+                   std::isfinite(patchSearch.secondBestUR) &&
+                   patchSearch.secondBestCombined <= 1.08f * std::max(patchSearch.bestCombined, 1e-4f) &&
+                   std::fabs((uL - patchSearch.secondBestUR) - (uL - patchSearch.coarseWinnerUR)) >= 1.0f)
+                {
+                    ++nCloseLowConf;
+                    ++nRejectCloseLR;
+                    ++nCloseUncertaintyReject;
+                    ++nCloseBandSearchAmbiguousReject;
+                    ++nCloseCostVolumeAmbiguousReject;
+                    ++nCloseCandidateAmbiguousReject;
+                    ++nUncertaintyReject;
+                    mvStereoBirthQuality[iL] = kStereoBirthInvalid;
+                    continue;
+                }
+
+                refinement = patchSearch.refinement;
+                bestuR = patchSearch.refinement.refinedUR;
+                disparity = uL - bestuR;
+                if(disparity < minD || disparity >= maxD)
+                {
+                    ++nCloseLowConf;
+                    ++nRejectCloseLR;
+                    ++nCloseSubpixelReject;
+                    mvStereoBirthQuality[iL] = kStereoBirthInvalid;
+                    continue;
+                }
+
+                ++nSubpixelRefined;
+                ++nCloseSubpixelRefined;
+            }
+            else
+            {
+                const bool bSubpixelOk =
+                    RefineXFeatStereoSubpixel(pLeftXFeatPyramid,
+                                              pRightXFeatPyramid,
+                                              mvScaleFactors,
+                                              mvInvScaleFactors,
+                                              kpL,
+                                              kpR,
+                                              refinement);
+                if(bUseXFeatStereoSubpixel && bSubpixelOk)
+                {
+                    const float refinedDisparity = uL - refinement.refinedUR;
+                    if(refinedDisparity >= minD && refinedDisparity < maxD)
+                    {
+                        bestuR = refinement.refinedUR;
+                        disparity = refinedDisparity;
+                        ++nSubpixelRefined;
+                    }
+                    else
+                    {
+                        ++nSubpixelFallback;
+                    }
+                }
+                else if(bUseXFeatStereoSubpixel)
+                {
+                    ++nSubpixelFallback;
+                }
+            }
+
             if(disparity<=0) disparity=0.01f;
-            mvDepth[iL]=mbf/disparity;
-            mvuRight[iL] = uL-disparity;
+            const float depth = mbf/disparity;
+            unsigned char birthQuality = kStereoBirthValid;
+            if(depth > 0.0f && depth <= mThDepth)
+            {
+                ++nCloseCandidates;
+                const int maxLevel = std::max(kpL.octave, kpR.octave);
+                const float scale = (maxLevel >= 0 && maxLevel < static_cast<int>(mvScaleFactors.size()))
+                    ? mvScaleFactors[maxLevel]
+                    : 1.0f;
+                const float strictMaxYErr = GetXFeatStereoBirthCloseMaxYError() * scale;
+                const float verticalError = std::fabs(kpL.pt.y - kpR.pt.y);
+                if(verticalError > strictMaxYErr)
+                {
+                    ++nCloseLowConf;
+                    ++nRejectCloseY;
+                    mvStereoBirthQuality[iL] = kStereoBirthInvalid;
+                    continue;
+                }
+
+                XFeatStereoSubpixelRefinement backRefinement;
+                XFeatStereoPatchSearchResult backPatchSearch;
+                const bool bBackSubpixelOk =
+                    SearchXFeatStereoPatchLocal(pRightXFeatPyramid,
+                                                pLeftXFeatPyramid,
+                                                mvScaleFactors,
+                                                mvInvScaleFactors,
+                                                kpL.octave,
+                                                bestuR,
+                                                kpL.pt.y,
+                                                kpL.pt.x,
+                                                backPatchSearch);
+                if(bBackSubpixelOk)
+                    backRefinement = backPatchSearch.refinement;
+                const float backprojErr = bBackSubpixelOk
+                    ? std::fabs(backPatchSearch.refinement.refinedUR - kpL.pt.x)
+                    : std::numeric_limits<float>::infinity();
+                if(!bBackSubpixelOk || !std::isfinite(backprojErr) || !std::isfinite(backRefinement.refinedUR))
+                {
+                    ++nCloseLowConf;
+                    ++nRejectCloseLR;
+                    ++nCloseUncertaintyReject;
+                    ++nCloseLRConsistencyReject;
+                    ++nUncertaintyReject;
+                    mvStereoBirthQuality[iL] = kStereoBirthInvalid;
+                    continue;
+                }
+
+                const float marginCombined = refinement.marginCombined;
+                if(!std::isfinite(refinement.curvatureCost) || refinement.curvatureCost <= 0.0f)
+                {
+                    ++nCloseFlatCurveReject;
+                }
+
+                if(!std::isfinite(refinement.curvatureCombined) || refinement.curvatureCombined <= 0.0f)
+                {
+                    ++nCloseLowConf;
+                    ++nRejectCloseLR;
+                    ++nCloseUncertaintyReject;
+                    ++nCloseCombinedCurveReject;
+                    ++nUncertaintyReject;
+                    mvStereoBirthQuality[iL] = kStereoBirthInvalid;
+                    continue;
+                }
+
+                if(!std::isfinite(marginCombined) || marginCombined <= 0.0f)
+                {
+                    ++nCloseLowConf;
+                    ++nRejectCloseLR;
+                    ++nCloseUncertaintyReject;
+                    ++nCloseLowMarginReject;
+                    ++nUncertaintyReject;
+                    mvStereoBirthQuality[iL] = kStereoBirthInvalid;
+                    continue;
+                }
+
+                if(!std::isfinite(refinement.peakScore) || refinement.peakScore <= 0.0f)
+                {
+                    ++nCloseLowConf;
+                    ++nRejectCloseLR;
+                    ++nCloseUncertaintyReject;
+                    ++nCloseLowPeakReject;
+                    ++nUncertaintyReject;
+                    mvStereoBirthQuality[iL] = kStereoBirthInvalid;
+                    continue;
+                }
+
+                float sigmaDisp = 0.0f;
+                float curvatureFactor = 0.0f;
+                float marginFactor = 0.0f;
+                float scoreFactor = 0.0f;
+                float lrFactor = 0.0f;
+                if(!EstimateXFeatStereoSigmaDisp(scale,
+                                                 refinement,
+                                                 backprojErr,
+                                                 curvatureFactor,
+                                                 marginFactor,
+                                                 scoreFactor,
+                                                 lrFactor,
+                                                 sigmaDisp))
+                {
+                    ++nCloseLowConf;
+                    ++nRejectCloseLR;
+                    ++nCloseUncertaintyReject;
+                    ++nCloseFlatCurveReject;
+                    ++nUncertaintyReject;
+                    mvStereoBirthQuality[iL] = kStereoBirthInvalid;
+                    continue;
+                }
+
+                const float relDepthSigma = sigmaDisp / std::max(disparity, 1e-4f);
+                if(!std::isfinite(relDepthSigma) ||
+                   relDepthSigma > GetXFeatStereoBirthCloseMaxRelativeDepthSigma())
+                {
+                    ++nCloseLowConf;
+                    ++nRejectCloseLR;
+                    ++nCloseUncertaintyReject;
+                    ++nCloseSigmaModelReject;
+                    ++nCloseQualitySigmaReject;
+                    ++nCloseCombinedSigmaReject;
+                    ++nCloseBandSigmaReject;
+                    ++nCloseCostVolumeSigmaReject;
+                    if(scoreFactor >= curvatureFactor &&
+                       scoreFactor >= marginFactor &&
+                       scoreFactor >= lrFactor)
+                    {
+                        ++nCloseScoreSigmaReject;
+                    }
+                    ++nUncertaintyReject;
+                    mvStereoBirthQuality[iL] = kStereoBirthInvalid;
+                    continue;
+                }
+
+                birthQuality = kStereoBirthCloseHighConf;
+                ++nCloseHighConf;
+            }
+            else if(bUseStereoUncertainty)
+            {
+                const int maxLevel = std::max(kpL.octave, kpR.octave);
+                const float scale = (maxLevel >= 0 && maxLevel < static_cast<int>(mvScaleFactors.size()))
+                    ? mvScaleFactors[maxLevel]
+                    : 1.0f;
+                const float sigmaDisp = 0.5f * scale;
+                const float relDepthSigma = sigmaDisp / disparity;
+                if(!std::isfinite(relDepthSigma) || relDepthSigma > stereoMaxRelDepthSigma)
+                {
+                    ++nUncertaintyReject;
+                    continue;
+                }
+            }
+
+            nAccepted++;
+            mvDepth[iL]=depth;
+            mvuRight[iL] = bestuR;
+            mvStereoBirthQuality[iL] = birthQuality;
             vDistIdx.push_back(pair<float,int>(bestDist,iL));
         }
     }
@@ -1564,13 +2753,58 @@ void Frame::ComputeStereoMatches()
                       << " desc_pass=" << nDescPass
                       << " ratio_reject=" << nRatioReject
                       << " mutual_reject=" << nMutualReject
+                      << " epipolar_reject=" << nEpipolarReject
                       << " disparity_reject=" << nDisparityReject
+                      << " uncert_reject=" << nUncertaintyReject
+                      << " subpix_refined=" << nSubpixelRefined
+                      << " subpix_fallback=" << nSubpixelFallback
                       << " accepted_before_median=" << nAccepted
+                      << " close_candidates=" << nCloseCandidates
+                      << " close_high_conf=" << nCloseHighConf
+                      << " close_low_conf=" << nCloseLowConf
+                      << " reject_close_y=" << nRejectCloseY
+                      << " reject_close_lr=" << nRejectCloseLR
+                      << " close_subpix_attempt=" << nCloseSubpixelAttempt
+                      << " close_subpix_refined=" << nCloseSubpixelRefined
+                      << " close_subpix_reject=" << nCloseSubpixelReject
+                      << " close_uncert_reject=" << nCloseUncertaintyReject
+                      << " close_flat_curve_reject=" << nCloseFlatCurveReject
+                      << " close_combined_curve_reject=" << nCloseCombinedCurveReject
+                      << " close_low_margin_reject=" << nCloseLowMarginReject
+                      << " close_lr_consistency_reject=" << nCloseLRConsistencyReject
+                      << " close_low_peak_reject=" << nCloseLowPeakReject
+                      << " close_sigma_model_reject=" << nCloseSigmaModelReject
+                      << " close_quality_sigma_reject=" << nCloseQualitySigmaReject
+                      << " close_score_sigma_reject=" << nCloseScoreSigmaReject
+                      << " close_combined_sigma_reject=" << nCloseCombinedSigmaReject
+                      << " close_topk_candidates=" << nCloseTopKCandidates
+                      << " close_candidate_ambiguous_reject=" << nCloseCandidateAmbiguousReject
+                      << " close_candidate_rescore_winner_nonbestidx=" << nCloseCandidateRescoreWinnerNonBestIdx
+                      << " close_patch_search_attempt=" << nClosePatchSearchAttempt
+                      << " close_patch_search_ambiguous_reject=" << nClosePatchSearchAmbiguousReject
+                      << " close_patch_search_winner_shift_gt1px=" << nClosePatchSearchWinnerShiftGt1Px
+                      << " close_patch_sigma_reject=" << nClosePatchSigmaReject
+                      << " close_band_search_attempt=" << nCloseBandSearchAttempt
+                      << " close_band_search_ambiguous_reject=" << nCloseBandSearchAmbiguousReject
+                      << " close_band_search_width_gt12px=" << nCloseBandSearchWidthGt12Px
+                      << " close_band_sigma_reject=" << nCloseBandSigmaReject
+                      << " close_cost_volume_attempt=" << nCloseCostVolumeAttempt
+                      << " close_cost_volume_ambiguous_reject=" << nCloseCostVolumeAmbiguousReject
+                      << " close_cost_volume_sigma_reject=" << nCloseCostVolumeSigmaReject
                       << " median_reject=0"
                       << " accepted_after_median=0"
                       << " depth_before_median=0"
                       << " median_dist=-1"
                       << " th_dist=-1"
+                      << " disp_p50=-1"
+                      << " disp_p90=-1"
+                      << " disp_p99=-1"
+                      << " depth_p50=-1"
+                      << " depth_p90=-1"
+                      << " depth_p99=-1"
+                      << " depth_gt50=0"
+                      << " depth_gt100=0"
+                      << " close_depth=0"
                       << std::endl;
         }
         return;
@@ -1588,6 +2822,7 @@ void Frame::ComputeStereoMatches()
         {
             mvuRight[vDistIdx[i].second]=-1;
             mvDepth[vDistIdx[i].second]=-1;
+            mvStereoBirthQuality[vDistIdx[i].second]=kStereoBirthInvalid;
             if(bFloatDescriptors)
                 ++nMedianReject;
         }
@@ -1596,6 +2831,33 @@ void Frame::ComputeStereoMatches()
     if(ShouldPrintXFeatFrameDebug(mnId) && bFloatDescriptors)
     {
         int nDepthBeforeMedian = static_cast<int>(vDistIdx.size());
+        std::vector<float> vDepths;
+        std::vector<float> vDisparities;
+        vDepths.reserve(vDistIdx.size());
+        vDisparities.reserve(vDistIdx.size());
+        int nDepthGt50 = 0;
+        int nDepthGt100 = 0;
+        int nCloseDepth = 0;
+        for(const auto& distIdx : vDistIdx)
+        {
+            const int idx = distIdx.second;
+            if(idx < 0 || idx >= static_cast<int>(mvDepth.size()))
+                continue;
+            const float depth = mvDepth[idx];
+            if(depth <= 0.0f || !std::isfinite(depth))
+                continue;
+            const float disparity = mbf / depth;
+            vDepths.push_back(depth);
+            vDisparities.push_back(disparity);
+            if(depth > 50.0f)
+                ++nDepthGt50;
+            if(depth > 100.0f)
+                ++nDepthGt100;
+            if(depth < mThDepth)
+                ++nCloseDepth;
+        }
+        std::sort(vDepths.begin(), vDepths.end());
+        std::sort(vDisparities.begin(), vDisparities.end());
         std::cout << "[ComputeStereoMatches] frame=" << mnId
                   << " N=" << N
                   << " right_N=" << Nr
@@ -1603,13 +2865,58 @@ void Frame::ComputeStereoMatches()
                   << " desc_pass=" << nDescPass
                   << " ratio_reject=" << nRatioReject
                   << " mutual_reject=" << nMutualReject
+                  << " epipolar_reject=" << nEpipolarReject
                   << " disparity_reject=" << nDisparityReject
+                  << " uncert_reject=" << nUncertaintyReject
+                  << " subpix_refined=" << nSubpixelRefined
+                  << " subpix_fallback=" << nSubpixelFallback
                   << " accepted_before_median=" << nAccepted
+                  << " close_candidates=" << nCloseCandidates
+                  << " close_high_conf=" << nCloseHighConf
+                  << " close_low_conf=" << nCloseLowConf
+                  << " reject_close_y=" << nRejectCloseY
+                  << " reject_close_lr=" << nRejectCloseLR
+                  << " close_subpix_attempt=" << nCloseSubpixelAttempt
+                  << " close_subpix_refined=" << nCloseSubpixelRefined
+                  << " close_subpix_reject=" << nCloseSubpixelReject
+                  << " close_uncert_reject=" << nCloseUncertaintyReject
+                  << " close_flat_curve_reject=" << nCloseFlatCurveReject
+                  << " close_combined_curve_reject=" << nCloseCombinedCurveReject
+                  << " close_low_margin_reject=" << nCloseLowMarginReject
+                  << " close_lr_consistency_reject=" << nCloseLRConsistencyReject
+                  << " close_low_peak_reject=" << nCloseLowPeakReject
+                  << " close_sigma_model_reject=" << nCloseSigmaModelReject
+                  << " close_quality_sigma_reject=" << nCloseQualitySigmaReject
+                  << " close_score_sigma_reject=" << nCloseScoreSigmaReject
+                  << " close_combined_sigma_reject=" << nCloseCombinedSigmaReject
+                  << " close_topk_candidates=" << nCloseTopKCandidates
+                  << " close_candidate_ambiguous_reject=" << nCloseCandidateAmbiguousReject
+                  << " close_candidate_rescore_winner_nonbestidx=" << nCloseCandidateRescoreWinnerNonBestIdx
+                  << " close_patch_search_attempt=" << nClosePatchSearchAttempt
+                  << " close_patch_search_ambiguous_reject=" << nClosePatchSearchAmbiguousReject
+                  << " close_patch_search_winner_shift_gt1px=" << nClosePatchSearchWinnerShiftGt1Px
+                  << " close_patch_sigma_reject=" << nClosePatchSigmaReject
+                  << " close_band_search_attempt=" << nCloseBandSearchAttempt
+                  << " close_band_search_ambiguous_reject=" << nCloseBandSearchAmbiguousReject
+                  << " close_band_search_width_gt12px=" << nCloseBandSearchWidthGt12Px
+                  << " close_band_sigma_reject=" << nCloseBandSigmaReject
+                  << " close_cost_volume_attempt=" << nCloseCostVolumeAttempt
+                  << " close_cost_volume_ambiguous_reject=" << nCloseCostVolumeAmbiguousReject
+                  << " close_cost_volume_sigma_reject=" << nCloseCostVolumeSigmaReject
                   << " median_reject=" << nMedianReject
                   << " accepted_after_median=" << (nAccepted - nMedianReject)
                   << " depth_before_median=" << nDepthBeforeMedian
                   << " median_dist=" << median
                   << " th_dist=" << thDist
+                  << " disp_p50=" << PercentileFromSorted(vDisparities, 0.50f)
+                  << " disp_p90=" << PercentileFromSorted(vDisparities, 0.90f)
+                  << " disp_p99=" << PercentileFromSorted(vDisparities, 0.99f)
+                  << " depth_p50=" << PercentileFromSorted(vDepths, 0.50f)
+                  << " depth_p90=" << PercentileFromSorted(vDepths, 0.90f)
+                  << " depth_p99=" << PercentileFromSorted(vDepths, 0.99f)
+                  << " depth_gt50=" << nDepthGt50
+                  << " depth_gt100=" << nDepthGt100
+                  << " close_depth=" << nCloseDepth
                   << std::endl;
     }
 }
@@ -1619,6 +2926,7 @@ void Frame::ComputeStereoFromRGBD(const cv::Mat &imDepth)
 {
     mvuRight = vector<float>(N,-1);
     mvDepth = vector<float>(N,-1);
+    mvStereoBirthQuality = vector<unsigned char>(N, kStereoBirthInvalid);
 
     for(int i=0; i<N; i++)
     {

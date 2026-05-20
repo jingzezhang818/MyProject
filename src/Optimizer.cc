@@ -51,6 +51,38 @@ namespace ORB_SLAM3
 {
 namespace
 {
+bool IsEnvFlagEnabled(const char* key)
+{
+    const char* env = std::getenv(key);
+    if(!env)
+        return false;
+
+    const std::string v(env);
+    return !(v.empty() || v == "0" || v == "false" || v == "FALSE");
+}
+
+int GetXFeatDiagInterval()
+{
+    static const int interval = []() -> int
+    {
+        int value = 1;
+        const char* env = std::getenv("XFEAT_DIAG_INTERVAL");
+        if(env && env[0] != '\0')
+        {
+            try
+            {
+                value = std::max(1, std::min(1000, std::stoi(std::string(env))));
+            }
+            catch(...)
+            {
+                value = 1;
+            }
+        }
+        return value;
+    }();
+    return interval;
+}
+
 bool IsXFeatDescriptorMat(const cv::Mat& descriptors)
 {
     return !descriptors.empty() && descriptors.type() == CV_32F;
@@ -78,8 +110,9 @@ float GetXFeatPixelSigma()
 
     static const bool printedOnce = []() -> bool
     {
-        const char* debug = std::getenv("XFEAT_DEBUG");
-        if(debug && std::string(debug) == "1")
+        // 调试: 这是无 frame/kf 上下文的一次性配置日志，仅在最密集诊断模式下打印，
+        // 避免 XFEAT_DIAG_INTERVAL>1 时仍然冒出不受控的 XFEAT_DEBUG 输出。
+        if(IsEnvFlagEnabled("XFEAT_DEBUG") && GetXFeatDiagInterval() == 1)
             std::cout << "[XFEAT_DEBUG] XFEAT_PIXEL_SIGMA=" << xfeatPixelSigma << std::endl;
         return true;
     }();
@@ -108,6 +141,98 @@ float GetVisualInvSigma2ForKeyPoint(const KeyFrame* pKF, const cv::KeyPoint& kp)
 float GetVisualInvSigma2ForKeyPoint(const Frame* pFrame, const cv::KeyPoint& kp)
 {
     return GetVisualInvSigma2ForKeyPoint(pFrame->mvInvLevelSigma2, pFrame->mvScaleFactors, pFrame->mDescriptors, kp);
+}
+
+bool ShouldPrintXFeatDebug(const long unsigned int frameId)
+{
+    return IsEnvFlagEnabled("XFEAT_DEBUG") &&
+           (frameId == 0 || (frameId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0);
+}
+
+float GetLocalMapTriangPoseWeight()
+{
+    static const float weight = []() -> float
+    {
+        float value = 1.0f;
+        const char* env = std::getenv("XFEAT_LOCALMAP_TRIANG_PO_WEIGHT");
+        if(env && env[0] != '\0')
+        {
+            char* end = nullptr;
+            const float parsed = std::strtof(env, &end);
+            if(end != env && std::isfinite(parsed))
+                value = parsed;
+        }
+        return std::max(0.01f, std::min(1.0f, value));
+    }();
+    return weight;
+}
+
+float GetLocalMapTriangPoseMinDepth()
+{
+    static const float minDepth = []() -> float
+    {
+        float value = -1.0f;
+        const char* env = std::getenv("XFEAT_LOCALMAP_TRIANG_PO_MIN_DEPTH");
+        if(env && env[0] != '\0')
+        {
+            char* end = nullptr;
+            const float parsed = std::strtof(env, &end);
+            if(end != env && std::isfinite(parsed))
+                value = parsed;
+        }
+        return std::max(-1.0f, std::min(10000.0f, value));
+    }();
+    return minDepth;
+}
+
+float ResolveFrameMapPointDepth(const Frame* pFrame, MapPoint* pMP)
+{
+    if(!pFrame || !pMP)
+        return std::numeric_limits<float>::quiet_NaN();
+
+    const Eigen::Vector3f x3Dc = pFrame->GetPose() * pMP->GetWorldPos();
+    const float depth = x3Dc(2);
+    if(!std::isfinite(depth) || depth <= 0.0f)
+        return std::numeric_limits<float>::quiet_NaN();
+    return depth;
+}
+
+float GetPoseOptimizationVisualWeight(const Frame* pFrame,
+                                      const int idx,
+                                      MapPoint* pMP,
+                                      float* resolvedDepthOut = nullptr)
+{
+    constexpr unsigned char kXFeatMatchLocalProjection = 5;
+
+    if(resolvedDepthOut)
+        *resolvedDepthOut = std::numeric_limits<float>::quiet_NaN();
+
+    if(!pFrame || !pMP || idx < 0)
+        return 1.0f;
+
+    const float weight = GetLocalMapTriangPoseWeight();
+    if(weight >= 0.9999f)
+        return 1.0f;
+
+    if(idx >= static_cast<int>(pFrame->mvXFeatMatchSource.size()) ||
+       pFrame->mvXFeatMatchSource[static_cast<size_t>(idx)] != kXFeatMatchLocalProjection)
+        return 1.0f;
+
+    if(pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+        return 1.0f;
+
+    const float resolvedDepth = ResolveFrameMapPointDepth(pFrame, pMP);
+    if(resolvedDepthOut)
+        *resolvedDepthOut = resolvedDepth;
+    if(!std::isfinite(resolvedDepth))
+        return 1.0f;
+
+    const float configuredMinDepth = GetLocalMapTriangPoseMinDepth();
+    const float minDepth = configuredMinDepth > 0.0f ? configuredMinDepth : pFrame->mThDepth;
+    if(resolvedDepth <= minDepth)
+        return 1.0f;
+
+    return weight;
 }
 } // namespace
 
@@ -918,6 +1043,8 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
     const float deltaMono = sqrt(5.991);
     const float deltaStereo = sqrt(7.815);
+    int nWeightedObs = 0;
+    int nWeightedLocalProjTriangFar = 0;
 
     {
     unique_lock<mutex> lock(MapPoint::mGlobalMutex);
@@ -943,8 +1070,14 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
                     e->setMeasurement(obs);
-                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn);
+                    const float visualWeight = GetPoseOptimizationVisualWeight(pFrame, i, pMP);
+                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * visualWeight;
                     e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
+                    if(visualWeight < 0.9999f)
+                    {
+                        nWeightedObs++;
+                        nWeightedLocalProjTriangFar++;
+                    }
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
@@ -972,9 +1105,15 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
                     e->setMeasurement(obs);
-                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn);
+                    const float visualWeight = GetPoseOptimizationVisualWeight(pFrame, i, pMP);
+                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * visualWeight;
                     Eigen::Matrix3d Info = Eigen::Matrix3d::Identity()*invSigma2;
                     e->setInformation(Info);
+                    if(visualWeight < 0.9999f)
+                    {
+                        nWeightedObs++;
+                        nWeightedLocalProjTriangFar++;
+                    }
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
@@ -1011,8 +1150,14 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex *>(optimizer.vertex(0)));
                     e->setMeasurement(obs);
-                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn);
+                    const float visualWeight = GetPoseOptimizationVisualWeight(pFrame, i, pMP);
+                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * visualWeight;
                     e->setInformation(Eigen::Matrix2d::Identity() * invSigma2);
+                    if(visualWeight < 0.9999f)
+                    {
+                        nWeightedObs++;
+                        nWeightedLocalProjTriangFar++;
+                    }
 
                     g2o::RobustKernelHuber *rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
@@ -1038,8 +1183,14 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex *>(optimizer.vertex(0)));
                     e->setMeasurement(obs);
-                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn);
+                    const float visualWeight = GetPoseOptimizationVisualWeight(pFrame, i, pMP);
+                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * visualWeight;
                     e->setInformation(Eigen::Matrix2d::Identity() * invSigma2);
+                    if(visualWeight < 0.9999f)
+                    {
+                        nWeightedObs++;
+                        nWeightedLocalProjTriangFar++;
+                    }
 
                     g2o::RobustKernelHuber *rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
@@ -1176,6 +1327,19 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     Sophus::SE3<float> pose(SE3quat_recov.rotation().cast<float>(),
             SE3quat_recov.translation().cast<float>());
     pFrame->SetPose(pose);
+
+    if(ShouldPrintXFeatDebug(pFrame->mnId))
+    {
+        const float configuredMinDepth = GetLocalMapTriangPoseMinDepth();
+        const float minDepth = configuredMinDepth > 0.0f ? configuredMinDepth : pFrame->mThDepth;
+        std::cout << "[PoseOptimization][Weight]"
+                  << " frame_id=" << pFrame->mnId
+                  << " weight=" << GetLocalMapTriangPoseWeight()
+                  << " min_depth=" << minDepth
+                  << " weighted_obs=" << nWeightedObs
+                  << " weighted_local_proj_triang_far=" << nWeightedLocalProjTriangFar
+                  << std::endl;
+    }
 
     return nInitialCorrespondences-nBad;
 }

@@ -249,6 +249,14 @@ public:
     // "Monocular" keypoints have a negative value.
     std::vector<float> mvuRight;
     std::vector<float> mvDepth;
+    enum StereoBirthQuality : unsigned char
+    {
+        kStereoBirthInvalid = 0,
+        kStereoBirthValid = 1,
+        kStereoBirthCloseHighConf = 2,
+        kStereoBirthCloseLowConf = 3
+    };
+    std::vector<unsigned char> mvStereoBirthQuality;
 
     // Bag of Words Vector structures.
     DBoW2::BowVector mBowVec;

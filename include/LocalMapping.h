@@ -136,6 +136,7 @@ protected:
     void CreateNewMapPoints();
 
     void MapPointCulling();
+    void CullLongLivedWeakMapPoints();
     void SearchInNeighbors();
     void KeyFrameCulling();
 
