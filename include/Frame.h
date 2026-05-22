@@ -273,6 +273,20 @@ public:
     std::vector<bool> mvbOutlier;
     // XFeat diagnostics only: source tag for each current-frame MapPoint association.
     std::vector<unsigned char> mvXFeatMatchSource;
+    // XFeat local projection shadow diagnostics. Runtime-only, one entry per current-frame feature.
+    std::vector<float> mvLocalProjBestDist;
+    std::vector<float> mvLocalProjSecondDist;
+    std::vector<float> mvLocalProjRatio;
+    std::vector<int> mvLocalProjCandidateCount;
+    std::vector<float> mvLocalProjRadiusPx;
+    std::vector<float> mvLocalProjProjX;
+    std::vector<float> mvLocalProjProjY;
+    std::vector<float> mvLocalProjProjErrPx;
+    std::vector<float> mvLocalProjProjErrNorm;
+    std::vector<int> mvLocalProjPredLevel;
+    std::vector<int> mvLocalProjMatchLevel;
+    std::vector<int> mvLocalProjLevelDiff;
+    std::vector<unsigned char> mvLocalProjSide;
     int mnCloseMPs;
 
     // Keypoints are assigned to cells in a grid to reduce matching complexity when projecting MapPoints.

@@ -32,6 +32,9 @@ namespace
 {
 // XFeat路径: 每个MapPoint保留固定数量的描述子原型。
 constexpr int kXFeatDescriptorBankSize = 4;
+constexpr unsigned int kLocalProjRecentHistoryMask = 0xffu;
+constexpr long unsigned int kInvalidLocalProjHistoryFrame =
+    std::numeric_limits<long unsigned int>::max();
 
 bool IsFloatDescriptorType(const cv::Mat& d)
 {
@@ -121,7 +124,20 @@ MapPoint::MapPoint():
     mnFirstKFid(0), mnFirstFrame(0), nObs(0), mnTrackReferenceForFrame(0),
     mnLastFrameSeen(0), mnBALocalForKF(0), mnFuseCandidateForKF(0), mnLoopPointForKF(0), mnCorrectedByKF(0),
     mnCorrectedReference(0), mnBAGlobalForKF(0), mnVisible(1), mnFound(1),
-    mCreationSource(kCreationSourceUnknown), mbBad(false),
+    mCreationSource(kCreationSourceUnknown), mbHasTriangulationQuality(false),
+    mTriangDepthAtCreation(std::numeric_limits<float>::quiet_NaN()),
+    mTriangCosParallax(std::numeric_limits<float>::quiet_NaN()),
+    mTriangReprojChi2Max(std::numeric_limits<float>::quiet_NaN()),
+    mTriangReprojChi2Mean(std::numeric_limits<float>::quiet_NaN()),
+    mTriangScaleLogResidual(std::numeric_limits<float>::quiet_NaN()),
+    mTriangScaleLogMargin(std::numeric_limits<float>::quiet_NaN()),
+    mTriangMatchBackend(kTriangBackendUnknown), mnTriangAnchorKF1Id(0),
+    mnTriangAnchorKF2Id(0), mLocalProjAttemptCount(0),
+    mLocalProjMatchCount(0), mLocalProjOptInlierCount(0),
+    mLocalProjOptOutlierCount(0), mLocalProjRecentValidMask(0),
+    mLocalProjRecentOutlierMask(0), mnLastLocalProjAttemptFrame(kInvalidLocalProjHistoryFrame),
+    mnLastLocalProjMatchFrame(kInvalidLocalProjHistoryFrame),
+    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame), mbBad(false),
     mpReplaced(static_cast<MapPoint*>(NULL))
 {
     mpReplaced = static_cast<MapPoint*>(NULL);
@@ -131,7 +147,20 @@ MapPoint::MapPoint(const Eigen::Vector3f &Pos, KeyFrame *pRefKF, Map* pMap):
     mnFirstKFid(pRefKF->mnId), mnFirstFrame(pRefKF->mnFrameId), nObs(0), mnTrackReferenceForFrame(0),
     mnLastFrameSeen(0), mnBALocalForKF(0), mnFuseCandidateForKF(0), mnLoopPointForKF(0), mnCorrectedByKF(0),
     mnCorrectedReference(0), mnBAGlobalForKF(0), mpRefKF(pRefKF), mnVisible(1), mnFound(1),
-    mCreationSource(kCreationSourceUnknown), mbBad(false),
+    mCreationSource(kCreationSourceUnknown), mbHasTriangulationQuality(false),
+    mTriangDepthAtCreation(std::numeric_limits<float>::quiet_NaN()),
+    mTriangCosParallax(std::numeric_limits<float>::quiet_NaN()),
+    mTriangReprojChi2Max(std::numeric_limits<float>::quiet_NaN()),
+    mTriangReprojChi2Mean(std::numeric_limits<float>::quiet_NaN()),
+    mTriangScaleLogResidual(std::numeric_limits<float>::quiet_NaN()),
+    mTriangScaleLogMargin(std::numeric_limits<float>::quiet_NaN()),
+    mTriangMatchBackend(kTriangBackendUnknown), mnTriangAnchorKF1Id(0),
+    mnTriangAnchorKF2Id(0), mLocalProjAttemptCount(0),
+    mLocalProjMatchCount(0), mLocalProjOptInlierCount(0),
+    mLocalProjOptOutlierCount(0), mLocalProjRecentValidMask(0),
+    mLocalProjRecentOutlierMask(0), mnLastLocalProjAttemptFrame(kInvalidLocalProjHistoryFrame),
+    mnLastLocalProjMatchFrame(kInvalidLocalProjHistoryFrame),
+    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame), mbBad(false),
     mpReplaced(static_cast<MapPoint*>(NULL)), mfMinDistance(0), mfMaxDistance(0), mpMap(pMap),
     mnOriginMapId(pMap->GetId())
 {
@@ -151,7 +180,20 @@ MapPoint::MapPoint(const double invDepth, cv::Point2f uv_init, KeyFrame* pRefKF,
     mnFirstKFid(pRefKF->mnId), mnFirstFrame(pRefKF->mnFrameId), nObs(0), mnTrackReferenceForFrame(0),
     mnLastFrameSeen(0), mnBALocalForKF(0), mnFuseCandidateForKF(0), mnLoopPointForKF(0), mnCorrectedByKF(0),
     mnCorrectedReference(0), mnBAGlobalForKF(0), mpRefKF(pRefKF), mnVisible(1), mnFound(1),
-    mCreationSource(kCreationSourceUnknown), mbBad(false),
+    mCreationSource(kCreationSourceUnknown), mbHasTriangulationQuality(false),
+    mTriangDepthAtCreation(std::numeric_limits<float>::quiet_NaN()),
+    mTriangCosParallax(std::numeric_limits<float>::quiet_NaN()),
+    mTriangReprojChi2Max(std::numeric_limits<float>::quiet_NaN()),
+    mTriangReprojChi2Mean(std::numeric_limits<float>::quiet_NaN()),
+    mTriangScaleLogResidual(std::numeric_limits<float>::quiet_NaN()),
+    mTriangScaleLogMargin(std::numeric_limits<float>::quiet_NaN()),
+    mTriangMatchBackend(kTriangBackendUnknown), mnTriangAnchorKF1Id(0),
+    mnTriangAnchorKF2Id(0), mLocalProjAttemptCount(0),
+    mLocalProjMatchCount(0), mLocalProjOptInlierCount(0),
+    mLocalProjOptOutlierCount(0), mLocalProjRecentValidMask(0),
+    mLocalProjRecentOutlierMask(0), mnLastLocalProjAttemptFrame(kInvalidLocalProjHistoryFrame),
+    mnLastLocalProjMatchFrame(kInvalidLocalProjHistoryFrame),
+    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame), mbBad(false),
     mpReplaced(static_cast<MapPoint*>(NULL)), mfMinDistance(0), mfMaxDistance(0), mpMap(pMap),
     mnOriginMapId(pMap->GetId())
 {
@@ -172,7 +214,20 @@ MapPoint::MapPoint(const Eigen::Vector3f &Pos, Map* pMap, Frame* pFrame, const i
     mnFirstKFid(-1), mnFirstFrame(pFrame->mnId), nObs(0), mnTrackReferenceForFrame(0), mnLastFrameSeen(0),
     mnBALocalForKF(0), mnFuseCandidateForKF(0),mnLoopPointForKF(0), mnCorrectedByKF(0),
     mnCorrectedReference(0), mnBAGlobalForKF(0), mpRefKF(static_cast<KeyFrame*>(NULL)), mnVisible(1),
-    mnFound(1), mCreationSource(kCreationSourceUnknown), mbBad(false), mpReplaced(NULL), mpMap(pMap),
+    mnFound(1), mCreationSource(kCreationSourceUnknown), mbHasTriangulationQuality(false),
+    mTriangDepthAtCreation(std::numeric_limits<float>::quiet_NaN()),
+    mTriangCosParallax(std::numeric_limits<float>::quiet_NaN()),
+    mTriangReprojChi2Max(std::numeric_limits<float>::quiet_NaN()),
+    mTriangReprojChi2Mean(std::numeric_limits<float>::quiet_NaN()),
+    mTriangScaleLogResidual(std::numeric_limits<float>::quiet_NaN()),
+    mTriangScaleLogMargin(std::numeric_limits<float>::quiet_NaN()),
+    mTriangMatchBackend(kTriangBackendUnknown), mnTriangAnchorKF1Id(0),
+    mnTriangAnchorKF2Id(0), mLocalProjAttemptCount(0),
+    mLocalProjMatchCount(0), mLocalProjOptInlierCount(0),
+    mLocalProjOptOutlierCount(0), mLocalProjRecentValidMask(0),
+    mLocalProjRecentOutlierMask(0), mnLastLocalProjAttemptFrame(kInvalidLocalProjHistoryFrame),
+    mnLastLocalProjMatchFrame(kInvalidLocalProjHistoryFrame),
+    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame), mbBad(false), mpReplaced(NULL), mpMap(pMap),
     mnOriginMapId(pMap->GetId())
 {
     SetWorldPos(Pos);
@@ -436,6 +491,82 @@ MapPoint::CreationSource MapPoint::GetCreationSource() const
 {
     unique_lock<mutex> lock(const_cast<MapPoint*>(this)->mMutexFeatures);
     return mCreationSource;
+}
+
+void MapPoint::SetTriangulationQuality(const float depthAtCreation,
+                                       const float cosParallax,
+                                       const float reprojChi2Max,
+                                       const float reprojChi2Mean,
+                                       const float scaleLogResidual,
+                                       const float scaleLogMargin,
+                                       const TriangulationMatchBackend backend,
+                                       const long unsigned int anchorKf1Id,
+                                       const long unsigned int anchorKf2Id)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    mbHasTriangulationQuality = true;
+    mTriangDepthAtCreation = depthAtCreation;
+    mTriangCosParallax = cosParallax;
+    mTriangReprojChi2Max = reprojChi2Max;
+    mTriangReprojChi2Mean = reprojChi2Mean;
+    mTriangScaleLogResidual = scaleLogResidual;
+    mTriangScaleLogMargin = scaleLogMargin;
+    mTriangMatchBackend = backend;
+    mnTriangAnchorKF1Id = anchorKf1Id;
+    mnTriangAnchorKF2Id = anchorKf2Id;
+}
+
+bool MapPoint::HasTriangulationQuality() const
+{
+    unique_lock<mutex> lock(const_cast<MapPoint*>(this)->mMutexFeatures);
+    return mbHasTriangulationQuality;
+}
+
+void MapPoint::RecordLocalProjectionAttempt(const long unsigned int frameId)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(mnLastLocalProjAttemptFrame == frameId)
+        return;
+    mnLastLocalProjAttemptFrame = frameId;
+    mLocalProjAttemptCount++;
+}
+
+void MapPoint::RecordLocalProjectionMatch(const long unsigned int frameId)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(mnLastLocalProjMatchFrame == frameId)
+        return;
+    mnLastLocalProjMatchFrame = frameId;
+    mLocalProjMatchCount++;
+}
+
+void MapPoint::RecordLocalProjectionOutcome(const long unsigned int frameId, const bool bInlier)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(mnLastLocalProjOutcomeFrame == frameId)
+        return;
+    mnLastLocalProjOutcomeFrame = frameId;
+    if(bInlier)
+        mLocalProjOptInlierCount++;
+    else
+        mLocalProjOptOutlierCount++;
+
+    mLocalProjRecentValidMask = ((mLocalProjRecentValidMask << 1U) | 1U) & kLocalProjRecentHistoryMask;
+    mLocalProjRecentOutlierMask = ((mLocalProjRecentOutlierMask << 1U) |
+                                   (bInlier ? 0U : 1U)) & kLocalProjRecentHistoryMask;
+}
+
+MapPoint::LocalProjectionHistoryStats MapPoint::GetLocalProjectionHistory() const
+{
+    unique_lock<mutex> lock(const_cast<MapPoint*>(this)->mMutexFeatures);
+    LocalProjectionHistoryStats stats;
+    stats.attemptCount = mLocalProjAttemptCount;
+    stats.matchCount = mLocalProjMatchCount;
+    stats.optInlierCount = mLocalProjOptInlierCount;
+    stats.optOutlierCount = mLocalProjOptOutlierCount;
+    stats.recentValidMask = mLocalProjRecentValidMask;
+    stats.recentOutlierMask = mLocalProjRecentOutlierMask;
+    return stats;
 }
 
 void MapPoint::ComputeDistinctiveDescriptors()

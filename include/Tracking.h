@@ -40,6 +40,7 @@
 #include "GeometricCamera.h"
 
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace ORB_SLAM3
@@ -277,6 +278,37 @@ protected:
     KeyFrame* mpReferenceKF;
     std::vector<KeyFrame*> mvpLocalKeyFrames;
     std::vector<MapPoint*> mvpLocalMapPoints;
+
+public:
+    enum class LocalKFProvenanceRole : unsigned char
+    {
+        Unknown = 0,
+        Reference = 1,
+        Voted = 2,
+        Covis = 3,
+        ChildParent = 4,
+        Temporal = 5
+    };
+
+    struct LocalKFProvenance
+    {
+        LocalKFProvenanceRole role = LocalKFProvenanceRole::Unknown;
+        int voteCount = 0;
+        long unsigned int frameId = 0;
+    };
+
+    struct LocalMPProvenance
+    {
+        LocalKFProvenanceRole bestRole = LocalKFProvenanceRole::Unknown;
+        int bestVoteCount = 0;
+        int localObservations = 0;
+        long int bestKeyFrameAge = -1;
+        long unsigned int frameId = 0;
+    };
+
+protected:
+    std::unordered_map<KeyFrame*, LocalKFProvenance> mmLocalKFProvenance;
+    std::unordered_map<MapPoint*, LocalMPProvenance> mmLocalMPProvenance;
     
     // System
     System* mpSystem;

@@ -22,6 +22,12 @@ public:
         int close_tracking_stereo_reject_ur = 0;
         int close_tracking_stereo_reject_depth = 0;
         int close_tracking_stereo_accepted = 0;
+        int local_proj_triang_0_10_proj_outside_reject = 0;
+        int local_proj_triang_0_10_proj_edge_shadow = 0;
+        int local_proj_triang_0_10_proj_edge_50_65_shadow = 0;
+        int local_proj_triang_0_10_proj_edge_65_80_shadow = 0;
+        int local_proj_triang_0_10_proj_edge_80_100_shadow = 0;
+        int local_proj_triang_0_10_companion_outside_reject = 0;
     };
 
     XFeatMatcher(float nnratio = 0.8f, bool checkOri = false);

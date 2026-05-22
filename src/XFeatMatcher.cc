@@ -374,7 +374,187 @@ struct CandidateMatch
     int featIdx = -1;
     MapPoint* pMP = nullptr;
     float dist = std::numeric_limits<float>::infinity();
+    float secondDist = std::numeric_limits<float>::infinity();
+    float ratio = -1.0f;
+    int candidateCount = 0;
+    float radiusPx = -1.0f;
+    int predictedLevel = -1;
+    unsigned char side = 0;
 };
+
+struct LocalProjectionMatcherDiagnosticValues
+{
+    unsigned char side = 0;
+    float radiusPx = std::numeric_limits<float>::quiet_NaN();
+    float projX = std::numeric_limits<float>::quiet_NaN();
+    float projY = std::numeric_limits<float>::quiet_NaN();
+    float projErrPx = std::numeric_limits<float>::quiet_NaN();
+    float projErrNorm = std::numeric_limits<float>::quiet_NaN();
+    int predLevel = -1;
+    int matchLevel = -1;
+    int levelDiff = -1;
+};
+
+void ResetLocalProjectionMatcherDiagnostics(Frame& F)
+{
+    const size_t n = static_cast<size_t>(std::max(0, F.N));
+    F.mvLocalProjBestDist.assign(n, std::numeric_limits<float>::quiet_NaN());
+    F.mvLocalProjSecondDist.assign(n, std::numeric_limits<float>::quiet_NaN());
+    F.mvLocalProjRatio.assign(n, std::numeric_limits<float>::quiet_NaN());
+    F.mvLocalProjCandidateCount.assign(n, -1);
+    F.mvLocalProjRadiusPx.assign(n, std::numeric_limits<float>::quiet_NaN());
+    F.mvLocalProjProjX.assign(n, std::numeric_limits<float>::quiet_NaN());
+    F.mvLocalProjProjY.assign(n, std::numeric_limits<float>::quiet_NaN());
+    F.mvLocalProjProjErrPx.assign(n, std::numeric_limits<float>::quiet_NaN());
+    F.mvLocalProjProjErrNorm.assign(n, std::numeric_limits<float>::quiet_NaN());
+    F.mvLocalProjPredLevel.assign(n, -1);
+    F.mvLocalProjMatchLevel.assign(n, -1);
+    F.mvLocalProjLevelDiff.assign(n, -1);
+    F.mvLocalProjSide.assign(n, 0);
+}
+
+int LocalProjectionMatchLevel(const Frame& F, const int featIdx)
+{
+    if(featIdx < 0 || featIdx >= F.N)
+        return -1;
+    if(F.Nleft == -1)
+    {
+        if(featIdx < static_cast<int>(F.mvKeysUn.size()))
+            return F.mvKeysUn[featIdx].octave;
+        return -1;
+    }
+    if(featIdx < F.Nleft)
+    {
+        if(featIdx < static_cast<int>(F.mvKeys.size()))
+            return F.mvKeys[featIdx].octave;
+        return -1;
+    }
+    const int rightIdx = featIdx - F.Nleft;
+    if(rightIdx >= 0 && rightIdx < static_cast<int>(F.mvKeysRight.size()))
+        return F.mvKeysRight[rightIdx].octave;
+    return -1;
+}
+
+bool LocalProjectionFeaturePoint(const Frame& F, const int featIdx, cv::Point2f& pt)
+{
+    if(featIdx < 0 || featIdx >= F.N)
+        return false;
+    if(F.Nleft == -1)
+    {
+        if(featIdx < static_cast<int>(F.mvKeysUn.size()))
+        {
+            pt = F.mvKeysUn[featIdx].pt;
+            return true;
+        }
+        return false;
+    }
+    if(featIdx < F.Nleft)
+    {
+        if(featIdx < static_cast<int>(F.mvKeys.size()))
+        {
+            pt = F.mvKeys[featIdx].pt;
+            return true;
+        }
+        return false;
+    }
+    const int rightIdx = featIdx - F.Nleft;
+    if(rightIdx >= 0 && rightIdx < static_cast<int>(F.mvKeysRight.size()))
+    {
+        pt = F.mvKeysRight[rightIdx].pt;
+        return true;
+    }
+    return false;
+}
+
+float LocalProjectionRadiusByViewingCos(const float viewCos)
+{
+    if(viewCos > 0.998f)
+        return 2.5f;
+    return 4.0f;
+}
+
+LocalProjectionMatcherDiagnosticValues ComputeLocalProjectionMatcherDiagnosticValues(const Frame& F,
+                                                                                    const int featIdx,
+                                                                                    MapPoint* pMP,
+                                                                                    const CandidateMatch& c)
+{
+    LocalProjectionMatcherDiagnosticValues values;
+    if(!pMP || featIdx < 0 || featIdx >= F.N)
+        return values;
+
+    const bool bRight = (F.Nleft != -1 && featIdx >= F.Nleft);
+    values.side = bRight ? 2 : 1;
+    const float projX = bRight ? pMP->mTrackProjXR : pMP->mTrackProjX;
+    const float projY = bRight ? pMP->mTrackProjYR : pMP->mTrackProjY;
+    values.projX = projX;
+    values.projY = projY;
+    values.predLevel = bRight ? pMP->mnTrackScaleLevelR : pMP->mnTrackScaleLevel;
+    const float viewCos = bRight ? pMP->mTrackViewCosR : pMP->mTrackViewCos;
+    values.radiusPx = (c.side == values.side) ? c.radiusPx : -1.0f;
+    if(values.radiusPx <= 0.0f || !std::isfinite(values.radiusPx))
+    {
+        const int nScaleLevels = static_cast<int>(F.mvScaleFactors.size());
+        if(values.predLevel >= 0 && values.predLevel < nScaleLevels)
+            values.radiusPx = LocalProjectionRadiusByViewingCos(viewCos) * F.mvScaleFactors[values.predLevel];
+    }
+
+    cv::Point2f kp;
+    if(LocalProjectionFeaturePoint(F, featIdx, kp) &&
+       std::isfinite(projX) && std::isfinite(projY))
+    {
+        const float dx = kp.x - projX;
+        const float dy = kp.y - projY;
+        values.projErrPx = std::sqrt(dx * dx + dy * dy);
+    }
+
+    values.matchLevel = LocalProjectionMatchLevel(F, featIdx);
+    values.levelDiff = (values.predLevel >= 0 && values.matchLevel >= 0)
+        ? std::abs(values.matchLevel - values.predLevel)
+        : -1;
+    values.projErrNorm =
+        (std::isfinite(values.projErrPx) && std::isfinite(values.radiusPx) && values.radiusPx > 0.0f)
+            ? values.projErrPx / values.radiusPx
+            : std::numeric_limits<float>::quiet_NaN();
+    return values;
+}
+
+bool IsLocalProjTriangulationCloseMidTarget(const Frame& F, MapPoint* pMP)
+{
+    if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+        return false;
+    const float depth = ResolveMapPointDepthInFrame(F, pMP);
+    return std::isfinite(depth) && depth > 0.0f && depth <= 10.0f;
+}
+
+void RecordLocalProjectionMatcherDiagnostics(Frame& F,
+                                             const int featIdx,
+                                             MapPoint* pMP,
+                                             const CandidateMatch& c)
+{
+    if(!pMP || featIdx < 0 || featIdx >= F.N)
+        return;
+
+    const size_t idx = static_cast<size_t>(featIdx);
+    if(F.mvLocalProjBestDist.size() != static_cast<size_t>(F.N))
+        ResetLocalProjectionMatcherDiagnostics(F);
+
+    const LocalProjectionMatcherDiagnosticValues values =
+        ComputeLocalProjectionMatcherDiagnosticValues(F, featIdx, pMP, c);
+
+    F.mvLocalProjBestDist[idx] = c.dist;
+    F.mvLocalProjSecondDist[idx] = c.secondDist;
+    F.mvLocalProjRatio[idx] = c.ratio;
+    F.mvLocalProjCandidateCount[idx] = c.candidateCount;
+    F.mvLocalProjRadiusPx[idx] = values.radiusPx;
+    F.mvLocalProjProjX[idx] = values.projX;
+    F.mvLocalProjProjY[idx] = values.projY;
+    F.mvLocalProjProjErrPx[idx] = values.projErrPx;
+    F.mvLocalProjProjErrNorm[idx] = values.projErrNorm;
+    F.mvLocalProjPredLevel[idx] = values.predLevel;
+    F.mvLocalProjMatchLevel[idx] = values.matchLevel;
+    F.mvLocalProjLevelDiff[idx] = values.levelDiff;
+    F.mvLocalProjSide[idx] = values.side;
+}
 
 struct SpatialQuotaStats
 {
@@ -1593,6 +1773,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
         ? std::min(2.0f, std::max(0.05f, thHighOverride))
         : TH_HIGH;
     mLastProjectionMapPointStats = ProjectionMapPointStats();
+    ResetLocalProjectionMatcherDiagnostics(F);
 
     int rawMatches = 0;
     int ratioMatches = 0;
@@ -1676,6 +1857,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             float r = RadiusByViewingCos(pMP->mTrackViewCos);
             if(bFactor)
                 r *= th;
+            const float radiusPx = r * F.mvScaleFactors[nPredictedLevel];
 
             int minLevel = -1;
             int maxLevel = -1;
@@ -1689,7 +1871,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             const std::vector<size_t> vIndices = F.GetFeaturesInArea(
                 pMP->mTrackProjX,
                 pMP->mTrackProjY,
-                r * F.mvScaleFactors[nPredictedLevel],
+                radiusPx,
                 minLevel,
                 maxLevel);
             if(vIndices.empty())
@@ -1701,6 +1883,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             int bestLevel = -1;
             int bestLevel2 = -1;
             int bestIdx = -1;
+            int validCandidateCount = 0;
 
             for(size_t iC = 0; iC < vIndices.size(); ++iC)
             {
@@ -1739,6 +1922,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                     }
                 }
 
+                ++validCandidateCount;
                 const float dist = candidateDistances[iC];
 
                 if(dist < bestDist)
@@ -1784,7 +1968,11 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 else
                 {
                     ++ratioMatches;
-                    candidates.push_back({bestIdx, pMP, bestDist});
+                    const float ratio = (std::isfinite(bestDist2) && bestDist2 > 0.0f)
+                        ? bestDist / bestDist2
+                        : -1.0f;
+                    candidates.push_back({bestIdx, pMP, bestDist, bestDist2, ratio,
+                                          validCandidateCount, radiusPx, nPredictedLevel, 1});
                 }
             }
         }
@@ -1797,6 +1985,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 continue;
 
             const float r = RadiusByViewingCos(pMP->mTrackViewCosR);
+            const float radiusPx = r * F.mvScaleFactors[nPredictedLevel];
 
             int minLevel = -1;
             int maxLevel = -1;
@@ -1810,7 +1999,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             const std::vector<size_t> vIndices = F.GetFeaturesInArea(
                 pMP->mTrackProjXR,
                 pMP->mTrackProjYR,
-                r * F.mvScaleFactors[nPredictedLevel],
+                radiusPx,
                 minLevel,
                 maxLevel,
                 true);
@@ -1823,6 +2012,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             int bestLevel = -1;
             int bestLevel2 = -1;
             int bestIdx = -1;
+            int validCandidateCount = 0;
 
             for(size_t iC = 0; iC < vIndices.size(); ++iC)
             {
@@ -1834,6 +2024,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 if(F.mvpMapPoints[featIdx] && F.mvpMapPoints[featIdx]->Observations() > 0)
                     continue;
 
+                ++validCandidateCount;
                 const float dist = candidateDistancesRight[iC];
 
                 if(dist < bestDist)
@@ -1866,7 +2057,11 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 else
                 {
                     ++ratioMatches;
-                    candidates.push_back({bestIdx + F.Nleft, pMP, bestDist});
+                    const float ratio = (std::isfinite(bestDist2) && bestDist2 > 0.0f)
+                        ? bestDist / bestDist2
+                        : -1.0f;
+                    candidates.push_back({bestIdx + F.Nleft, pMP, bestDist, bestDist2, ratio,
+                                          validCandidateCount, radiusPx, nPredictedLevel, 2});
                 }
             }
         }
@@ -1878,7 +2073,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
     SpatialQuotaStats spatialStats;
     ApplySpatialQuotaToBestCandidates(F, candidates, bestCandidateIdx, bestCandidateIdxSpatial, spatialStats);
 
-    auto assignIfFree = [&F](const int idx, MapPoint* pMP) -> bool
+    auto canAssignIfFree = [&F](const int idx, MapPoint* pMP) -> bool
     {
         if(idx < 0 || idx >= F.N || !pMP)
             return false;
@@ -1890,8 +2085,52 @@ int XFeatMatcher::SearchByProjection(Frame &F,
         if(pCurrent && pCurrent->Observations() > 0)
             return false;
 
+        return true;
+    };
+
+    auto assignIfFree = [&F, &canAssignIfFree](const int idx, MapPoint* pMP) -> bool
+    {
+        if(!canAssignIfFree(idx, pMP))
+            return false;
+
         F.mvpMapPoints[idx] = pMP;
         return true;
+    };
+
+    auto shouldRejectProjectionGate = [this, &F](const int idx,
+                                                 MapPoint* pMP,
+                                                 const CandidateMatch& c,
+                                                 const bool bCompanion) -> bool
+    {
+        if(!IsLocalProjTriangulationCloseMidTarget(F, pMP))
+            return false;
+
+        const LocalProjectionMatcherDiagnosticValues values =
+            ComputeLocalProjectionMatcherDiagnosticValues(F, idx, pMP, c);
+        if(!std::isfinite(values.projErrNorm))
+            return false;
+
+        if(values.projErrNorm > 1.0f)
+        {
+            if(bCompanion)
+                ++mLastProjectionMapPointStats.local_proj_triang_0_10_companion_outside_reject;
+            else
+                ++mLastProjectionMapPointStats.local_proj_triang_0_10_proj_outside_reject;
+            return true;
+        }
+
+        if(values.projErrNorm > 0.5f)
+        {
+            ++mLastProjectionMapPointStats.local_proj_triang_0_10_proj_edge_shadow;
+            if(values.projErrNorm <= 0.65f)
+                ++mLastProjectionMapPointStats.local_proj_triang_0_10_proj_edge_50_65_shadow;
+            else if(values.projErrNorm <= 0.80f)
+                ++mLastProjectionMapPointStats.local_proj_triang_0_10_proj_edge_65_80_shadow;
+            else
+                ++mLastProjectionMapPointStats.local_proj_triang_0_10_proj_edge_80_100_shadow;
+        }
+
+        return false;
     };
 
     int finalMatches = 0;
@@ -1906,9 +2145,15 @@ int XFeatMatcher::SearchByProjection(Frame &F,
         if(!c.pMP)
             continue;
 
-        if(assignIfFree(featIdx, c.pMP))
+        if(!canAssignIfFree(featIdx, c.pMP))
+        {
+            ++assignRejectMatches;
+        }
+        else if(!shouldRejectProjectionGate(featIdx, c.pMP, c, false) &&
+                assignIfFree(featIdx, c.pMP))
         {
             ++finalMatches;
+            RecordLocalProjectionMatcherDiagnostics(F, featIdx, c.pMP, c);
             if(c.pMP->GetCreationSource() == MapPoint::kCreationSourceTrackingStereo)
             {
                 const float acceptedDepth = ResolveMapPointDepthInFrame(F, c.pMP);
@@ -1916,8 +2161,6 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                     ++mLastProjectionMapPointStats.close_tracking_stereo_accepted;
             }
         }
-        else
-            ++assignRejectMatches;
 
         if(F.Nleft == -1)
             continue;
@@ -1930,8 +2173,13 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 if(rightIdxLocal >= 0)
                 {
                     const int rightFeat = rightIdxLocal + F.Nleft;
-                    if(assignIfFree(rightFeat, c.pMP))
+                    if(canAssignIfFree(rightFeat, c.pMP) &&
+                       !shouldRejectProjectionGate(rightFeat, c.pMP, c, true) &&
+                       assignIfFree(rightFeat, c.pMP))
+                    {
                         ++finalMatches;
+                        RecordLocalProjectionMatcherDiagnostics(F, rightFeat, c.pMP, c);
+                    }
                 }
             }
         }
@@ -1943,8 +2191,13 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 const int leftFeat = F.mvRightToLeftMatch[rightIdxLocal];
                 if(leftFeat >= 0 && leftFeat < F.Nleft)
                 {
-                    if(assignIfFree(leftFeat, c.pMP))
+                    if(canAssignIfFree(leftFeat, c.pMP) &&
+                       !shouldRejectProjectionGate(leftFeat, c.pMP, c, true) &&
+                       assignIfFree(leftFeat, c.pMP))
+                    {
                         ++finalMatches;
+                        RecordLocalProjectionMatcherDiagnostics(F, leftFeat, c.pMP, c);
+                    }
                 }
             }
         }
@@ -1985,6 +2238,12 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                       << " reject_dist=" << distRejectMatches
                       << " reject_geom_stereo_ur=" << mLastProjectionMapPointStats.close_tracking_stereo_reject_ur
                       << " reject_geom_stereo_depth=" << mLastProjectionMapPointStats.close_tracking_stereo_reject_depth
+                      << " reject_triang_0_10_proj_outside=" << mLastProjectionMapPointStats.local_proj_triang_0_10_proj_outside_reject
+                      << " reject_triang_0_10_companion_outside=" << mLastProjectionMapPointStats.local_proj_triang_0_10_companion_outside_reject
+                      << " triang_0_10_proj_edge_shadow=" << mLastProjectionMapPointStats.local_proj_triang_0_10_proj_edge_shadow
+                      << " triang_0_10_proj_edge_50_65_shadow=" << mLastProjectionMapPointStats.local_proj_triang_0_10_proj_edge_50_65_shadow
+                      << " triang_0_10_proj_edge_65_80_shadow=" << mLastProjectionMapPointStats.local_proj_triang_0_10_proj_edge_65_80_shadow
+                      << " triang_0_10_proj_edge_80_100_shadow=" << mLastProjectionMapPointStats.local_proj_triang_0_10_proj_edge_80_100_shadow
                       << " reject_ratio=" << ratioRejectMatches
                       << " reject_assign=" << assignRejectMatches
                       << " reject_spatial=" << spatialStats.dropped

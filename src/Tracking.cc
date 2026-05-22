@@ -46,8 +46,11 @@
 #include <sstream>
 #include <iomanip>
 #include <functional>
+#include <unordered_map>
 #include <unordered_set>
 #include <initializer_list>
+#include <map>
+#include <tuple>
 
 
 using namespace std;
@@ -1102,6 +1105,437 @@ namespace
         }
     }
 
+    const char* TriangulationBackendName(const MapPoint::TriangulationMatchBackend backend)
+    {
+        switch(backend)
+        {
+            case MapPoint::kTriangBackendXFeatBF:
+                return "xfeat_bf";
+            case MapPoint::kTriangBackendLightGlue:
+                return "lightglue";
+            case MapPoint::kTriangBackendORB:
+                return "orb";
+            case MapPoint::kTriangBackendUnknown:
+            default:
+                return "unknown";
+        }
+    }
+
+    int TriangulationBackendBin(const MapPoint::TriangulationMatchBackend backend)
+    {
+        const int idx = static_cast<int>(backend);
+        return (idx >= 0 && idx <= 3) ? idx : 0;
+    }
+
+    int TriangulationParallaxBin(const float cosParallax)
+    {
+        if(!std::isfinite(cosParallax))
+            return 0;
+        if(cosParallax >= 0.9992f)
+            return 1;
+        if(cosParallax >= 0.9985f)
+            return 2;
+        return 3;
+    }
+
+    const char* TriangulationParallaxBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "near_threshold";
+            case 2: return "mid";
+            case 3: return "strong";
+            default: return "invalid";
+        }
+    }
+
+    int TriangulationReprojBin(const float reprojChi2Max)
+    {
+        if(!std::isfinite(reprojChi2Max))
+            return 0;
+        if(reprojChi2Max <= 2.0f)
+            return 1;
+        if(reprojChi2Max <= 4.0f)
+            return 2;
+        return 3;
+    }
+
+    const char* TriangulationReprojBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "low";
+            case 2: return "mid";
+            case 3: return "high";
+            default: return "invalid";
+        }
+    }
+
+    int TriangulationScaleMarginBin(const float scaleLogMargin)
+    {
+        if(!std::isfinite(scaleLogMargin))
+            return 0;
+        if(scaleLogMargin <= 0.05f)
+            return 1;
+        if(scaleLogMargin <= 0.12f)
+            return 2;
+        return 3;
+    }
+
+    const char* TriangulationScaleMarginBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "tight";
+            case 2: return "mid";
+            case 3: return "loose";
+            default: return "invalid";
+        }
+    }
+
+    struct TriangulationMultiViewValidation
+    {
+        int extraKFs = 0;
+        int validExtraKFs = 0;
+        float bestChi2Ratio = std::numeric_limits<float>::quiet_NaN();
+    };
+
+    int ExtraKeyFrameCountBin(const int count)
+    {
+        if(count <= 0)
+            return 0;
+        if(count == 1)
+            return 1;
+        return 2;
+    }
+
+    const char* ExtraKeyFrameCountBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 0: return "none";
+            case 1: return "one";
+            case 2: return "two_plus";
+            default: return "unknown";
+        }
+    }
+
+    int BestChi2RatioBin(const float ratio)
+    {
+        if(!std::isfinite(ratio))
+            return 0;
+        if(ratio <= 0.5f)
+            return 1;
+        if(ratio <= 1.0f)
+            return 2;
+        return 3;
+    }
+
+    const char* BestChi2RatioBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 0: return "missing";
+            case 1: return "low";
+            case 2: return "mid";
+            case 3: return "high";
+            default: return "unknown";
+        }
+    }
+
+    int MultiViewValidationBin(const TriangulationMultiViewValidation& validation)
+    {
+        if(validation.extraKFs <= 0)
+            return 0;
+        if(validation.validExtraKFs <= 0)
+            return 1;
+        if(validation.validExtraKFs == 1)
+            return 2;
+        return 3;
+    }
+
+    const char* MultiViewValidationBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 0: return "unconfirmed";
+            case 1: return "rejected_geometry";
+            case 2: return "weak_confirmed";
+            case 3: return "strong_confirmed";
+            default: return "unknown";
+        }
+    }
+
+    bool ComputeKeyFrameObservationChi2Ratio(KeyFrame* pKF,
+                                             MapPoint* pMP,
+                                             const std::tuple<int,int>& observation,
+                                             float& chi2Ratio)
+    {
+        chi2Ratio = std::numeric_limits<float>::quiet_NaN();
+        if(!pKF || !pMP || pKF->isBad())
+            return false;
+
+        const int idxLeft = std::get<0>(observation);
+        const int idxRight = std::get<1>(observation);
+        const Eigen::Vector3f worldPos = pMP->GetWorldPos();
+
+        if(idxLeft >= 0 && idxLeft < static_cast<int>(pKF->mvKeysUn.size()) && pKF->mpCamera)
+        {
+            const Eigen::Vector3f x3Dc = pKF->GetPose() * worldPos;
+            const float z = x3Dc(2);
+            if(!std::isfinite(z) || z <= 0.0f)
+                return false;
+
+            const Eigen::Vector2f uv = pKF->mpCamera->project(x3Dc);
+            const cv::KeyPoint& kp = pKF->mvKeysUn[static_cast<size_t>(idxLeft)];
+            if(kp.octave < 0 || kp.octave >= static_cast<int>(pKF->mvLevelSigma2.size()))
+                return false;
+
+            const float dx = uv(0) - kp.pt.x;
+            const float dy = uv(1) - kp.pt.y;
+            const float sigma2 = pKF->mvLevelSigma2[static_cast<size_t>(kp.octave)];
+            if(sigma2 <= 0.0f)
+                return false;
+
+            float chi2 = (dx * dx + dy * dy) / sigma2;
+            float threshold = 4.5f;
+            if(idxLeft < static_cast<int>(pKF->mvuRight.size()) && pKF->mvuRight[static_cast<size_t>(idxLeft)] >= 0.0f)
+            {
+                const float uRight = uv(0) - pKF->mbf / z;
+                const float errRight = uRight - pKF->mvuRight[static_cast<size_t>(idxLeft)];
+                chi2 = (dx * dx + dy * dy + errRight * errRight) / sigma2;
+                threshold = 6.0f;
+            }
+
+            chi2Ratio = chi2 / threshold;
+            return std::isfinite(chi2Ratio);
+        }
+
+        if(idxRight >= 0 && pKF->NLeft != -1 && pKF->mpCamera2)
+        {
+            const int rightIdx = idxRight - pKF->NLeft;
+            if(rightIdx < 0 || rightIdx >= static_cast<int>(pKF->mvKeysRight.size()))
+                return false;
+
+            const Eigen::Vector3f x3Dc = pKF->GetRightPose() * worldPos;
+            const float z = x3Dc(2);
+            if(!std::isfinite(z) || z <= 0.0f)
+                return false;
+
+            const Eigen::Vector2f uv = pKF->mpCamera2->project(x3Dc);
+            const cv::KeyPoint& kp = pKF->mvKeysRight[static_cast<size_t>(rightIdx)];
+            if(kp.octave < 0 || kp.octave >= static_cast<int>(pKF->mvLevelSigma2.size()))
+                return false;
+
+            const float dx = uv(0) - kp.pt.x;
+            const float dy = uv(1) - kp.pt.y;
+            const float sigma2 = pKF->mvLevelSigma2[static_cast<size_t>(kp.octave)];
+            if(sigma2 <= 0.0f)
+                return false;
+
+            chi2Ratio = ((dx * dx + dy * dy) / sigma2) / 4.5f;
+            return std::isfinite(chi2Ratio);
+        }
+
+        return false;
+    }
+
+    TriangulationMultiViewValidation EvaluateTriangulationMultiViewValidation(MapPoint* pMP)
+    {
+        TriangulationMultiViewValidation validation;
+        if(!pMP || !pMP->HasTriangulationQuality())
+            return validation;
+
+        const std::map<KeyFrame*, std::tuple<int,int>> observations = pMP->GetObservations();
+        for(const auto& kv : observations)
+        {
+            KeyFrame* pKF = kv.first;
+            if(!pKF || pKF->isBad())
+                continue;
+            if(pKF->mnId == pMP->mnTriangAnchorKF1Id || pKF->mnId == pMP->mnTriangAnchorKF2Id)
+                continue;
+
+            validation.extraKFs++;
+            float chi2Ratio = std::numeric_limits<float>::quiet_NaN();
+            if(!ComputeKeyFrameObservationChi2Ratio(pKF, pMP, kv.second, chi2Ratio))
+                continue;
+
+            if(!std::isfinite(validation.bestChi2Ratio) || chi2Ratio < validation.bestChi2Ratio)
+                validation.bestChi2Ratio = chi2Ratio;
+            if(chi2Ratio <= 1.0f)
+                validation.validExtraKFs++;
+        }
+
+        return validation;
+    }
+
+    bool IsLocalProjHistoryTarget(MapPoint* pMP, const float resolvedDepth)
+    {
+        return pMP &&
+               pMP->GetCreationSource() == MapPoint::kCreationSourceLocalMappingTriangulation &&
+               std::isfinite(resolvedDepth) &&
+               resolvedDepth > 0.0f &&
+               resolvedDepth <= 10.0f;
+    }
+
+    int CountHistoryBits(unsigned int mask)
+    {
+        int count = 0;
+        while(mask != 0U)
+        {
+            count += static_cast<int>(mask & 1U);
+            mask >>= 1U;
+        }
+        return count;
+    }
+
+    float LocalProjMatchRate(const MapPoint::LocalProjectionHistoryStats& stats)
+    {
+        return stats.attemptCount > 0
+            ? static_cast<float>(stats.matchCount) / static_cast<float>(stats.attemptCount)
+            : 0.0f;
+    }
+
+    float LocalProjOptOutlierRate(const MapPoint::LocalProjectionHistoryStats& stats)
+    {
+        const int outcomes = stats.optInlierCount + stats.optOutlierCount;
+        return outcomes > 0
+            ? static_cast<float>(stats.optOutlierCount) / static_cast<float>(outcomes)
+            : 0.0f;
+    }
+
+    float LocalProjRecentOutlierRate(const MapPoint::LocalProjectionHistoryStats& stats)
+    {
+        const int valid = CountHistoryBits(stats.recentValidMask);
+        if(valid <= 0)
+            return 0.0f;
+        const int outliers = CountHistoryBits(stats.recentValidMask & stats.recentOutlierMask);
+        return static_cast<float>(outliers) / static_cast<float>(valid);
+    }
+
+    int LocalProjMatchRateBin(const MapPoint::LocalProjectionHistoryStats& stats)
+    {
+        if(stats.attemptCount < 3)
+            return 0;
+        const float rate = LocalProjMatchRate(stats);
+        if(rate < 0.35f)
+            return 1;
+        if(rate < 0.65f)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalProjMatchRateBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "low";
+            case 2: return "mid";
+            case 3: return "high";
+            default: return "no_history";
+        }
+    }
+
+    int LocalProjOptOutlierRateBin(const MapPoint::LocalProjectionHistoryStats& stats)
+    {
+        const int outcomes = stats.optInlierCount + stats.optOutlierCount;
+        if(outcomes < 3)
+            return 0;
+        const float rate = LocalProjOptOutlierRate(stats);
+        if(rate <= 0.15f)
+            return 1;
+        if(rate <= 0.35f)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalProjOptOutlierRateBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "low";
+            case 2: return "mid";
+            case 3: return "high";
+            default: return "no_history";
+        }
+    }
+
+    int LocalProjRecentOutlierBin(const MapPoint::LocalProjectionHistoryStats& stats)
+    {
+        const int valid = CountHistoryBits(stats.recentValidMask);
+        if(valid <= 0)
+            return 0;
+        const float rate = LocalProjRecentOutlierRate(stats);
+        if(rate <= 0.15f)
+            return 1;
+        if(rate <= 0.40f)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalProjRecentOutlierBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "clean";
+            case 2: return "mixed";
+            case 3: return "dirty";
+            default: return "none";
+        }
+    }
+
+    int LocalProjHistoryBin(const MapPoint::LocalProjectionHistoryStats& stats)
+    {
+        const int outcomes = stats.optInlierCount + stats.optOutlierCount;
+        if(stats.attemptCount < 3 || outcomes < 2)
+            return 0;
+        if(LocalProjMatchRate(stats) < 0.50f)
+            return 1;
+        if(LocalProjOptOutlierRate(stats) > 0.35f)
+            return 2;
+        const int recentValid = CountHistoryBits(stats.recentValidMask);
+        if(recentValid > 0 && LocalProjRecentOutlierRate(stats) > 0.40f)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalProjHistoryBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "matcher_unstable";
+            case 2: return "opt_unstable";
+            case 3: return "stable";
+            default: return "insufficient";
+        }
+    }
+
+    int LocalProjFineHistoryBin(const MapPoint::LocalProjectionHistoryStats& stats)
+    {
+        const int outcomes = stats.optInlierCount + stats.optOutlierCount;
+        const int recentValid = CountHistoryBits(stats.recentValidMask);
+        if((outcomes >= 3 && LocalProjOptOutlierRate(stats) > 0.35f) ||
+           (recentValid >= 3 && LocalProjRecentOutlierRate(stats) > 0.40f))
+        {
+            return 2;
+        }
+        if(stats.attemptCount >= 3 && outcomes >= 2)
+            return 1;
+        return 0;
+    }
+
+    const char* LocalProjFineHistoryBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "stable";
+            case 2: return "opt_unstable";
+            case 0:
+            default:
+                return "insufficient";
+        }
+    }
+
     struct ReprojectionConstraintStats
     {
         int total = 0;
@@ -1205,6 +1639,329 @@ namespace
            << " depth_avg=" << depthAvg
            << " depth_p50=" << (depthSamples.empty() ? 0.0f : DepthPercentile(depthSamples, 0.50f))
            << " depth_p90=" << (depthSamples.empty() ? 0.0f : DepthPercentile(depthSamples, 0.90f));
+    }
+
+    void AppendTriangulationQualityErrorStats(std::ostream& os,
+                                              const ReprojectionConstraintStats& stats)
+    {
+        const double outlierRatio = stats.total > 0
+            ? static_cast<double>(stats.outlier) / static_cast<double>(stats.total)
+            : 0.0;
+        const double inlierErrAvg = stats.inlierErrValid > 0
+            ? stats.inlierErrSum / static_cast<double>(stats.inlierErrValid)
+            : 0.0;
+        const double depthAvg = !stats.depthSamples.empty()
+            ? stats.depthSum / static_cast<double>(stats.depthSamples.size())
+            : 0.0;
+
+        os << " total=" << stats.total
+           << " inlier=" << stats.inlier
+           << " outlier=" << stats.outlier
+           << " outlier_ratio=" << outlierRatio
+           << " inlier_err_avg=" << inlierErrAvg
+           << " depth_avg=" << depthAvg;
+    }
+
+    struct TriangRefitObservation
+    {
+        KeyFrame* pKF = nullptr;
+        GeometricCamera* pCamera = nullptr;
+        Sophus::SE3f Tcw;
+        Eigen::Matrix<float,3,4> Tcw34;
+        Eigen::Vector3f bearing = Eigen::Vector3f::Zero();
+        cv::KeyPoint keypoint;
+        float sigma2 = std::numeric_limits<float>::quiet_NaN();
+        long unsigned int kfId = 0;
+    };
+
+    struct TriangRefitShadowResult
+    {
+        int successBin = 0;
+        float oldMeanChi2 = std::numeric_limits<float>::quiet_NaN();
+        float refitMeanChi2 = std::numeric_limits<float>::quiet_NaN();
+        float shift = std::numeric_limits<float>::quiet_NaN();
+        float relativeDepthChange = std::numeric_limits<float>::quiet_NaN();
+    };
+
+    bool BuildTriangRefitObservation(KeyFrame* pKF,
+                                     const std::tuple<int,int>& observation,
+                                     TriangRefitObservation& out)
+    {
+        if(!pKF || pKF->isBad())
+            return false;
+
+        const int idxLeft = std::get<0>(observation);
+        const int idxRight = std::get<1>(observation);
+        GeometricCamera* pCamera = nullptr;
+        Sophus::SE3f Tcw;
+        cv::KeyPoint kp;
+
+        if(idxLeft >= 0 && pKF->mpCamera)
+        {
+            if(pKF->NLeft == -1)
+            {
+                if(idxLeft >= static_cast<int>(pKF->mvKeysUn.size()))
+                    return false;
+                kp = pKF->mvKeysUn[static_cast<size_t>(idxLeft)];
+            }
+            else
+            {
+                if(idxLeft >= pKF->NLeft || idxLeft >= static_cast<int>(pKF->mvKeys.size()))
+                    return false;
+                kp = pKF->mvKeys[static_cast<size_t>(idxLeft)];
+            }
+            pCamera = pKF->mpCamera;
+            Tcw = pKF->GetPose();
+        }
+        else if(idxRight >= 0 && pKF->NLeft != -1 && pKF->mpCamera2)
+        {
+            const int rightIdx = idxRight - pKF->NLeft;
+            if(rightIdx < 0 || rightIdx >= static_cast<int>(pKF->mvKeysRight.size()))
+                return false;
+            kp = pKF->mvKeysRight[static_cast<size_t>(rightIdx)];
+            pCamera = pKF->mpCamera2;
+            Tcw = pKF->GetRightPose();
+        }
+        else
+        {
+            return false;
+        }
+
+        if(!pCamera || kp.octave < 0 || kp.octave >= static_cast<int>(pKF->mvLevelSigma2.size()))
+            return false;
+        const float sigma2 = pKF->mvLevelSigma2[static_cast<size_t>(kp.octave)];
+        if(!std::isfinite(sigma2) || sigma2 <= 0.0f)
+            return false;
+
+        Eigen::Vector3f bearing = pCamera->unprojectEig(kp.pt);
+        if(!bearing.allFinite() || bearing.norm() <= 0.0f)
+            return false;
+
+        out.pKF = pKF;
+        out.pCamera = pCamera;
+        out.Tcw = Tcw;
+        out.Tcw34 = Tcw.matrix3x4();
+        out.bearing = bearing;
+        out.keypoint = kp;
+        out.sigma2 = sigma2;
+        out.kfId = pKF->mnId;
+        return true;
+    }
+
+    bool ComputeTriangRefitMeanChi2(const std::vector<TriangRefitObservation>& observations,
+                                    const Eigen::Vector3f& worldPos,
+                                    float& meanChi2)
+    {
+        meanChi2 = std::numeric_limits<float>::quiet_NaN();
+        if(observations.empty() || !worldPos.allFinite())
+            return false;
+
+        double sumChi2 = 0.0;
+        int valid = 0;
+        for(const TriangRefitObservation& obs : observations)
+        {
+            if(!obs.pCamera)
+                return false;
+            const Eigen::Vector3f x3Dc = obs.Tcw * worldPos;
+            const float z = x3Dc(2);
+            if(!x3Dc.allFinite() || !std::isfinite(z) || z <= 0.0f)
+                return false;
+
+            const Eigen::Vector2f uv = obs.pCamera->project(x3Dc);
+            if(!uv.allFinite())
+                return false;
+            const float dx = uv(0) - obs.keypoint.pt.x;
+            const float dy = uv(1) - obs.keypoint.pt.y;
+            const float chi2 = (dx * dx + dy * dy) / obs.sigma2;
+            if(!std::isfinite(chi2))
+                return false;
+            sumChi2 += static_cast<double>(chi2);
+            valid++;
+        }
+
+        if(valid <= 0)
+            return false;
+        meanChi2 = static_cast<float>(sumChi2 / static_cast<double>(valid));
+        return std::isfinite(meanChi2);
+    }
+
+    TriangRefitShadowResult EvaluateTriangulationRefitShadow(const Frame& F,
+                                                             MapPoint* pMP,
+                                                             const float currentDepth)
+    {
+        TriangRefitShadowResult result;
+        if(!pMP)
+            return result;
+
+        std::vector<TriangRefitObservation> observations;
+        const std::map<KeyFrame*, std::tuple<int,int>> mpObservations = pMP->GetObservations();
+        observations.reserve(std::min<size_t>(mpObservations.size(), 8));
+        for(const auto& kv : mpObservations)
+        {
+            TriangRefitObservation obs;
+            if(BuildTriangRefitObservation(kv.first, kv.second, obs))
+                observations.push_back(obs);
+        }
+
+        if(observations.empty())
+        {
+            result.successBin = 0;
+            return result;
+        }
+
+        std::sort(observations.begin(), observations.end(),
+                  [](const TriangRefitObservation& a, const TriangRefitObservation& b)
+                  {
+                      return a.kfId > b.kfId;
+                  });
+        if(observations.size() > 8)
+            observations.resize(8);
+
+        if(observations.size() < 2)
+        {
+            result.successBin = 1;
+            return result;
+        }
+
+        const Eigen::Vector3f oldWorldPos = pMP->GetWorldPos();
+        ComputeTriangRefitMeanChi2(observations, oldWorldPos, result.oldMeanChi2);
+
+        bool foundCandidate = false;
+        Eigen::Vector3f bestWorldPos = Eigen::Vector3f::Zero();
+        float bestMeanChi2 = std::numeric_limits<float>::quiet_NaN();
+        for(size_t i = 0; i + 1 < observations.size(); ++i)
+        {
+            for(size_t j = i + 1; j < observations.size(); ++j)
+            {
+                Eigen::Vector3f x1 = observations[i].bearing;
+                Eigen::Vector3f x2 = observations[j].bearing;
+                Eigen::Matrix<float,3,4> Tcw1 = observations[i].Tcw34;
+                Eigen::Matrix<float,3,4> Tcw2 = observations[j].Tcw34;
+                Eigen::Vector3f candidateWorldPos;
+                if(!GeometricTools::Triangulate(x1, x2, Tcw1, Tcw2, candidateWorldPos))
+                    continue;
+
+                float candidateMeanChi2 = std::numeric_limits<float>::quiet_NaN();
+                if(!ComputeTriangRefitMeanChi2(observations, candidateWorldPos, candidateMeanChi2))
+                    continue;
+                if(!foundCandidate || candidateMeanChi2 < bestMeanChi2)
+                {
+                    foundCandidate = true;
+                    bestMeanChi2 = candidateMeanChi2;
+                    bestWorldPos = candidateWorldPos;
+                }
+            }
+        }
+
+        if(!foundCandidate)
+        {
+            result.successBin = 2;
+            return result;
+        }
+
+        result.successBin = 3;
+        result.refitMeanChi2 = bestMeanChi2;
+        result.shift = (bestWorldPos - oldWorldPos).norm();
+
+        if(std::isfinite(currentDepth) && currentDepth > 0.0f)
+        {
+            const Eigen::Vector3f refitCurrent = F.GetPose() * bestWorldPos;
+            const float refitDepth = refitCurrent(2);
+            if(refitCurrent.allFinite() && std::isfinite(refitDepth) && refitDepth > 0.0f)
+            {
+                result.relativeDepthChange =
+                    std::fabs(refitDepth - currentDepth) / std::max(currentDepth, 1e-6f);
+            }
+        }
+
+        return result;
+    }
+
+    const char* TriangRefitSuccessBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 0: return "no_obs";
+            case 1: return "no_pair";
+            case 2: return "failed";
+            case 3: return "success";
+            default: return "unknown";
+        }
+    }
+
+    int TriangRefitGainBin(const TriangRefitShadowResult& result)
+    {
+        if(result.successBin != 3 ||
+           !std::isfinite(result.oldMeanChi2) ||
+           !std::isfinite(result.refitMeanChi2) ||
+           result.oldMeanChi2 <= 1e-6f)
+        {
+            return 0;
+        }
+        const float ratio = result.refitMeanChi2 / result.oldMeanChi2;
+        if(ratio <= 0.70f)
+            return 4;
+        if(ratio <= 0.90f)
+            return 3;
+        if(ratio <= 1.10f)
+            return 2;
+        return 1;
+    }
+
+    const char* TriangRefitGainBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "worse";
+            case 2: return "neutral";
+            case 3: return "improved";
+            case 4: return "strong_improved";
+            default: return "missing";
+        }
+    }
+
+    int TriangRefitShiftBin(const float shift)
+    {
+        if(!std::isfinite(shift))
+            return 0;
+        if(shift < 0.10f)
+            return 1;
+        if(shift < 0.50f)
+            return 2;
+        return 3;
+    }
+
+    const char* TriangRefitShiftBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "small";
+            case 2: return "mid";
+            case 3: return "large";
+            default: return "missing";
+        }
+    }
+
+    int TriangRefitDepthChangeBin(const float relativeDepthChange)
+    {
+        if(!std::isfinite(relativeDepthChange))
+            return 0;
+        if(relativeDepthChange < 0.10f)
+            return 1;
+        if(relativeDepthChange < 0.30f)
+            return 2;
+        return 3;
+    }
+
+    const char* TriangRefitDepthChangeBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "small";
+            case 2: return "mid";
+            case 3: return "large";
+            default: return "missing";
+        }
     }
 
     struct MotionLightGlueGeometryStats
@@ -1536,6 +2293,1830 @@ namespace
         }
         std::cout.flags(oldFlags);
         std::cout.precision(oldPrecision);
+    }
+
+    void LogTrackLocalMapTriangulationQualityDiagnostics(const Frame& F)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+
+        static constexpr int kNumDepthBins = 6;
+        static constexpr int kNumQualityBins = 4;
+        ReprojectionConstraintStats depthStats[kNumDepthBins];
+        ReprojectionConstraintStats parallaxStats[kNumQualityBins];
+        ReprojectionConstraintStats reprojStats[kNumQualityBins];
+        ReprojectionConstraintStats scaleMarginStats[kNumQualityBins];
+        ReprojectionConstraintStats backendStats[kNumQualityBins];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+                continue;
+
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+            if(matchSource != kXFeatMatchLocalProjection)
+                continue;
+
+            if(!pMP->HasTriangulationQuality())
+                continue;
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            const bool isInlier = !F.mvbOutlier[i];
+
+            AccumulateReprojectionConstraint(depthStats[DepthBinIndex(pMP->mTriangDepthAtCreation)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(parallaxStats[TriangulationParallaxBin(pMP->mTriangCosParallax)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(reprojStats[TriangulationReprojBin(pMP->mTriangReprojChi2Max)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(scaleMarginStats[TriangulationScaleMarginBin(pMP->mTriangScaleLogMargin)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(backendStats[TriangulationBackendBin(pMP->mTriangMatchBackend)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int bin = 1; bin < kNumDepthBins; ++bin)
+        {
+            if(depthStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=depth_bin"
+                      << " bin=" << DepthBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, depthStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 1; bin < kNumQualityBins; ++bin)
+        {
+            if(parallaxStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=parallax_bin"
+                      << " bin=" << TriangulationParallaxBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, parallaxStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 1; bin < kNumQualityBins; ++bin)
+        {
+            if(reprojStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=reproj_bin"
+                      << " bin=" << TriangulationReprojBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, reprojStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 1; bin < kNumQualityBins; ++bin)
+        {
+            if(scaleMarginStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=scale_margin_bin"
+                      << " bin=" << TriangulationScaleMarginBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, scaleMarginStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumQualityBins; ++bin)
+        {
+            if(backendStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=backend_bin"
+                      << " bin=" << TriangulationBackendName(static_cast<MapPoint::TriangulationMatchBackend>(bin));
+            AppendTriangulationQualityErrorStats(std::cout, backendStats[bin]);
+            std::cout << std::endl;
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    void LogTrackLocalMapTriangulationMultiViewDiagnostics(const Frame& F)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+
+        static constexpr int kNumCountBins = 3;
+        static constexpr int kNumChi2Bins = 4;
+        static constexpr int kNumValidationBins = 4;
+        ReprojectionConstraintStats extraKfStats[kNumCountBins];
+        ReprojectionConstraintStats validExtraKfStats[kNumCountBins];
+        ReprojectionConstraintStats bestChi2Stats[kNumChi2Bins];
+        ReprojectionConstraintStats validationStats[kNumValidationBins];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+                continue;
+
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+            if(matchSource != kXFeatMatchLocalProjection)
+                continue;
+
+            if(!pMP->HasTriangulationQuality() ||
+               !std::isfinite(pMP->mTriangDepthAtCreation) ||
+               pMP->mTriangDepthAtCreation <= 0.0f ||
+               pMP->mTriangDepthAtCreation > 10.0f)
+            {
+                continue;
+            }
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            const bool isInlier = !F.mvbOutlier[i];
+            const TriangulationMultiViewValidation validation =
+                EvaluateTriangulationMultiViewValidation(pMP);
+
+            AccumulateReprojectionConstraint(extraKfStats[ExtraKeyFrameCountBin(validation.extraKFs)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(validExtraKfStats[ExtraKeyFrameCountBin(validation.validExtraKFs)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(bestChi2Stats[BestChi2RatioBin(validation.bestChi2Ratio)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(validationStats[MultiViewValidationBin(validation)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int bin = 0; bin < kNumCountBins; ++bin)
+        {
+            if(extraKfStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangMultiViewError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=extra_kf_bin"
+                      << " bin=" << ExtraKeyFrameCountBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, extraKfStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumCountBins; ++bin)
+        {
+            if(validExtraKfStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangMultiViewError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=valid_extra_kf_bin"
+                      << " bin=" << ExtraKeyFrameCountBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, validExtraKfStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumChi2Bins; ++bin)
+        {
+            if(bestChi2Stats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangMultiViewError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=best_chi2_ratio_bin"
+                      << " bin=" << BestChi2RatioBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, bestChi2Stats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumValidationBins; ++bin)
+        {
+            if(validationStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangMultiViewError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=validation_bin"
+                      << " bin=" << MultiViewValidationBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, validationStats[bin]);
+            std::cout << std::endl;
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    void LogTrackLocalMapTriangulationLocalProjHistoryDiagnostics(const Frame& F)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+
+        static constexpr int kNumHistoryBins = 4;
+        ReprojectionConstraintStats matchRateStats[kNumHistoryBins];
+        ReprojectionConstraintStats optOutlierRateStats[kNumHistoryBins];
+        ReprojectionConstraintStats recentOutlierStats[kNumHistoryBins];
+        ReprojectionConstraintStats historyStats[kNumHistoryBins];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+                continue;
+
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+            if(matchSource != kXFeatMatchLocalProjection)
+                continue;
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            if(!IsLocalProjHistoryTarget(pMP, depth))
+                continue;
+
+            const bool isInlier = !F.mvbOutlier[i];
+            const MapPoint::LocalProjectionHistoryStats localProjHistory =
+                pMP->GetLocalProjectionHistory();
+
+            AccumulateReprojectionConstraint(matchRateStats[LocalProjMatchRateBin(localProjHistory)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(optOutlierRateStats[LocalProjOptOutlierRateBin(localProjHistory)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(recentOutlierStats[LocalProjRecentOutlierBin(localProjHistory)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(historyStats[LocalProjHistoryBin(localProjHistory)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int bin = 0; bin < kNumHistoryBins; ++bin)
+        {
+            if(matchRateStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangLocalProjHistoryError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=match_rate_bin"
+                      << " bin=" << LocalProjMatchRateBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, matchRateStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumHistoryBins; ++bin)
+        {
+            if(optOutlierRateStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangLocalProjHistoryError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=opt_outlier_rate_bin"
+                      << " bin=" << LocalProjOptOutlierRateBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, optOutlierRateStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumHistoryBins; ++bin)
+        {
+            if(recentOutlierStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangLocalProjHistoryError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=recent_outlier_bin"
+                      << " bin=" << LocalProjRecentOutlierBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, recentOutlierStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumHistoryBins; ++bin)
+        {
+            if(historyStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangLocalProjHistoryError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=history_bin"
+                      << " bin=" << LocalProjHistoryBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, historyStats[bin]);
+            std::cout << std::endl;
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    int LocalProjDescriptorBin(const float bestDist)
+    {
+        if(!std::isfinite(bestDist))
+            return 0;
+        if(bestDist <= 0.70f)
+            return 1;
+        if(bestDist <= 1.00f)
+            return 2;
+        if(bestDist <= 1.20f)
+            return 3;
+        return 4;
+    }
+
+    const char* LocalProjDescriptorBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "very_good";
+            case 2: return "good";
+            case 3: return "weak";
+            case 4: return "near_threshold";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int LocalProjRatioBin(const float ratio, const float secondDist)
+    {
+        if(std::isfinite(secondDist) && secondDist > 0.0f)
+        {
+            if(!std::isfinite(ratio))
+                return 0;
+            if(ratio <= 0.70f)
+                return 2;
+            if(ratio <= 0.85f)
+                return 3;
+            return 4;
+        }
+        return 1;
+    }
+
+    const char* LocalProjRatioBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "no_second";
+            case 2: return "strong";
+            case 3: return "mid";
+            case 4: return "weak";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int LocalProjCandidateCountBin(const int candidateCount)
+    {
+        if(candidateCount < 0)
+            return 0;
+        if(candidateCount <= 1)
+            return 1;
+        if(candidateCount <= 4)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalProjCandidateCountBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "one";
+            case 2: return "few";
+            case 3: return "many";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int LocalProjNormBin(const float projErrNorm)
+    {
+        if(!std::isfinite(projErrNorm))
+            return 0;
+        if(projErrNorm <= 0.25f)
+            return 1;
+        if(projErrNorm <= 0.50f)
+            return 2;
+        if(projErrNorm <= 1.00f)
+            return 3;
+        return 4;
+    }
+
+    const char* LocalProjNormBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "small";
+            case 2: return "mid";
+            case 3: return "edge";
+            case 4: return "outside";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int LocalProjNormFineBin(const float projErrNorm)
+    {
+        if(!std::isfinite(projErrNorm))
+            return 0;
+        if(projErrNorm <= 0.25f)
+            return 1;
+        if(projErrNorm <= 0.50f)
+            return 2;
+        if(projErrNorm <= 0.65f)
+            return 3;
+        if(projErrNorm <= 0.80f)
+            return 4;
+        if(projErrNorm <= 1.00f)
+            return 5;
+        return 6;
+    }
+
+    const char* LocalProjNormFineBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "0_25";
+            case 2: return "25_50";
+            case 3: return "50_65";
+            case 4: return "65_80";
+            case 5: return "80_100";
+            case 6: return "outside";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int LocalProjLevelDiffBin(const int levelDiff)
+    {
+        if(levelDiff < 0)
+            return 0;
+        if(levelDiff == 0)
+            return 1;
+        if(levelDiff == 1)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalProjLevelDiffBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "exact";
+            case 2: return "off1";
+            case 3: return "off2p";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int LocalProjFineDepthBin(const float depth)
+    {
+        if(!std::isfinite(depth) || depth <= 0.0f)
+            return 0;
+        if(depth < 5.0f)
+            return 1;
+        return 2;
+    }
+
+    const char* LocalProjFineDepthBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "0_5";
+            case 2: return "5_10";
+            case 0:
+            default:
+                return "invalid";
+        }
+    }
+
+    int LocalProjMatcherQualityBin(const Frame& F, const size_t i)
+    {
+        if(i >= F.mvLocalProjBestDist.size())
+            return 0;
+
+        const float bestDist = F.mvLocalProjBestDist[i];
+        if(!std::isfinite(bestDist))
+            return 0;
+
+        const float ratio = i < F.mvLocalProjRatio.size()
+            ? F.mvLocalProjRatio[i]
+            : std::numeric_limits<float>::quiet_NaN();
+        const int candidateCount = i < F.mvLocalProjCandidateCount.size()
+            ? F.mvLocalProjCandidateCount[i]
+            : -1;
+        const float projErrNorm = i < F.mvLocalProjProjErrNorm.size()
+            ? F.mvLocalProjProjErrNorm[i]
+            : std::numeric_limits<float>::quiet_NaN();
+        const int levelDiff = i < F.mvLocalProjLevelDiff.size()
+            ? F.mvLocalProjLevelDiff[i]
+            : -1;
+
+        if(bestDist > 1.20f)
+            return 2;
+        if((std::isfinite(ratio) && ratio > 0.85f) || candidateCount >= 5)
+            return 3;
+        if(std::isfinite(projErrNorm) && projErrNorm > 0.50f)
+            return 4;
+        if(levelDiff >= 2)
+            return 5;
+        return 1;
+    }
+
+    const char* LocalProjMatcherQualityBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "stable";
+            case 2: return "descriptor_weak";
+            case 3: return "ambiguous";
+            case 4: return "projection_edge";
+            case 5: return "scale_mismatch";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    void LogTrackLocalMapLocalProjMatcherQualityDiagnostics(const Frame& F)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+
+        static constexpr int kNumDescriptorBins = 5;
+        static constexpr int kNumRatioBins = 5;
+        static constexpr int kNumCandidateBins = 4;
+        static constexpr int kNumProjNormBins = 5;
+        static constexpr int kNumLevelDiffBins = 4;
+        static constexpr int kNumMatcherQualityBins = 6;
+
+        ReprojectionConstraintStats descriptorStats[kNumDescriptorBins];
+        ReprojectionConstraintStats ratioStats[kNumRatioBins];
+        ReprojectionConstraintStats candidateStats[kNumCandidateBins];
+        ReprojectionConstraintStats projNormStats[kNumProjNormBins];
+        ReprojectionConstraintStats levelDiffStats[kNumLevelDiffBins];
+        ReprojectionConstraintStats matcherQualityStats[kNumMatcherQualityBins];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+                continue;
+
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+            if(matchSource != kXFeatMatchLocalProjection)
+                continue;
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            if(!IsLocalProjHistoryTarget(pMP, depth))
+                continue;
+
+            const bool isInlier = !F.mvbOutlier[i];
+            const float bestDist = i < F.mvLocalProjBestDist.size()
+                ? F.mvLocalProjBestDist[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const float secondDist = i < F.mvLocalProjSecondDist.size()
+                ? F.mvLocalProjSecondDist[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const float ratio = i < F.mvLocalProjRatio.size()
+                ? F.mvLocalProjRatio[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const int candidateCount = i < F.mvLocalProjCandidateCount.size()
+                ? F.mvLocalProjCandidateCount[i]
+                : -1;
+            const float projErrNorm = i < F.mvLocalProjProjErrNorm.size()
+                ? F.mvLocalProjProjErrNorm[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const int levelDiff = i < F.mvLocalProjLevelDiff.size()
+                ? F.mvLocalProjLevelDiff[i]
+                : -1;
+
+            AccumulateReprojectionConstraint(descriptorStats[LocalProjDescriptorBin(bestDist)],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(ratioStats[LocalProjRatioBin(ratio, secondDist)],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(candidateStats[LocalProjCandidateCountBin(candidateCount)],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(projNormStats[LocalProjNormBin(projErrNorm)],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(levelDiffStats[LocalProjLevelDiffBin(levelDiff)],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(matcherQualityStats[LocalProjMatcherQualityBin(F, i)],
+                                             reprojErr, depth, isInlier);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int bin = 0; bin < kNumDescriptorBins; ++bin)
+        {
+            if(descriptorStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjMatcherQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=descriptor_bin"
+                      << " bin=" << LocalProjDescriptorBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, descriptorStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumRatioBins; ++bin)
+        {
+            if(ratioStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjMatcherQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=ratio_bin"
+                      << " bin=" << LocalProjRatioBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, ratioStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumCandidateBins; ++bin)
+        {
+            if(candidateStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjMatcherQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=candidate_count_bin"
+                      << " bin=" << LocalProjCandidateCountBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, candidateStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumProjNormBins; ++bin)
+        {
+            if(projNormStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjMatcherQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=proj_norm_bin"
+                      << " bin=" << LocalProjNormBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, projNormStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumLevelDiffBins; ++bin)
+        {
+            if(levelDiffStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjMatcherQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=level_diff_bin"
+                      << " bin=" << LocalProjLevelDiffBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, levelDiffStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumMatcherQualityBins; ++bin)
+        {
+            if(matcherQualityStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjMatcherQualityError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=matcher_quality_bin"
+                      << " bin=" << LocalProjMatcherQualityBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, matcherQualityStats[bin]);
+            std::cout << std::endl;
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    void LogTrackLocalMapLocalProjMatcherQualityFineDiagnostics(const Frame& F)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+
+        static constexpr int kNumFineBins = 7;
+        static constexpr int kNumLevelDiffBins = 4;
+        static constexpr int kNumDepthBins = 3;
+        static constexpr int kNumHistoryBins = 3;
+
+        ReprojectionConstraintStats fineStats[kNumFineBins];
+        ReprojectionConstraintStats fineLevelStats[kNumFineBins][kNumLevelDiffBins];
+        ReprojectionConstraintStats fineDepthStats[kNumFineBins][kNumDepthBins];
+        ReprojectionConstraintStats fineHistoryStats[kNumFineBins][kNumHistoryBins];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+                continue;
+
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+            if(matchSource != kXFeatMatchLocalProjection)
+                continue;
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            if(!IsLocalProjHistoryTarget(pMP, depth))
+                continue;
+
+            const bool isInlier = !F.mvbOutlier[i];
+            const float projErrNorm = i < F.mvLocalProjProjErrNorm.size()
+                ? F.mvLocalProjProjErrNorm[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const int levelDiff = i < F.mvLocalProjLevelDiff.size()
+                ? F.mvLocalProjLevelDiff[i]
+                : -1;
+
+            const int fineBin = LocalProjNormFineBin(projErrNorm);
+            const int levelBin = LocalProjLevelDiffBin(levelDiff);
+            const int depthBin = LocalProjFineDepthBin(depth);
+            const int historyBin = LocalProjFineHistoryBin(pMP->GetLocalProjectionHistory());
+
+            AccumulateReprojectionConstraint(fineStats[fineBin], reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(fineLevelStats[fineBin][levelBin], reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(fineDepthStats[fineBin][depthBin], reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(fineHistoryStats[fineBin][historyBin], reprojErr, depth, isInlier);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int fineBin = 0; fineBin < kNumFineBins; ++fineBin)
+        {
+            if(fineStats[fineBin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjMatcherQualityFineError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=proj_norm_fine_bin"
+                      << " bin=" << LocalProjNormFineBinName(fineBin);
+            AppendTriangulationQualityErrorStats(std::cout, fineStats[fineBin]);
+            std::cout << std::endl;
+        }
+        for(int fineBin = 0; fineBin < kNumFineBins; ++fineBin)
+        {
+            for(int levelBin = 0; levelBin < kNumLevelDiffBins; ++levelBin)
+            {
+                if(fineLevelStats[fineBin][levelBin].total <= 0)
+                    continue;
+                std::cout << "[TrackLocalMap][LocalProjMatcherQualityFineError]"
+                          << " frame_id=" << F.mnId
+                          << " dimension=proj_norm_fine_x_level_diff"
+                          << " bin=" << LocalProjNormFineBinName(fineBin)
+                          << "_" << LocalProjLevelDiffBinName(levelBin);
+                AppendTriangulationQualityErrorStats(std::cout, fineLevelStats[fineBin][levelBin]);
+                std::cout << std::endl;
+            }
+        }
+        for(int fineBin = 0; fineBin < kNumFineBins; ++fineBin)
+        {
+            for(int depthBin = 0; depthBin < kNumDepthBins; ++depthBin)
+            {
+                if(fineDepthStats[fineBin][depthBin].total <= 0)
+                    continue;
+                std::cout << "[TrackLocalMap][LocalProjMatcherQualityFineError]"
+                          << " frame_id=" << F.mnId
+                          << " dimension=proj_norm_fine_x_depth"
+                          << " bin=" << LocalProjNormFineBinName(fineBin)
+                          << "_" << LocalProjFineDepthBinName(depthBin);
+                AppendTriangulationQualityErrorStats(std::cout, fineDepthStats[fineBin][depthBin]);
+                std::cout << std::endl;
+            }
+        }
+        for(int fineBin = 0; fineBin < kNumFineBins; ++fineBin)
+        {
+            for(int historyBin = 0; historyBin < kNumHistoryBins; ++historyBin)
+            {
+                if(fineHistoryStats[fineBin][historyBin].total <= 0)
+                    continue;
+                std::cout << "[TrackLocalMap][LocalProjMatcherQualityFineError]"
+                          << " frame_id=" << F.mnId
+                          << " dimension=proj_norm_fine_x_history"
+                          << " bin=" << LocalProjNormFineBinName(fineBin)
+                          << "_" << LocalProjFineHistoryBinName(historyBin);
+                AppendTriangulationQualityErrorStats(std::cout, fineHistoryStats[fineBin][historyBin]);
+                std::cout << std::endl;
+            }
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    int LocalProjMapUpdateBin(const bool bMapUpdated)
+    {
+        return bMapUpdated ? 1 : 0;
+    }
+
+    const char* LocalProjMapUpdateBinName(const int bin)
+    {
+        return bin == 1 ? "map_updated" : "no_map_update";
+    }
+
+    int LocalProjPriorSupportBin(const int assocBeforeSearch)
+    {
+        if(assocBeforeSearch < 120)
+            return 0;
+        if(assocBeforeSearch < 180)
+            return 1;
+        return 2;
+    }
+
+    const char* LocalProjPriorSupportBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "mid";
+            case 2: return "strong";
+            case 0:
+            default:
+                return "weak";
+        }
+    }
+
+    int LocalProjLocalAddBin(const int assocAddedByLocal)
+    {
+        if(assocAddedByLocal < 80)
+            return 0;
+        if(assocAddedByLocal < 130)
+            return 1;
+        return 2;
+    }
+
+    const char* LocalProjLocalAddBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "mid";
+            case 2: return "high";
+            case 0:
+            default:
+                return "low";
+        }
+    }
+
+    float LocalProjViewCosForMatch(const Frame& F, MapPoint* pMP, const size_t idx)
+    {
+        if(!pMP)
+            return std::numeric_limits<float>::quiet_NaN();
+
+        unsigned char side = 0;
+        if(idx < F.mvLocalProjSide.size())
+            side = F.mvLocalProjSide[idx];
+        if(side == 2)
+            return pMP->mTrackViewCosR;
+        if(side == 1)
+            return pMP->mTrackViewCos;
+
+        if(F.Nleft != -1 && static_cast<int>(idx) >= F.Nleft)
+            return pMP->mTrackViewCosR;
+        return pMP->mTrackViewCos;
+    }
+
+    int LocalProjViewCosBin(const float viewCos)
+    {
+        if(!std::isfinite(viewCos))
+            return 0;
+        if(viewCos < 0.70f)
+            return 1;
+        if(viewCos < 0.90f)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalProjViewCosBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "oblique";
+            case 2: return "mid";
+            case 3: return "frontal";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int LocalProjRadiusBin(const float radiusPx)
+    {
+        if(!std::isfinite(radiusPx) || radiusPx <= 0.0f)
+            return 0;
+        if(radiusPx <= 4.0f)
+            return 1;
+        if(radiusPx <= 8.0f)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalProjRadiusBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "small";
+            case 2: return "mid";
+            case 3: return "large";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int LocalProjPoseContextBin(const int assocBeforeSearch,
+                                const bool bMapUpdated,
+                                const float projErrNorm,
+                                const float radiusPx)
+    {
+        if(assocBeforeSearch < 120)
+            return 0;
+        if(bMapUpdated && std::isfinite(projErrNorm) && projErrNorm > 0.50f)
+            return 1;
+        if(std::isfinite(radiusPx) && radiusPx > 8.0f)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalProjPoseContextBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 0: return "weak_prior";
+            case 1: return "map_updated_edge";
+            case 2: return "large_radius";
+            case 3:
+            default:
+                return "normal";
+        }
+    }
+
+    int ProjectionPriorShiftBin(const float norm)
+    {
+        return LocalProjNormBin(norm);
+    }
+
+    const char* ProjectionPriorShiftBinName(const int bin)
+    {
+        return LocalProjNormBinName(bin);
+    }
+
+    int ProjectionPriorConsistencyBin(const float preNorm, const float postNorm)
+    {
+        if(!std::isfinite(preNorm) || !std::isfinite(postNorm))
+            return 0;
+        const bool priorGood = preNorm <= 0.50f;
+        const bool postGood = postNorm <= 0.50f;
+        if(priorGood && postGood)
+            return 1;
+        if(!priorGood && postGood)
+            return 2;
+        if(priorGood && !postGood)
+            return 3;
+        return 4;
+    }
+
+    int LocalMapProvenanceRoleIndex(const Tracking::LocalKFProvenanceRole role)
+    {
+        switch(role)
+        {
+            case Tracking::LocalKFProvenanceRole::Reference:
+                return 1;
+            case Tracking::LocalKFProvenanceRole::Voted:
+                return 2;
+            case Tracking::LocalKFProvenanceRole::Covis:
+                return 3;
+            case Tracking::LocalKFProvenanceRole::ChildParent:
+                return 4;
+            case Tracking::LocalKFProvenanceRole::Temporal:
+                return 5;
+            case Tracking::LocalKFProvenanceRole::Unknown:
+            default:
+                return 0;
+        }
+    }
+
+    int LocalMapProvenanceRoleRank(const Tracking::LocalKFProvenanceRole role)
+    {
+        switch(role)
+        {
+            case Tracking::LocalKFProvenanceRole::Reference:
+                return 5;
+            case Tracking::LocalKFProvenanceRole::Voted:
+                return 4;
+            case Tracking::LocalKFProvenanceRole::Covis:
+                return 3;
+            case Tracking::LocalKFProvenanceRole::ChildParent:
+                return 2;
+            case Tracking::LocalKFProvenanceRole::Temporal:
+                return 1;
+            case Tracking::LocalKFProvenanceRole::Unknown:
+            default:
+                return 0;
+        }
+    }
+
+    const char* LocalMapProvenanceRoleName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "reference";
+            case 2: return "voted";
+            case 3: return "covis";
+            case 4: return "child_parent";
+            case 5: return "temporal";
+            case 0:
+            default:
+                return "unknown";
+        }
+    }
+
+    int LocalMapVoteBin(const int voteCount)
+    {
+        if(voteCount <= 0)
+            return 0;
+        if(voteCount < 5)
+            return 1;
+        if(voteCount < 15)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalMapVoteBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "low";
+            case 2: return "mid";
+            case 3: return "high";
+            case 0:
+            default:
+                return "no_vote";
+        }
+    }
+
+    int LocalMapObservationBin(const int obs)
+    {
+        if(obs <= 0)
+            return 0;
+        if(obs == 1)
+            return 1;
+        if(obs <= 3)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalMapObservationBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "one";
+            case 2: return "few";
+            case 3: return "many";
+            case 0:
+            default:
+                return "unknown";
+        }
+    }
+
+    int LocalMapKFAgeBin(const long int age)
+    {
+        if(age < 0)
+            return 0;
+        if(age <= 5)
+            return 1;
+        if(age <= 30)
+            return 2;
+        return 3;
+    }
+
+    const char* LocalMapKFAgeBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "recent";
+            case 2: return "mid";
+            case 3: return "old";
+            case 0:
+            default:
+                return "unknown";
+        }
+    }
+
+    int LocalMapProvenanceBin(const Tracking::LocalMPProvenance& provenance)
+    {
+        if(provenance.frameId == 0)
+            return 0;
+        if(provenance.localObservations <= 1)
+            return 5;
+        if(provenance.bestRole == Tracking::LocalKFProvenanceRole::Reference ||
+           (provenance.bestRole == Tracking::LocalKFProvenanceRole::Voted &&
+            provenance.bestVoteCount >= 15 &&
+            provenance.localObservations >= 4))
+        {
+            return 1;
+        }
+        if(provenance.bestRole == Tracking::LocalKFProvenanceRole::Voted &&
+           provenance.bestVoteCount < 5)
+        {
+            return 2;
+        }
+        if(provenance.bestRole == Tracking::LocalKFProvenanceRole::Covis ||
+           provenance.bestRole == Tracking::LocalKFProvenanceRole::ChildParent ||
+           provenance.bestRole == Tracking::LocalKFProvenanceRole::Temporal)
+        {
+            return provenance.bestKeyFrameAge > 30 ? 4 : 3;
+        }
+        return 0;
+    }
+
+    const char* LocalMapProvenanceBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "core_confirmed";
+            case 2: return "weak_vote";
+            case 3: return "expansion";
+            case 4: return "old_expansion";
+            case 5: return "single_obs";
+            case 0:
+            default:
+                return "unknown";
+        }
+    }
+
+    const char* ProjectionPriorConsistencyBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "prior_good_post_good";
+            case 2: return "prior_bad_post_good";
+            case 3: return "prior_good_post_bad";
+            case 4: return "prior_bad_post_bad";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    bool ProjectMapPointWithPoseLeft(const Frame& F,
+                                     MapPoint* pMP,
+                                     const Sophus::SE3f& Tcw,
+                                     float& u,
+                                     float& v,
+                                     float& depth)
+    {
+        u = std::numeric_limits<float>::quiet_NaN();
+        v = std::numeric_limits<float>::quiet_NaN();
+        depth = std::numeric_limits<float>::quiet_NaN();
+        if(!pMP || !F.mpCamera)
+            return false;
+
+        const Eigen::Vector3f x3Dc = Tcw * pMP->GetWorldPos();
+        depth = x3Dc(2);
+        if(!std::isfinite(depth) || depth <= 0.0f)
+            return false;
+
+        const Eigen::Vector2f uv = F.mpCamera->project(x3Dc);
+        u = uv(0);
+        v = uv(1);
+        return std::isfinite(u) && std::isfinite(v);
+    }
+
+    bool IsProjectionPriorShiftTarget(const Frame& F,
+                                      const size_t i,
+                                      MapPoint*& pMP,
+                                      float& reprojErr,
+                                      float& depth)
+    {
+        pMP = nullptr;
+        reprojErr = std::numeric_limits<float>::quiet_NaN();
+        depth = std::numeric_limits<float>::quiet_NaN();
+        if(i >= F.mvpMapPoints.size() || i >= F.mvbOutlier.size())
+            return false;
+
+        pMP = F.mvpMapPoints[i];
+        if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+            return false;
+
+        unsigned char matchSource = kXFeatMatchUnknown;
+        if(i < F.mvXFeatMatchSource.size())
+            matchSource = F.mvXFeatMatchSource[i];
+        if(matchSource != kXFeatMatchLocalProjection)
+            return false;
+
+        ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+        return IsLocalProjHistoryTarget(pMP, depth);
+    }
+
+    float NormalizedPixelDistance(const float x1,
+                                  const float y1,
+                                  const float x2,
+                                  const float y2,
+                                  const float radiusPx)
+    {
+        if(!std::isfinite(x1) || !std::isfinite(y1) ||
+           !std::isfinite(x2) || !std::isfinite(y2) ||
+           !std::isfinite(radiusPx) || radiusPx <= 0.0f)
+        {
+            return std::numeric_limits<float>::quiet_NaN();
+        }
+        const float dx = x1 - x2;
+        const float dy = y1 - y2;
+        return std::sqrt(dx * dx + dy * dy) / radiusPx;
+    }
+
+    void LogTrackLocalMapProjectionPriorShiftDiagnostics(const Frame& F,
+                                                         const Sophus::SE3f& TcwPrior,
+                                                         const int assocBeforeSearch,
+                                                         const int assocAddedByLocal,
+                                                         const int mnMatchesInliersForDiag,
+                                                         const bool bMapUpdated)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+
+        static constexpr int kNumNormBins = 5;
+        static constexpr int kNumConsistencyBins = 5;
+        static constexpr int kNumPoseContextBins = 4;
+
+        ReprojectionConstraintStats priorShiftStats[kNumNormBins];
+        ReprojectionConstraintStats preProjStats[kNumNormBins];
+        ReprojectionConstraintStats postResidualStats[kNumNormBins];
+        ReprojectionConstraintStats consistencyStats[kNumConsistencyBins];
+        ReprojectionConstraintStats poseContextShiftStats[kNumPoseContextBins][kNumNormBins];
+        std::vector<float> priorShiftSamples;
+
+        const Sophus::SE3f TcwOpt = F.GetPose();
+        const Sophus::SE3f deltaT = TcwOpt * TcwPrior.inverse();
+        static constexpr float kRadToDeg = 57.29577951308232f;
+        const float rotDeltaDeg = deltaT.so3().log().norm() * kRadToDeg;
+        const float transDeltaM = deltaT.translation().norm();
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = nullptr;
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            if(!IsProjectionPriorShiftTarget(F, i, pMP, reprojErr, depth))
+                continue;
+            const unsigned char side = i < F.mvLocalProjSide.size()
+                ? F.mvLocalProjSide[i]
+                : 0;
+            if(side != 1)
+                continue;
+
+            const bool isInlier = !F.mvbOutlier[i];
+            const float radiusPx = i < F.mvLocalProjRadiusPx.size()
+                ? F.mvLocalProjRadiusPx[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const float preProjNorm = i < F.mvLocalProjProjErrNorm.size()
+                ? F.mvLocalProjProjErrNorm[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const float preProjX = i < F.mvLocalProjProjX.size()
+                ? F.mvLocalProjProjX[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const float preProjY = i < F.mvLocalProjProjY.size()
+                ? F.mvLocalProjProjY[i]
+                : std::numeric_limits<float>::quiet_NaN();
+
+            cv::KeyPoint kp;
+            const bool bHaveKeyPoint = GetFrameKeyPointByIndex(F, static_cast<int>(i), kp);
+            float optProjX = std::numeric_limits<float>::quiet_NaN();
+            float optProjY = std::numeric_limits<float>::quiet_NaN();
+            float optDepth = std::numeric_limits<float>::quiet_NaN();
+            const bool bProjected = ProjectMapPointWithPoseLeft(F, pMP, TcwOpt, optProjX, optProjY, optDepth);
+            const float priorShiftNorm = bProjected
+                ? NormalizedPixelDistance(preProjX, preProjY, optProjX, optProjY, radiusPx)
+                : std::numeric_limits<float>::quiet_NaN();
+            const float postResidualNorm = (bProjected && bHaveKeyPoint)
+                ? NormalizedPixelDistance(optProjX, optProjY, kp.pt.x, kp.pt.y, radiusPx)
+                : std::numeric_limits<float>::quiet_NaN();
+
+            if(std::isfinite(priorShiftNorm))
+                priorShiftSamples.push_back(priorShiftNorm);
+
+            const int priorShiftBin = ProjectionPriorShiftBin(priorShiftNorm);
+            const int preProjBin = ProjectionPriorShiftBin(preProjNorm);
+            const int postResidualBin = ProjectionPriorShiftBin(postResidualNorm);
+            const int consistencyBin = ProjectionPriorConsistencyBin(preProjNorm, postResidualNorm);
+            const int poseContextBin = LocalProjPoseContextBin(assocBeforeSearch,
+                                                               bMapUpdated,
+                                                               preProjNorm,
+                                                               radiusPx);
+
+            AccumulateReprojectionConstraint(priorShiftStats[priorShiftBin],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(preProjStats[preProjBin],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(postResidualStats[postResidualBin],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(consistencyStats[consistencyBin],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(poseContextShiftStats[poseContextBin][priorShiftBin],
+                                             reprojErr, depth, isInlier);
+        }
+
+        const double priorShiftAvg = !priorShiftSamples.empty()
+            ? std::accumulate(priorShiftSamples.begin(), priorShiftSamples.end(), 0.0) /
+              static_cast<double>(priorShiftSamples.size())
+            : 0.0;
+        const float priorShiftP90 = priorShiftSamples.empty()
+            ? 0.0f
+            : DepthPercentile(priorShiftSamples, 0.90f);
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[TrackLocalMap][PosePriorShift]"
+                  << " frame_id=" << F.mnId
+                  << " mbMapUpdated=" << (bMapUpdated ? 1 : 0)
+                  << " assoc_before_search=" << assocBeforeSearch
+                  << " assoc_added_by_local=" << assocAddedByLocal
+                  << " mnMatchesInliers=" << mnMatchesInliersForDiag
+                  << " rot_delta_deg=" << rotDeltaDeg
+                  << " trans_delta_m=" << transDeltaM
+                  << " prior_shift_norm_avg=" << priorShiftAvg
+                  << " prior_shift_norm_p90=" << priorShiftP90
+                  << std::endl;
+
+        for(int bin = 0; bin < kNumNormBins; ++bin)
+        {
+            if(priorShiftStats[bin].total > 0)
+            {
+                std::cout << "[TrackLocalMap][ProjectionPriorShiftError]"
+                          << " frame_id=" << F.mnId
+                          << " dimension=prior_shift_norm_bin"
+                          << " bin=" << ProjectionPriorShiftBinName(bin);
+                AppendTriangulationQualityErrorStats(std::cout, priorShiftStats[bin]);
+                std::cout << std::endl;
+            }
+            if(preProjStats[bin].total > 0)
+            {
+                std::cout << "[TrackLocalMap][ProjectionPriorShiftError]"
+                          << " frame_id=" << F.mnId
+                          << " dimension=pre_proj_norm_bin"
+                          << " bin=" << ProjectionPriorShiftBinName(bin);
+                AppendTriangulationQualityErrorStats(std::cout, preProjStats[bin]);
+                std::cout << std::endl;
+            }
+            if(postResidualStats[bin].total > 0)
+            {
+                std::cout << "[TrackLocalMap][ProjectionPriorShiftError]"
+                          << " frame_id=" << F.mnId
+                          << " dimension=post_residual_norm_bin"
+                          << " bin=" << ProjectionPriorShiftBinName(bin);
+                AppendTriangulationQualityErrorStats(std::cout, postResidualStats[bin]);
+                std::cout << std::endl;
+            }
+        }
+        for(int bin = 0; bin < kNumConsistencyBins; ++bin)
+        {
+            if(consistencyStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][ProjectionPriorShiftError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=prior_post_consistency_bin"
+                      << " bin=" << ProjectionPriorConsistencyBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, consistencyStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int poseBin = 0; poseBin < kNumPoseContextBins; ++poseBin)
+        {
+            for(int shiftBin = 0; shiftBin < kNumNormBins; ++shiftBin)
+            {
+                if(poseContextShiftStats[poseBin][shiftBin].total <= 0)
+                    continue;
+                std::cout << "[TrackLocalMap][ProjectionPriorShiftError]"
+                          << " frame_id=" << F.mnId
+                          << " dimension=pose_context_x_shift_bin"
+                          << " bin=" << LocalProjPoseContextBinName(poseBin)
+                          << "_" << ProjectionPriorShiftBinName(shiftBin);
+                AppendTriangulationQualityErrorStats(std::cout, poseContextShiftStats[poseBin][shiftBin]);
+                std::cout << std::endl;
+            }
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    void LogTrackLocalMapLocalProjPoseContextDiagnostics(const Frame& F,
+                                                        const int assocBeforeSearch,
+                                                        const int assocAddedByLocal,
+                                                        const bool bMapUpdated)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+
+        static constexpr int kNumMapUpdateBins = 2;
+        static constexpr int kNumPriorSupportBins = 3;
+        static constexpr int kNumLocalAddBins = 3;
+        static constexpr int kNumViewCosBins = 4;
+        static constexpr int kNumRadiusBins = 4;
+        static constexpr int kNumPoseContextBins = 4;
+
+        ReprojectionConstraintStats mapUpdateStats[kNumMapUpdateBins];
+        ReprojectionConstraintStats priorSupportStats[kNumPriorSupportBins];
+        ReprojectionConstraintStats localAddStats[kNumLocalAddBins];
+        ReprojectionConstraintStats viewCosStats[kNumViewCosBins];
+        ReprojectionConstraintStats radiusStats[kNumRadiusBins];
+        ReprojectionConstraintStats poseContextStats[kNumPoseContextBins];
+
+        const int mapUpdateBin = LocalProjMapUpdateBin(bMapUpdated);
+        const int priorSupportBin = LocalProjPriorSupportBin(assocBeforeSearch);
+        const int localAddBin = LocalProjLocalAddBin(assocAddedByLocal);
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+                continue;
+
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+            if(matchSource != kXFeatMatchLocalProjection)
+                continue;
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            if(!IsLocalProjHistoryTarget(pMP, depth))
+                continue;
+
+            const bool isInlier = !F.mvbOutlier[i];
+            const float radiusPx = i < F.mvLocalProjRadiusPx.size()
+                ? F.mvLocalProjRadiusPx[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const float projErrNorm = i < F.mvLocalProjProjErrNorm.size()
+                ? F.mvLocalProjProjErrNorm[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const float viewCos = LocalProjViewCosForMatch(F, pMP, i);
+
+            AccumulateReprojectionConstraint(mapUpdateStats[mapUpdateBin],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(priorSupportStats[priorSupportBin],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(localAddStats[localAddBin],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(viewCosStats[LocalProjViewCosBin(viewCos)],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(radiusStats[LocalProjRadiusBin(radiusPx)],
+                                             reprojErr, depth, isInlier);
+            AccumulateReprojectionConstraint(
+                poseContextStats[LocalProjPoseContextBin(assocBeforeSearch,
+                                                         bMapUpdated,
+                                                         projErrNorm,
+                                                         radiusPx)],
+                reprojErr, depth, isInlier);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int bin = 0; bin < kNumMapUpdateBins; ++bin)
+        {
+            if(mapUpdateStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjPoseContextError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=map_update_bin"
+                      << " bin=" << LocalProjMapUpdateBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, mapUpdateStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumPriorSupportBins; ++bin)
+        {
+            if(priorSupportStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjPoseContextError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=prior_support_bin"
+                      << " bin=" << LocalProjPriorSupportBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, priorSupportStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumLocalAddBins; ++bin)
+        {
+            if(localAddStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjPoseContextError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=local_add_bin"
+                      << " bin=" << LocalProjLocalAddBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, localAddStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumViewCosBins; ++bin)
+        {
+            if(viewCosStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjPoseContextError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=view_cos_bin"
+                      << " bin=" << LocalProjViewCosBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, viewCosStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumRadiusBins; ++bin)
+        {
+            if(radiusStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjPoseContextError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=radius_bin"
+                      << " bin=" << LocalProjRadiusBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, radiusStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumPoseContextBins; ++bin)
+        {
+            if(poseContextStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalProjPoseContextError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=pose_context_bin"
+                      << " bin=" << LocalProjPoseContextBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, poseContextStats[bin]);
+            std::cout << std::endl;
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    void LogTrackLocalMapLocalMapProvenanceDiagnostics(
+        const Frame& F,
+        const std::unordered_map<MapPoint*, Tracking::LocalMPProvenance>& mpProvenance)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+
+        static constexpr int kNumRoleBins = 6;
+        static constexpr int kNumVoteBins = 4;
+        static constexpr int kNumObservationBins = 4;
+        static constexpr int kNumAgeBins = 4;
+        static constexpr int kNumProvenanceBins = 6;
+
+        ReprojectionConstraintStats roleStats[kNumRoleBins];
+        ReprojectionConstraintStats voteStats[kNumVoteBins];
+        ReprojectionConstraintStats observationStats[kNumObservationBins];
+        ReprojectionConstraintStats ageStats[kNumAgeBins];
+        ReprojectionConstraintStats provenanceStats[kNumProvenanceBins];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+                continue;
+
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+            if(matchSource != kXFeatMatchLocalProjection)
+                continue;
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            if(!IsLocalProjHistoryTarget(pMP, depth))
+                continue;
+
+            Tracking::LocalMPProvenance provenance;
+            const auto itProv = mpProvenance.find(pMP);
+            if(itProv != mpProvenance.end() && itProv->second.frameId == F.mnId)
+                provenance = itProv->second;
+
+            const bool isInlier = !F.mvbOutlier[i];
+            AccumulateReprojectionConstraint(roleStats[LocalMapProvenanceRoleIndex(provenance.bestRole)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(voteStats[LocalMapVoteBin(provenance.bestVoteCount)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(observationStats[LocalMapObservationBin(provenance.localObservations)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(ageStats[LocalMapKFAgeBin(provenance.bestKeyFrameAge)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(provenanceStats[LocalMapProvenanceBin(provenance)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int bin = 0; bin < kNumRoleBins; ++bin)
+        {
+            if(roleStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalMapProvenanceError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=kf_role_bin"
+                      << " bin=" << LocalMapProvenanceRoleName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, roleStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumVoteBins; ++bin)
+        {
+            if(voteStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalMapProvenanceError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=kf_vote_bin"
+                      << " bin=" << LocalMapVoteBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, voteStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumObservationBins; ++bin)
+        {
+            if(observationStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalMapProvenanceError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=mp_local_obs_bin"
+                      << " bin=" << LocalMapObservationBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, observationStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumAgeBins; ++bin)
+        {
+            if(ageStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalMapProvenanceError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=kf_age_bin"
+                      << " bin=" << LocalMapKFAgeBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, ageStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumProvenanceBins; ++bin)
+        {
+            if(provenanceStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][LocalMapProvenanceError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=provenance_bin"
+                      << " bin=" << LocalMapProvenanceBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, provenanceStats[bin]);
+            std::cout << std::endl;
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    void LogTrackLocalMapTriangulationRefitShadowDiagnostics(const Frame& F)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+
+        static constexpr int kNumSuccessBins = 4;
+        static constexpr int kNumGainBins = 5;
+        static constexpr int kNumShiftBins = 4;
+        ReprojectionConstraintStats successStats[kNumSuccessBins];
+        ReprojectionConstraintStats gainStats[kNumGainBins];
+        ReprojectionConstraintStats shiftStats[kNumShiftBins];
+        ReprojectionConstraintStats depthChangeStats[kNumShiftBins];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+                continue;
+
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+            if(matchSource != kXFeatMatchLocalProjection)
+                continue;
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            if(!IsLocalProjHistoryTarget(pMP, depth))
+                continue;
+
+            const bool isInlier = !F.mvbOutlier[i];
+            const TriangRefitShadowResult refitResult =
+                EvaluateTriangulationRefitShadow(F, pMP, depth);
+            const int successBin = std::max(0, std::min(kNumSuccessBins - 1, refitResult.successBin));
+
+            AccumulateReprojectionConstraint(successStats[successBin],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(gainStats[TriangRefitGainBin(refitResult)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(shiftStats[TriangRefitShiftBin(refitResult.shift)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+            AccumulateReprojectionConstraint(depthChangeStats[TriangRefitDepthChangeBin(refitResult.relativeDepthChange)],
+                                             reprojErr,
+                                             depth,
+                                             isInlier);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int bin = 0; bin < kNumSuccessBins; ++bin)
+        {
+            if(successStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangRefitShadowError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=refit_success_bin"
+                      << " bin=" << TriangRefitSuccessBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, successStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumGainBins; ++bin)
+        {
+            if(gainStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangRefitShadowError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=refit_gain_bin"
+                      << " bin=" << TriangRefitGainBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, gainStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumShiftBins; ++bin)
+        {
+            if(shiftStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangRefitShadowError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=refit_shift_bin"
+                      << " bin=" << TriangRefitShiftBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, shiftStats[bin]);
+            std::cout << std::endl;
+        }
+        for(int bin = 0; bin < kNumShiftBins; ++bin)
+        {
+            if(depthChangeStats[bin].total <= 0)
+                continue;
+            std::cout << "[TrackLocalMap][TriangRefitShadowError]"
+                      << " frame_id=" << F.mnId
+                      << " dimension=refit_depth_change_bin"
+                      << " bin=" << TriangRefitDepthChangeBinName(bin);
+            AppendTriangulationQualityErrorStats(std::cout, depthChangeStats[bin]);
+            std::cout << std::endl;
+        }
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    void RecordTrackLocalMapTriangulationLocalProjHistoryOutcomes(Frame& F)
+    {
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP || pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+                continue;
+
+            unsigned char matchSource = kXFeatMatchUnknown;
+            if(i < F.mvXFeatMatchSource.size())
+                matchSource = F.mvXFeatMatchSource[i];
+            if(matchSource != kXFeatMatchLocalProjection)
+                continue;
+
+            float reprojErr = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
+            if(!IsLocalProjHistoryTarget(pMP, depth))
+                continue;
+
+            pMP->RecordLocalProjectionOutcome(F.mnId, !F.mvbOutlier[i]);
+        }
     }
 
     void LogTrackLocalMapInlierMix(const Frame& F)
@@ -5554,6 +8135,7 @@ bool Tracking::TrackLocalMap()
     }
     StereoDepthConstraintStats localStereoBeforeOpt;
     AccumulateStereoDepthConstraintStats(mCurrentFrame, mThDepth, false, localStereoBeforeOpt);
+    const Sophus::SE3f TcwPrior = mCurrentFrame.GetPose();
 
     // TOO check outliers before PO
     int aux1 = 0, aux2=0;
@@ -5639,8 +8221,26 @@ bool Tracking::TrackLocalMap()
         LogTrackLocalMapConstraintSourceDiagnostics(mCurrentFrame);
         LogTrackLocalMapMapPointSourceDiagnostics(mCurrentFrame);
         LogTrackLocalMapJointSourceDiagnostics(mCurrentFrame);
+        LogTrackLocalMapTriangulationQualityDiagnostics(mCurrentFrame);
+        LogTrackLocalMapTriangulationMultiViewDiagnostics(mCurrentFrame);
+        LogTrackLocalMapTriangulationLocalProjHistoryDiagnostics(mCurrentFrame);
+        LogTrackLocalMapLocalProjMatcherQualityDiagnostics(mCurrentFrame);
+        LogTrackLocalMapLocalProjMatcherQualityFineDiagnostics(mCurrentFrame);
+        LogTrackLocalMapLocalProjPoseContextDiagnostics(mCurrentFrame,
+                                                        assoc_before_search,
+                                                        assoc_before_opt - assoc_before_search,
+                                                        mbMapUpdated);
+        LogTrackLocalMapProjectionPriorShiftDiagnostics(mCurrentFrame,
+                                                        TcwPrior,
+                                                        assoc_before_search,
+                                                        assoc_before_opt - assoc_before_search,
+                                                        inlier_after_opt,
+                                                        mbMapUpdated);
+        LogTrackLocalMapLocalMapProvenanceDiagnostics(mCurrentFrame, mmLocalMPProvenance);
+        LogTrackLocalMapTriangulationRefitShadowDiagnostics(mCurrentFrame);
         LogTrackLocalMapInlierMix(mCurrentFrame);
     }
+    RecordTrackLocalMapTriangulationLocalProjHistoryOutcomes(mCurrentFrame);
 
     mnMatchesInliers = 0;
 
@@ -6242,6 +8842,25 @@ void Tracking::SearchLocalPoints()
     int localProjCloseTrackingStereoGeomAccept = 0;
     int localProjCloseTrackingStereoRejectUr = 0;
     int localProjCloseTrackingStereoRejectDepth = 0;
+    int triang0To10HistoryGateCandidate = 0;
+    int triang0To10HistoryGateReject = 0;
+    int triang0To10HistoryGateRejectOpt = 0;
+    int triang0To10HistoryGateRejectRecent = 0;
+    int triang0To10HistoryGatePass = 0;
+    int triang0To10HistoryGateInsufficient = 0;
+    int triang0To10ProjAttempt = 0;
+    int triang0To10ProjMatch = 0;
+    int localmapLmt0To10FromReference = 0;
+    int localmapLmt0To10FromVoted = 0;
+    int localmapLmt0To10FromExpansion = 0;
+    int localmapLmt0To10FromTemporal = 0;
+    int localmapLmt0To10FromUnknown = 0;
+    int localProjTriang0To10ProjOutsideReject = 0;
+    int localProjTriang0To10ProjEdgeShadow = 0;
+    int localProjTriang0To10ProjEdge50To65Shadow = 0;
+    int localProjTriang0To10ProjEdge65To80Shadow = 0;
+    int localProjTriang0To10ProjEdge80To100Shadow = 0;
+    int localProjTriang0To10CompanionOutsideReject = 0;
     if(ShouldPrintXFeatDebug(mCurrentFrame.mnId) && IsXFeatFeatureDiagEnabled())
     {
         DepthDistributionStats frameDepthStats;
@@ -6280,6 +8899,11 @@ void Tracking::SearchLocalPoints()
     int lgLocalRejected = 0;
     int lgLocalMismatch = 0;
     int lgLocalConflictLowScore = 0;
+    int lgLocalMapUpdatedEdgeCandidates = 0;
+    int lgLocalMapUpdatedEdgeVerified = 0;
+    int lgLocalMapUpdatedEdgeConflictShadow = 0;
+    int lgLocalMapUpdatedEdgeNoEvidence = 0;
+    int lgLocalMapUpdatedEdgeNonTargetIgnored = 0;
     bool bLightGlueLocalFailed = false;
     int projectionMatches = 0;
     int projectionTh = 0;
@@ -6336,9 +8960,74 @@ void Tracking::SearchLocalPoints()
                     }
                 }
             }
+            if(IsLocalProjHistoryTarget(pMP, resolvedDepth))
+            {
+                triang0To10HistoryGateCandidate++;
+                const MapPoint::LocalProjectionHistoryStats localProjHistory =
+                    pMP->GetLocalProjectionHistory();
+                const int optOutcomes = localProjHistory.optInlierCount +
+                                        localProjHistory.optOutlierCount;
+                const int recentValid = CountHistoryBits(localProjHistory.recentValidMask);
+                const bool bInsufficientHistory = optOutcomes < 3 && recentValid < 3;
+                const bool bRejectByOptHistory =
+                    optOutcomes >= 3 && LocalProjOptOutlierRate(localProjHistory) > 0.35f;
+                const bool bRejectByRecentHistory =
+                    recentValid >= 3 && LocalProjRecentOutlierRate(localProjHistory) > 0.40f;
+
+                if(bInsufficientHistory)
+                    triang0To10HistoryGateInsufficient++;
+                if(bRejectByOptHistory || bRejectByRecentHistory)
+                {
+                    triang0To10HistoryGateReject++;
+                    if(bRejectByOptHistory)
+                        triang0To10HistoryGateRejectOpt++;
+                    if(bRejectByRecentHistory)
+                        triang0To10HistoryGateRejectRecent++;
+                    pMP->mbTrackInView = false;
+                    pMP->mbTrackInViewR = false;
+                    continue;
+                }
+                triang0To10HistoryGatePass++;
+            }
+            if(IsLocalProjHistoryTarget(pMP, resolvedDepth))
+            {
+                Tracking::LocalKFProvenanceRole role = Tracking::LocalKFProvenanceRole::Unknown;
+                const auto itProv = mmLocalMPProvenance.find(pMP);
+                if(itProv != mmLocalMPProvenance.end() &&
+                   itProv->second.frameId == mCurrentFrame.mnId)
+                {
+                    role = itProv->second.bestRole;
+                }
+
+                switch(role)
+                {
+                    case Tracking::LocalKFProvenanceRole::Reference:
+                        localmapLmt0To10FromReference++;
+                        break;
+                    case Tracking::LocalKFProvenanceRole::Voted:
+                        localmapLmt0To10FromVoted++;
+                        break;
+                    case Tracking::LocalKFProvenanceRole::Covis:
+                    case Tracking::LocalKFProvenanceRole::ChildParent:
+                        localmapLmt0To10FromExpansion++;
+                        break;
+                    case Tracking::LocalKFProvenanceRole::Temporal:
+                        localmapLmt0To10FromTemporal++;
+                        break;
+                    case Tracking::LocalKFProvenanceRole::Unknown:
+                    default:
+                        localmapLmt0To10FromUnknown++;
+                        break;
+                }
+            }
             pMP->IncreaseVisible();
             nToMatch++;
             nLocalInFrustum++;
+            if(IsLocalProjHistoryTarget(pMP, resolvedDepth))
+            {
+                pMP->RecordLocalProjectionAttempt(mCurrentFrame.mnId);
+                triang0To10ProjAttempt++;
+            }
             if(pMP->GetCreationSource() == MapPoint::kCreationSourceTrackingStereo &&
                std::isfinite(resolvedDepth) && resolvedDepth <= mThDepth)
             {
@@ -6436,12 +9125,37 @@ void Tracking::SearchLocalPoints()
             const XFeatMatcher::ProjectionMapPointStats& projStats = matcher.LastProjectionMapPointStats();
             localProjCloseTrackingStereoRejectUr = projStats.close_tracking_stereo_reject_ur;
             localProjCloseTrackingStereoRejectDepth = projStats.close_tracking_stereo_reject_depth;
+            localProjTriang0To10ProjOutsideReject = projStats.local_proj_triang_0_10_proj_outside_reject;
+            localProjTriang0To10ProjEdgeShadow = projStats.local_proj_triang_0_10_proj_edge_shadow;
+            localProjTriang0To10ProjEdge50To65Shadow = projStats.local_proj_triang_0_10_proj_edge_50_65_shadow;
+            localProjTriang0To10ProjEdge65To80Shadow = projStats.local_proj_triang_0_10_proj_edge_65_80_shadow;
+            localProjTriang0To10ProjEdge80To100Shadow = projStats.local_proj_triang_0_10_proj_edge_80_100_shadow;
+            localProjTriang0To10CompanionOutsideReject = projStats.local_proj_triang_0_10_companion_outside_reject;
         }
         projectionMatches = matches;
 
         std::vector<unsigned char> vProjectionAdded(static_cast<size_t>(mCurrentFrame.N), 0);
         std::vector<unsigned char> vProjectionVerified(static_cast<size_t>(mCurrentFrame.N), 0);
         std::vector<unsigned char> vProjectionConflict(static_cast<size_t>(mCurrentFrame.N), 0);
+        std::vector<unsigned char> vMapUpdatedEdgeTarget(static_cast<size_t>(mCurrentFrame.N), 0);
+        auto IsMapUpdatedEdgeVerificationTarget = [&](const int idx) -> bool
+        {
+            if(!mbMapUpdated || idx < 0 || idx >= mCurrentFrame.N)
+                return false;
+            if(!vProjectionAdded[static_cast<size_t>(idx)])
+                return false;
+            MapPoint* pMP = mCurrentFrame.mvpMapPoints[idx];
+            if(!pMP)
+                return false;
+            const float resolvedDepth =
+                ResolveMapPointQualityDepth(mCurrentFrame, pMP, pMP->mTrackDepth);
+            if(!IsLocalProjHistoryTarget(pMP, resolvedDepth))
+                return false;
+            if(idx >= static_cast<int>(mCurrentFrame.mvLocalProjProjErrNorm.size()))
+                return false;
+            const float projErrNorm = mCurrentFrame.mvLocalProjProjErrNorm[static_cast<size_t>(idx)];
+            return std::isfinite(projErrNorm) && projErrNorm > 0.50f;
+        };
         for(int i = 0; i < mCurrentFrame.N; ++i)
         {
             if(!vHadMapPointBeforeProjection[static_cast<size_t>(i)] && mCurrentFrame.mvpMapPoints[i])
@@ -6450,7 +9164,14 @@ void Tracking::SearchLocalPoints()
                 if(i < static_cast<int>(mCurrentFrame.mvXFeatMatchSource.size()))
                     mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)] = kXFeatMatchLocalProjection;
                 if(bUseLightGlueLocalMap)
+                {
                     ++lgLocalVerifyCandidates;
+                    if(IsMapUpdatedEdgeVerificationTarget(i))
+                    {
+                        vMapUpdatedEdgeTarget[static_cast<size_t>(i)] = 1;
+                        ++lgLocalMapUpdatedEdgeCandidates;
+                    }
+                }
             }
         }
 
@@ -6542,14 +9263,15 @@ void Tracking::SearchLocalPoints()
 
                         if(mCurrentFrame.mvpMapPoints[idx])
                         {
+                            const bool bMapUpdatedEdgeTarget =
+                                idx < vMapUpdatedEdgeTarget.size() && vMapUpdatedEdgeTarget[idx];
                             if(vProjectionAdded[idx] && mCurrentFrame.mvpMapPoints[idx] == pMP)
                             {
-                                if(!vProjectionVerified[idx])
+                                if(bMapUpdatedEdgeTarget && !vProjectionVerified[idx])
                                 {
                                     vProjectionVerified[idx] = 1;
-                                    if(idx < mCurrentFrame.mvXFeatMatchSource.size())
-                                        mCurrentFrame.mvXFeatMatchSource[idx] = kXFeatMatchLocalProjectionLightGlueVerified;
                                     ++lgLocalVerified;
+                                    ++lgLocalMapUpdatedEdgeVerified;
                                 }
                             }
                             else if(vProjectionAdded[idx])
@@ -6559,10 +9281,17 @@ void Tracking::SearchLocalPoints()
                                     : -1.0f;
                                 if(lgScore >= conflictMinScore)
                                 {
-                                    vProjectionConflict[idx] = 1;
-                                    ++lgLocalMismatch;
+                                    if(bMapUpdatedEdgeTarget)
+                                    {
+                                        vProjectionConflict[idx] = 1;
+                                        ++lgLocalMismatch;
+                                    }
+                                    else
+                                    {
+                                        ++lgLocalMapUpdatedEdgeNonTargetIgnored;
+                                    }
                                 }
-                                else
+                                else if(bMapUpdatedEdgeTarget)
                                 {
                                     ++lgLocalConflictLowScore;
                                 }
@@ -6579,12 +9308,16 @@ void Tracking::SearchLocalPoints()
                 {
                     if(!vProjectionAdded[static_cast<size_t>(i)])
                         continue;
-                    if(vProjectionVerified[static_cast<size_t>(i)] || !vProjectionConflict[static_cast<size_t>(i)])
+                    if(!vMapUpdatedEdgeTarget[static_cast<size_t>(i)])
                         continue;
-                    mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
-                    if(i < static_cast<int>(mCurrentFrame.mvXFeatMatchSource.size()))
-                        mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)] = kXFeatMatchUnknown;
-                    ++lgLocalRejected;
+                    if(vProjectionVerified[static_cast<size_t>(i)])
+                        continue;
+                    if(!vProjectionConflict[static_cast<size_t>(i)])
+                    {
+                        ++lgLocalMapUpdatedEdgeNoEvidence;
+                        continue;
+                    }
+                    ++lgLocalMapUpdatedEdgeConflictShadow;
                 }
                 matches = std::max(0, matches - lgLocalRejected);
                 projectionMatches = matches;
@@ -6610,6 +9343,11 @@ void Tracking::SearchLocalPoints()
                std::isfinite(resolvedDepth) && resolvedDepth <= mThDepth)
             {
                 localProjCloseTrackingStereoGeomAccept++;
+            }
+            if(IsLocalProjHistoryTarget(pMP, resolvedDepth))
+            {
+                pMP->RecordLocalProjectionMatch(mCurrentFrame.mnId);
+                triang0To10ProjMatch++;
             }
         }
 
@@ -6663,6 +9401,30 @@ void Tracking::SearchLocalPoints()
                   << " local_proj_close_tracking_stereo_geom_accept=" << localProjCloseTrackingStereoGeomAccept
                   << " local_proj_close_tracking_stereo_reject_ur=" << localProjCloseTrackingStereoRejectUr
                   << " local_proj_close_tracking_stereo_reject_depth=" << localProjCloseTrackingStereoRejectDepth
+                  << " triang_0_10_history_gate_candidate=" << triang0To10HistoryGateCandidate
+                  << " triang_0_10_history_gate_reject=" << triang0To10HistoryGateReject
+                  << " triang_0_10_history_gate_reject_opt=" << triang0To10HistoryGateRejectOpt
+                  << " triang_0_10_history_gate_reject_recent=" << triang0To10HistoryGateRejectRecent
+                  << " triang_0_10_history_gate_pass=" << triang0To10HistoryGatePass
+                  << " triang_0_10_history_gate_insufficient=" << triang0To10HistoryGateInsufficient
+                  << " triang_0_10_proj_attempt=" << triang0To10ProjAttempt
+                  << " triang_0_10_proj_match=" << triang0To10ProjMatch
+                  << " triang_0_10_proj_miss=" << std::max(0, triang0To10ProjAttempt - triang0To10ProjMatch)
+                  << " triang_0_10_proj_match_rate="
+                  << (triang0To10ProjAttempt > 0
+                      ? static_cast<float>(triang0To10ProjMatch) / static_cast<float>(triang0To10ProjAttempt)
+                      : 0.0f)
+                  << " localmap_lmt_0_10_from_reference=" << localmapLmt0To10FromReference
+                  << " localmap_lmt_0_10_from_voted=" << localmapLmt0To10FromVoted
+                  << " localmap_lmt_0_10_from_expansion=" << localmapLmt0To10FromExpansion
+                  << " localmap_lmt_0_10_from_temporal=" << localmapLmt0To10FromTemporal
+                  << " localmap_lmt_0_10_from_unknown=" << localmapLmt0To10FromUnknown
+                  << " local_proj_triang_0_10_proj_outside_reject=" << localProjTriang0To10ProjOutsideReject
+                  << " local_proj_triang_0_10_proj_edge_shadow=" << localProjTriang0To10ProjEdgeShadow
+                  << " local_proj_triang_0_10_proj_edge_50_65_shadow=" << localProjTriang0To10ProjEdge50To65Shadow
+                  << " local_proj_triang_0_10_proj_edge_65_80_shadow=" << localProjTriang0To10ProjEdge65To80Shadow
+                  << " local_proj_triang_0_10_proj_edge_80_100_shadow=" << localProjTriang0To10ProjEdge80To100Shadow
+                  << " local_proj_triang_0_10_companion_outside_reject=" << localProjTriang0To10CompanionOutsideReject
                   << " nToMatch=" << nToMatchValue
                   << " th=" << thValue
                   << " mode=" << (bUseORB ? "ORBProj" : (bUseLightGlueLocalMap ? "XFeatProj+LightGlueLocal" : "XFeatProj"))
@@ -6684,7 +9446,13 @@ void Tracking::SearchLocalPoints()
                   << " lg_local_mismatch=" << lgLocalMismatch
                   << " lg_local_conflict_low_score=" << lgLocalConflictLowScore
                   << " lg_local_conflict_min_score=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalConflictMinScore() : 0.0f)
-                  << " lg_local_proj_radius=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalMapProjRadius() : 0.0f);
+                  << " lg_local_proj_radius=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalMapProjRadius() : 0.0f)
+                  << " lg_local_map_updated_edge_candidates=" << lgLocalMapUpdatedEdgeCandidates
+                  << " lg_local_map_updated_edge_verified=" << lgLocalMapUpdatedEdgeVerified
+                  << " lg_local_map_updated_edge_conflict_reject=0"
+                  << " lg_local_map_updated_edge_conflict_shadow=" << lgLocalMapUpdatedEdgeConflictShadow
+                  << " lg_local_map_updated_edge_no_evidence=" << lgLocalMapUpdatedEdgeNoEvidence
+                  << " lg_local_map_updated_edge_non_target_ignored=" << lgLocalMapUpdatedEdgeNonTargetIgnored;
         if(bProjectionRun)
         {
             std::cout << " far_filter=" << (bFarFilterValue ? "on" : "off")
@@ -6736,8 +9504,55 @@ void Tracking::UpdateLocalMap()
 void Tracking::UpdateLocalPoints()
 {
     mvpLocalMapPoints.clear();
+    mmLocalMPProvenance.clear();
 
     int count_pts = 0;
+    auto updateLocalMPProvenance = [&](KeyFrame* pKF, MapPoint* pMP)
+    {
+        if(!pKF || !pMP || pMP->isBad())
+            return;
+
+        LocalMPProvenance& provenance = mmLocalMPProvenance[pMP];
+        const bool bFirstObservation = provenance.frameId != mCurrentFrame.mnId;
+        if(bFirstObservation)
+        {
+            provenance = LocalMPProvenance();
+            provenance.frameId = mCurrentFrame.mnId;
+        }
+        provenance.localObservations++;
+
+        LocalKFProvenanceRole role = LocalKFProvenanceRole::Unknown;
+        int voteCount = 0;
+        const auto itKFProv = mmLocalKFProvenance.find(pKF);
+        if(itKFProv != mmLocalKFProvenance.end() &&
+           itKFProv->second.frameId == mCurrentFrame.mnId)
+        {
+            role = itKFProv->second.role;
+            voteCount = itKFProv->second.voteCount;
+        }
+
+        long int age = -1;
+        if(mCurrentFrame.mnId >= pKF->mnFrameId)
+            age = static_cast<long int>(mCurrentFrame.mnId - pKF->mnFrameId);
+
+        const int roleRank = LocalMapProvenanceRoleRank(role);
+        const int bestRoleRank = LocalMapProvenanceRoleRank(provenance.bestRole);
+        const bool bBetterVote = voteCount > provenance.bestVoteCount;
+        const bool bEqualVoteBetterRole =
+            voteCount == provenance.bestVoteCount && roleRank > bestRoleRank;
+        const bool bEqualVoteRoleNewer =
+            voteCount == provenance.bestVoteCount &&
+            roleRank == bestRoleRank &&
+            age >= 0 &&
+            (provenance.bestKeyFrameAge < 0 || age < provenance.bestKeyFrameAge);
+
+        if(bFirstObservation || bBetterVote || bEqualVoteBetterRole || bEqualVoteRoleNewer)
+        {
+            provenance.bestRole = role;
+            provenance.bestVoteCount = voteCount;
+            provenance.bestKeyFrameAge = age;
+        }
+    };
 
     for(vector<KeyFrame*>::const_reverse_iterator itKF=mvpLocalKeyFrames.rbegin(), itEndKF=mvpLocalKeyFrames.rend(); itKF!=itEndKF; ++itKF)
     {
@@ -6750,6 +9565,8 @@ void Tracking::UpdateLocalPoints()
             MapPoint* pMP = *itMP;
             if(!pMP)
                 continue;
+            if(!pMP->isBad())
+                updateLocalMPProvenance(pKF, pMP);
             if(pMP->mnTrackReferenceForFrame==mCurrentFrame.mnId)
                 continue;
             if(!pMP->isBad())
@@ -6767,6 +9584,27 @@ void Tracking::UpdateLocalKeyFrames()
 {
     // Each map point vote for the keyframes in which it has been observed
     map<KeyFrame*,int> keyframeCounter;
+    mmLocalKFProvenance.clear();
+    auto setLocalKFProvenance = [&](KeyFrame* pKF,
+                                    const LocalKFProvenanceRole role,
+                                    const int voteCount,
+                                    const bool bForce)
+    {
+        if(!pKF)
+            return;
+        LocalKFProvenance& provenance = mmLocalKFProvenance[pKF];
+        const bool bMissing = provenance.frameId != mCurrentFrame.mnId;
+        const bool bBetterRole =
+            LocalMapProvenanceRoleRank(role) > LocalMapProvenanceRoleRank(provenance.role);
+        const bool bBetterVote = voteCount > provenance.voteCount;
+        if(bForce || bMissing || bBetterVote || bBetterRole)
+        {
+            provenance.role = role;
+            provenance.voteCount = voteCount;
+            provenance.frameId = mCurrentFrame.mnId;
+        }
+    };
+
     if(!mpAtlas->isImuInitialized() || (mCurrentFrame.mnId<mnLastRelocFrameId+2))
     {
         for(int i=0; i<mCurrentFrame.N; i++)
@@ -6835,6 +9673,7 @@ void Tracking::UpdateLocalKeyFrames()
 
         mvpLocalKeyFrames.push_back(pKF);
         pKF->mnTrackReferenceForFrame = mCurrentFrame.mnId;
+        setLocalKFProvenance(pKF, LocalKFProvenanceRole::Voted, it->second, true);
     }
 
     // Include also some not-already-included keyframes that are neighbors to already-included keyframes
@@ -6858,6 +9697,7 @@ void Tracking::UpdateLocalKeyFrames()
                 {
                     mvpLocalKeyFrames.push_back(pNeighKF);
                     pNeighKF->mnTrackReferenceForFrame=mCurrentFrame.mnId;
+                    setLocalKFProvenance(pNeighKF, LocalKFProvenanceRole::Covis, 0, false);
                     break;
                 }
             }
@@ -6873,6 +9713,7 @@ void Tracking::UpdateLocalKeyFrames()
                 {
                     mvpLocalKeyFrames.push_back(pChildKF);
                     pChildKF->mnTrackReferenceForFrame=mCurrentFrame.mnId;
+                    setLocalKFProvenance(pChildKF, LocalKFProvenanceRole::ChildParent, 0, false);
                     break;
                 }
             }
@@ -6885,6 +9726,7 @@ void Tracking::UpdateLocalKeyFrames()
             {
                 mvpLocalKeyFrames.push_back(pParent);
                 pParent->mnTrackReferenceForFrame=mCurrentFrame.mnId;
+                setLocalKFProvenance(pParent, LocalKFProvenanceRole::ChildParent, 0, false);
                 break;
             }
         }
@@ -6903,6 +9745,7 @@ void Tracking::UpdateLocalKeyFrames()
             {
                 mvpLocalKeyFrames.push_back(tempKeyFrame);
                 tempKeyFrame->mnTrackReferenceForFrame=mCurrentFrame.mnId;
+                setLocalKFProvenance(tempKeyFrame, LocalKFProvenanceRole::Temporal, 0, false);
                 tempKeyFrame=tempKeyFrame->mPrevKF;
             }
         }
@@ -6912,6 +9755,7 @@ void Tracking::UpdateLocalKeyFrames()
     {
         mpReferenceKF = pKFmax;
         mCurrentFrame.mpReferenceKF = mpReferenceKF;
+        setLocalKFProvenance(pKFmax, LocalKFProvenanceRole::Reference, max, true);
     }
 }
 

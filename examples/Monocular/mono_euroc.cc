@@ -52,7 +52,7 @@ int main(int argc, char **argv)
     int seq;
     vector< vector<string> > vstrImageFilenames;
     vector< vector<double> > vTimestampsCam;
-    
+
     vector<int> nImages;
 
     vstrImageFilenames.resize(num_seq);
@@ -87,8 +87,6 @@ int main(int argc, char **argv)
     float imageScale = SLAM.GetImageScale();
 
     double t_resize = 0.f;
-    double t_track = 0.f;
-
     for (seq = 0; seq<num_seq; seq++)
     {
 

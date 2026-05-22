@@ -36,6 +36,7 @@
 #include<exception>
 #include<iomanip>
 #include<iostream>
+#include<limits>
 #include<string>
 #include<tuple>
 #include<unordered_set>
@@ -1079,10 +1080,26 @@ void LocalMapping::CreateNewMapPoints()
     const float &invfy1 = mpCurrentKeyFrame->invfy;
 
     const float ratioFactor = 1.5f*mpCurrentKeyFrame->mfScaleFactor;
+    const float ratioFactorClose = 1.25f*mpCurrentKeyFrame->mfScaleFactor;
+    const bool bPrintTriangDiag = ShouldPrintLocalMappingXFeatDebug(mpCurrentKeyFrame->mnId);
     int countStereo = 0;
     int countStereoGoodProj = 0;
     int countStereoAttempt = 0;
     int totalStereoPts = 0;
+    int closeCandidates = 0;
+    int closeRayCandidates = 0;
+    int closeStereoFallbackCandidates = 0;
+    int closeStereoFallbackReject = 0;
+    int closeParallaxReject = 0;
+    int closeReprojReject = 0;
+    int closeScaleReject = 0;
+    int closeCreated = 0;
+    int close0To5Candidates = 0;
+    int close0To5ParallaxReject = 0;
+    int close0To5Created = 0;
+    int close5To10Candidates = 0;
+    int close5To10ParallaxReject = 0;
+    int close5To10Created = 0;
 
     // Search matches with epipolar restriction and triangulate
     for(size_t i=0; i<vpNeighKFs.size(); i++)
@@ -1116,6 +1133,8 @@ void LocalMapping::CreateNewMapPoints()
         // Search matches that fullfil epipolar constraint
         vector<pair<size_t,size_t> > vMatchedIndices;
         bool bCoarse = mbInertial && mpTracker->mState==Tracking::RECENTLY_LOST && mpCurrentKeyFrame->GetMap()->GetIniertialBA2();
+        MapPoint::TriangulationMatchBackend triangBackend =
+            bUseORB ? MapPoint::kTriangBackendORB : MapPoint::kTriangBackendXFeatBF;
 
         if(bUseORB)
         {
@@ -1138,6 +1157,21 @@ void LocalMapping::CreateNewMapPoints()
                                                                                           lgConf);
                     bUsedLightGlueTriang =
                         nLightGlueMatches >= GetXFeatLightGlueTriangulationFallbackMinMatches();
+                    if(bUsedLightGlueTriang)
+                        triangBackend = MapPoint::kTriangBackendLightGlue;
+                    if(bPrintTriangDiag)
+                    {
+                        const XFeatLighterGlueMatcher::Stats& lgStats = lightGlueMatcher.LastStats();
+                        std::cout << "[LocalMapping][LightGlueTriang]"
+                                  << " kf1=" << mpCurrentKeyFrame->mnId
+                                  << " kf2=" << pKF2->mnId
+                                  << " raw_matches=" << lgStats.lg_raw_matches
+                                  << " mp_valid=" << lgStats.mp_valid
+                                  << " one_to_one=" << lgStats.one_to_one
+                                  << " used=" << (bUsedLightGlueTriang ? 1 : 0)
+                                  << " fallback_to_xfeat=" << (bUsedLightGlueTriang ? 0 : 1)
+                                  << std::endl;
+                    }
                 }
                 catch(const std::exception& e)
                 {
@@ -1269,6 +1303,7 @@ void LocalMapping::CreateNewMapPoints()
 
             bool goodProj = false;
             bool bPointStereo = false;
+            float stereoFallbackDepth = -1.0f;
             if(cosParallaxRays<cosParallaxStereo && cosParallaxRays>0 && (bStereo1 || bStereo2 ||
                                                                           (cosParallaxRays<0.9996 && mbInertial) || (cosParallaxRays<0.9998 && !mbInertial)))
             {
@@ -1280,12 +1315,14 @@ void LocalMapping::CreateNewMapPoints()
             {
                 countStereoAttempt++;
                 bPointStereo = true;
+                stereoFallbackDepth = mpCurrentKeyFrame->mvDepth[idx1];
                 goodProj = mpCurrentKeyFrame->UnprojectStereo(idx1, x3D);
             }
             else if(bStereo2 && cosParallaxStereo2<cosParallaxStereo1)
             {
                 countStereoAttempt++;
                 bPointStereo = true;
+                stereoFallbackDepth = pKF2->mvDepth[idx2];
                 goodProj = pKF2->UnprojectStereo(idx2, x3D);
             }
             else
@@ -1308,20 +1345,67 @@ void LocalMapping::CreateNewMapPoints()
             if(z2<=0)
                 continue;
 
+            const float triangDepth = std::min(z1, z2);
+            const bool bCloseRay0To5 = !bPointStereo && triangDepth <= 5.0f;
+            const bool bCloseRay5To10 = !bPointStereo && triangDepth > 5.0f &&
+                                        triangDepth <= std::min(10.0f, mpCurrentKeyFrame->mThDepth);
+            const bool bCloseCandidate =
+                bPointStereo ?
+                    (std::isfinite(stereoFallbackDepth) && stereoFallbackDepth > 0.0f &&
+                     stereoFallbackDepth <= mpCurrentKeyFrame->mThDepth) :
+                    (triangDepth <= mpCurrentKeyFrame->mThDepth);
+            const bool bCloseRayCandidate = bCloseCandidate && !bPointStereo;
+            if(bCloseCandidate)
+            {
+                closeCandidates++;
+                if(bPointStereo)
+                {
+                    closeStereoFallbackCandidates++;
+                    closeStereoFallbackReject++;
+                    continue;
+                }
+
+                closeRayCandidates++;
+                if(bCloseRay0To5)
+                    close0To5Candidates++;
+                if(bCloseRay5To10)
+                    close5To10Candidates++;
+
+                const float closeParallaxThreshold = 0.9994f;
+                if(cosParallaxRays >= closeParallaxThreshold)
+                {
+                    closeParallaxReject++;
+                    if(bCloseRay0To5)
+                        close0To5ParallaxReject++;
+                    if(bCloseRay5To10)
+                        close5To10ParallaxReject++;
+                    continue;
+                }
+            }
+
             //Check reprojection error in first keyframe
             const float &sigmaSquare1 = mpCurrentKeyFrame->mvLevelSigma2[kp1.octave];
             const float x1 = Rcw1.row(0).dot(x3D)+tcw1(0);
             const float y1 = Rcw1.row(1).dot(x3D)+tcw1(1);
             const float invz1 = 1.0/z1;
+            const float monoReprojFactor = bCloseRayCandidate ? 4.5f : 5.991f;
+            const float stereoReprojFactor = bCloseRayCandidate ? 6.0f : 7.8f;
+            float reprojChi2First = std::numeric_limits<float>::quiet_NaN();
+            float reprojChi2Second = std::numeric_limits<float>::quiet_NaN();
 
             if(!bStereo1)
             {
                 cv::Point2f uv1 = pCamera1->project(cv::Point3f(x1,y1,z1));
                 float errX1 = uv1.x - kp1.pt.x;
                 float errY1 = uv1.y - kp1.pt.y;
+                reprojChi2First = (errX1*errX1+errY1*errY1) / sigmaSquare1;
 
-                if((errX1*errX1+errY1*errY1)>5.991*sigmaSquare1)
+                if(reprojChi2First > monoReprojFactor)
+                {
+                    if(bCloseRayCandidate)
+                        closeReprojReject++;
                     continue;
+                }
 
             }
             else
@@ -1332,8 +1416,13 @@ void LocalMapping::CreateNewMapPoints()
                 float errX1 = u1 - kp1.pt.x;
                 float errY1 = v1 - kp1.pt.y;
                 float errX1_r = u1_r - kp1_ur;
-                if((errX1*errX1+errY1*errY1+errX1_r*errX1_r)>7.8*sigmaSquare1)
+                reprojChi2First = (errX1*errX1+errY1*errY1+errX1_r*errX1_r) / sigmaSquare1;
+                if(reprojChi2First > stereoReprojFactor)
+                {
+                    if(bCloseRayCandidate)
+                        closeReprojReject++;
                     continue;
+                }
             }
 
             //Check reprojection error in second keyframe
@@ -1346,8 +1435,13 @@ void LocalMapping::CreateNewMapPoints()
                 cv::Point2f uv2 = pCamera2->project(cv::Point3f(x2,y2,z2));
                 float errX2 = uv2.x - kp2.pt.x;
                 float errY2 = uv2.y - kp2.pt.y;
-                if((errX2*errX2+errY2*errY2)>5.991*sigmaSquare2)
+                reprojChi2Second = (errX2*errX2+errY2*errY2) / sigmaSquare2;
+                if(reprojChi2Second > monoReprojFactor)
+                {
+                    if(bCloseRayCandidate)
+                        closeReprojReject++;
                     continue;
+                }
             }
             else
             {
@@ -1357,8 +1451,13 @@ void LocalMapping::CreateNewMapPoints()
                 float errX2 = u2 - kp2.pt.x;
                 float errY2 = v2 - kp2.pt.y;
                 float errX2_r = u2_r - kp2_ur;
-                if((errX2*errX2+errY2*errY2+errX2_r*errX2_r)>7.8*sigmaSquare2)
+                reprojChi2Second = (errX2*errX2+errY2*errY2+errX2_r*errX2_r) / sigmaSquare2;
+                if(reprojChi2Second > stereoReprojFactor)
+                {
+                    if(bCloseRayCandidate)
+                        closeReprojReject++;
                     continue;
+                }
             }
 
             //Check scale consistency
@@ -1376,15 +1475,42 @@ void LocalMapping::CreateNewMapPoints()
 
             const float ratioDist = dist2/dist1;
             const float ratioOctave = mpCurrentKeyFrame->mvScaleFactors[kp1.octave]/pKF2->mvScaleFactors[kp2.octave];
+            const float activeRatioFactor = bCloseRayCandidate ? ratioFactorClose : ratioFactor;
+            const float ratioScale = std::max(1e-6f, ratioDist / std::max(1e-6f, ratioOctave));
+            const float scaleLogResidual = std::abs(std::log(ratioScale));
+            const float scaleLogMargin = std::log(std::max(1.000001f, activeRatioFactor)) - scaleLogResidual;
 
-            if(ratioDist*ratioFactor<ratioOctave || ratioDist>ratioOctave*ratioFactor)
+            if(ratioDist*activeRatioFactor<ratioOctave || ratioDist>ratioOctave*activeRatioFactor)
+            {
+                if(bCloseRayCandidate)
+                    closeScaleReject++;
                 continue;
+            }
 
             // Triangulation is succesfull
             MapPoint* pMP = new MapPoint(x3D, mpCurrentKeyFrame, mpAtlas->GetCurrentMap());
             pMP->SetCreationSource(MapPoint::kCreationSourceLocalMappingTriangulation);
+            const float reprojChi2Max = std::max(reprojChi2First, reprojChi2Second);
+            const float reprojChi2Mean = 0.5f * (reprojChi2First + reprojChi2Second);
+            pMP->SetTriangulationQuality(triangDepth,
+                                         cosParallaxRays,
+                                         reprojChi2Max,
+                                         reprojChi2Mean,
+                                         scaleLogResidual,
+                                         scaleLogMargin,
+                                         triangBackend,
+                                         mpCurrentKeyFrame->mnId,
+                                         pKF2->mnId);
             if (bPointStereo)
                 countStereo++;
+            if(bCloseRayCandidate)
+            {
+                closeCreated++;
+                if(bCloseRay0To5)
+                    close0To5Created++;
+                if(bCloseRay5To10)
+                    close5To10Created++;
+            }
             
             pMP->AddObservation(mpCurrentKeyFrame,idx1);
             pMP->AddObservation(pKF2,idx2);
@@ -1399,6 +1525,27 @@ void LocalMapping::CreateNewMapPoints()
             mpAtlas->AddMapPoint(pMP);
             mlpRecentAddedMapPoints.push_back(pMP);
         }
+    }
+
+    if(bPrintTriangDiag)
+    {
+        std::cout << "[LocalMapping][TriangCreate]"
+                  << " kf_id=" << mpCurrentKeyFrame->mnId
+                  << " close_candidates=" << closeCandidates
+                  << " close_ray_candidates=" << closeRayCandidates
+                  << " close_stereo_fallback_candidates=" << closeStereoFallbackCandidates
+                  << " close_stereo_fallback_reject=" << closeStereoFallbackReject
+                  << " close_parallax_reject=" << closeParallaxReject
+                  << " close_reproj_reject=" << closeReprojReject
+                  << " close_scale_reject=" << closeScaleReject
+                  << " close_created=" << closeCreated
+                  << " close_0_5_candidates=" << close0To5Candidates
+                  << " close_0_5_parallax_reject=" << close0To5ParallaxReject
+                  << " close_0_5_created=" << close0To5Created
+                  << " close_5_10_candidates=" << close5To10Candidates
+                  << " close_5_10_parallax_reject=" << close5To10ParallaxReject
+                  << " close_5_10_created=" << close5To10Created
+                  << std::endl;
     }
 }
 

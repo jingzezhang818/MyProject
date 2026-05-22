@@ -116,6 +116,24 @@ public:
         kCreationSourceStereoInit = 4
     };
 
+    enum TriangulationMatchBackend : unsigned char
+    {
+        kTriangBackendUnknown = 0,
+        kTriangBackendXFeatBF = 1,
+        kTriangBackendLightGlue = 2,
+        kTriangBackendORB = 3
+    };
+
+    struct LocalProjectionHistoryStats
+    {
+        int attemptCount;
+        int matchCount;
+        int optInlierCount;
+        int optOutlierCount;
+        unsigned int recentValidMask;
+        unsigned int recentOutlierMask;
+    };
+
     MapPoint();
 
     MapPoint(const Eigen::Vector3f &Pos, KeyFrame* pRefKF, Map* pMap);
@@ -178,6 +196,20 @@ public:
     void UpdateMap(Map* pMap);
     void SetCreationSource(const CreationSource source);
     CreationSource GetCreationSource() const;
+    void SetTriangulationQuality(const float depthAtCreation,
+                                 const float cosParallax,
+                                 const float reprojChi2Max,
+                                 const float reprojChi2Mean,
+                                 const float scaleLogResidual,
+                                 const float scaleLogMargin,
+                                 const TriangulationMatchBackend backend,
+                                 const long unsigned int anchorKf1Id,
+                                 const long unsigned int anchorKf2Id);
+    bool HasTriangulationQuality() const;
+    void RecordLocalProjectionAttempt(const long unsigned int frameId);
+    void RecordLocalProjectionMatch(const long unsigned int frameId);
+    void RecordLocalProjectionOutcome(const long unsigned int frameId, const bool bInlier);
+    LocalProjectionHistoryStats GetLocalProjectionHistory() const;
 
     void PrintObservations();
 
@@ -191,6 +223,25 @@ public:
     long int mnFirstFrame;
     int nObs;
     CreationSource mCreationSource;
+    bool mbHasTriangulationQuality;
+    float mTriangDepthAtCreation;
+    float mTriangCosParallax;
+    float mTriangReprojChi2Max;
+    float mTriangReprojChi2Mean;
+    float mTriangScaleLogResidual;
+    float mTriangScaleLogMargin;
+    TriangulationMatchBackend mTriangMatchBackend;
+    long unsigned int mnTriangAnchorKF1Id;
+    long unsigned int mnTriangAnchorKF2Id;
+    int mLocalProjAttemptCount;
+    int mLocalProjMatchCount;
+    int mLocalProjOptInlierCount;
+    int mLocalProjOptOutlierCount;
+    unsigned int mLocalProjRecentValidMask;
+    unsigned int mLocalProjRecentOutlierMask;
+    long unsigned int mnLastLocalProjAttemptFrame;
+    long unsigned int mnLastLocalProjMatchFrame;
+    long unsigned int mnLastLocalProjOutcomeFrame;
 
     // Variables used by the tracking
     float mTrackProjX;

@@ -38,10 +38,13 @@
 #include "Converter.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include<mutex>
+#include <set>
 #include <string>
 
 #include "OptimizableTypes.h"
@@ -149,6 +152,172 @@ bool ShouldPrintXFeatDebug(const long unsigned int frameId)
            (frameId == 0 || (frameId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0);
 }
 
+constexpr size_t kLocalBASourceCount = 5;
+constexpr size_t kLocalBADepthBinCount = 6;
+
+size_t MapPointCreationSourceIndex(const MapPoint::CreationSource source)
+{
+    const size_t idx = static_cast<size_t>(source);
+    if(idx >= kLocalBASourceCount)
+        return static_cast<size_t>(MapPoint::kCreationSourceUnknown);
+    return idx;
+}
+
+const char* MapPointCreationSourceName(const MapPoint::CreationSource source)
+{
+    switch(source)
+    {
+        case MapPoint::kCreationSourceTrackingStereo:
+            return "tracking_stereo";
+        case MapPoint::kCreationSourceLocalMappingTriangulation:
+            return "local_mapping_triangulation";
+        case MapPoint::kCreationSourceMonoInit:
+            return "mono_init";
+        case MapPoint::kCreationSourceStereoInit:
+            return "stereo_init";
+        case MapPoint::kCreationSourceUnknown:
+        default:
+            return "unknown";
+    }
+}
+
+int LocalBADepthBinIndex(const float depth)
+{
+    if(!std::isfinite(depth) || depth <= 0.0f)
+        return 0;
+    if(depth <= 5.0f)
+        return 1;
+    if(depth <= 10.0f)
+        return 2;
+    if(depth <= 30.0f)
+        return 3;
+    if(depth <= 100.0f)
+        return 4;
+    return 5;
+}
+
+const char* LocalBADepthBinName(const size_t bin)
+{
+    switch(bin)
+    {
+        case 1: return "0_5";
+        case 2: return "5_10";
+        case 3: return "10_30";
+        case 4: return "30_100";
+        case 5: return "100p";
+        case 0:
+        default:
+            return "invalid";
+    }
+}
+
+float ResolveKeyFrameMapPointDepth(KeyFrame* pKF, MapPoint* pMP)
+{
+    if(!pKF || !pMP)
+        return std::numeric_limits<float>::quiet_NaN();
+
+    const Eigen::Vector3f x3Dc = pKF->GetPose() * pMP->GetWorldPos();
+    const float depth = x3Dc(2);
+    if(!std::isfinite(depth) || depth <= 0.0f)
+        return std::numeric_limits<float>::quiet_NaN();
+    return depth;
+}
+
+bool ShouldPrintLocalBASourceDepthDiag(const long unsigned int kfId)
+{
+    return IsEnvFlagEnabled("XFEAT_DEBUG") &&
+           IsEnvFlagEnabled("XFEAT_DIAG_FEATURE_DISTRIBUTION") &&
+           (kfId == 0 || (kfId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0);
+}
+
+struct LocalBASourceDepthStats
+{
+    int edges = 0;
+    int outlierEdges = 0;
+    double chi2Sum = 0.0;
+    std::vector<float> chi2Values;
+    std::set<MapPoint*> mapPoints;
+};
+
+using LocalBASourceDepthStatsGrid =
+    std::array<std::array<LocalBASourceDepthStats, kLocalBADepthBinCount>, kLocalBASourceCount>;
+
+void AccumulateLocalBASourceDepthStats(LocalBASourceDepthStatsGrid& stats,
+                                       KeyFrame* pMainKF,
+                                       KeyFrame* pEdgeKF,
+                                       MapPoint* pMP,
+                                       const float chi2,
+                                       const float threshold,
+                                       const bool bDepthPositive)
+{
+    const MapPoint::CreationSource source = pMP ? pMP->GetCreationSource()
+                                                : MapPoint::kCreationSourceUnknown;
+    const size_t sourceIdx = MapPointCreationSourceIndex(source);
+
+    float depth = ResolveKeyFrameMapPointDepth(pMainKF, pMP);
+    if(!std::isfinite(depth))
+        depth = ResolveKeyFrameMapPointDepth(pEdgeKF, pMP);
+    const size_t depthIdx = static_cast<size_t>(LocalBADepthBinIndex(depth));
+
+    LocalBASourceDepthStats& cell = stats[sourceIdx][depthIdx];
+    cell.edges++;
+    if(chi2 > threshold || !bDepthPositive)
+        cell.outlierEdges++;
+    if(std::isfinite(chi2))
+    {
+        cell.chi2Sum += static_cast<double>(chi2);
+        cell.chi2Values.push_back(chi2);
+    }
+    if(pMP)
+        cell.mapPoints.insert(pMP);
+}
+
+float LocalBAChi2P90(std::vector<float> values)
+{
+    if(values.empty())
+        return -1.0f;
+
+    std::sort(values.begin(), values.end());
+    const size_t idx = std::min(values.size() - 1,
+                                static_cast<size_t>(std::ceil(0.9 * static_cast<double>(values.size()))) - 1);
+    return values[idx];
+}
+
+void PrintLocalBASourceDepthStats(const long unsigned int kfId,
+                                  const LocalBASourceDepthStatsGrid& stats)
+{
+    for(size_t sourceIdx = 0; sourceIdx < kLocalBASourceCount; ++sourceIdx)
+    {
+        const MapPoint::CreationSource source = static_cast<MapPoint::CreationSource>(sourceIdx);
+        for(size_t depthIdx = 0; depthIdx < kLocalBADepthBinCount; ++depthIdx)
+        {
+            const LocalBASourceDepthStats& cell = stats[sourceIdx][depthIdx];
+            if(cell.edges == 0)
+                continue;
+
+            const float outlierRatio = static_cast<float>(cell.outlierEdges) /
+                                       static_cast<float>(std::max(1, cell.edges));
+            const float chi2Avg = cell.chi2Values.empty()
+                                      ? -1.0f
+                                      : static_cast<float>(cell.chi2Sum /
+                                                           static_cast<double>(cell.chi2Values.size()));
+            const float chi2P90 = LocalBAChi2P90(cell.chi2Values);
+
+            std::cout << "[LocalBA][SourceDepthError]"
+                      << " kf_id=" << kfId
+                      << " source=" << MapPointCreationSourceName(source)
+                      << " depth_bin=" << LocalBADepthBinName(depthIdx)
+                      << " edges=" << cell.edges
+                      << " outlier_edges=" << cell.outlierEdges
+                      << " outlier_ratio=" << outlierRatio
+                      << " chi2_avg=" << chi2Avg
+                      << " chi2_p90=" << chi2P90
+                      << " mp_count=" << cell.mapPoints.size()
+                      << std::endl;
+        }
+    }
+}
+
 float GetLocalMapTriangPoseWeight()
 {
     static const float weight = []() -> float
@@ -197,42 +366,57 @@ float ResolveFrameMapPointDepth(const Frame* pFrame, MapPoint* pMP)
     return depth;
 }
 
-float GetPoseOptimizationVisualWeight(const Frame* pFrame,
-                                      const int idx,
-                                      MapPoint* pMP,
-                                      float* resolvedDepthOut = nullptr)
+enum class PoseOptimizationVisualWeightKind
+{
+    None = 0,
+    LocalProjTriangFar
+};
+
+struct PoseOptimizationVisualWeightInfo
+{
+    float weight = 1.0f;
+    float resolvedDepth = std::numeric_limits<float>::quiet_NaN();
+    PoseOptimizationVisualWeightKind kind = PoseOptimizationVisualWeightKind::None;
+};
+
+PoseOptimizationVisualWeightInfo GetPoseOptimizationVisualWeight(const Frame* pFrame,
+                                                                 const int idx,
+                                                                 MapPoint* pMP)
 {
     constexpr unsigned char kXFeatMatchLocalProjection = 5;
 
-    if(resolvedDepthOut)
-        *resolvedDepthOut = std::numeric_limits<float>::quiet_NaN();
+    PoseOptimizationVisualWeightInfo info;
 
     if(!pFrame || !pMP || idx < 0)
-        return 1.0f;
-
-    const float weight = GetLocalMapTriangPoseWeight();
-    if(weight >= 0.9999f)
-        return 1.0f;
+        return info;
 
     if(idx >= static_cast<int>(pFrame->mvXFeatMatchSource.size()) ||
        pFrame->mvXFeatMatchSource[static_cast<size_t>(idx)] != kXFeatMatchLocalProjection)
-        return 1.0f;
+        return info;
 
     if(pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
-        return 1.0f;
+        return info;
 
     const float resolvedDepth = ResolveFrameMapPointDepth(pFrame, pMP);
-    if(resolvedDepthOut)
-        *resolvedDepthOut = resolvedDepth;
+    info.resolvedDepth = resolvedDepth;
     if(!std::isfinite(resolvedDepth))
-        return 1.0f;
+        return info;
+
+    if(resolvedDepth <= pFrame->mThDepth)
+        return info;
+
+    const float weight = GetLocalMapTriangPoseWeight();
+    if(weight >= 0.9999f)
+        return info;
 
     const float configuredMinDepth = GetLocalMapTriangPoseMinDepth();
     const float minDepth = configuredMinDepth > 0.0f ? configuredMinDepth : pFrame->mThDepth;
     if(resolvedDepth <= minDepth)
-        return 1.0f;
+        return info;
 
-    return weight;
+    info.weight = weight;
+    info.kind = PoseOptimizationVisualWeightKind::LocalProjTriangFar;
+    return info;
 }
 } // namespace
 
@@ -1070,13 +1254,15 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
                     e->setMeasurement(obs);
-                    const float visualWeight = GetPoseOptimizationVisualWeight(pFrame, i, pMP);
-                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * visualWeight;
+                    const PoseOptimizationVisualWeightInfo weightInfo =
+                        GetPoseOptimizationVisualWeight(pFrame, i, pMP);
+                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * weightInfo.weight;
                     e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
-                    if(visualWeight < 0.9999f)
+                    if(weightInfo.kind != PoseOptimizationVisualWeightKind::None)
                     {
                         nWeightedObs++;
-                        nWeightedLocalProjTriangFar++;
+                        if(weightInfo.kind == PoseOptimizationVisualWeightKind::LocalProjTriangFar)
+                            nWeightedLocalProjTriangFar++;
                     }
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
@@ -1105,14 +1291,16 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
                     e->setMeasurement(obs);
-                    const float visualWeight = GetPoseOptimizationVisualWeight(pFrame, i, pMP);
-                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * visualWeight;
+                    const PoseOptimizationVisualWeightInfo weightInfo =
+                        GetPoseOptimizationVisualWeight(pFrame, i, pMP);
+                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * weightInfo.weight;
                     Eigen::Matrix3d Info = Eigen::Matrix3d::Identity()*invSigma2;
                     e->setInformation(Info);
-                    if(visualWeight < 0.9999f)
+                    if(weightInfo.kind != PoseOptimizationVisualWeightKind::None)
                     {
                         nWeightedObs++;
-                        nWeightedLocalProjTriangFar++;
+                        if(weightInfo.kind == PoseOptimizationVisualWeightKind::LocalProjTriangFar)
+                            nWeightedLocalProjTriangFar++;
                     }
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
@@ -1150,13 +1338,15 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex *>(optimizer.vertex(0)));
                     e->setMeasurement(obs);
-                    const float visualWeight = GetPoseOptimizationVisualWeight(pFrame, i, pMP);
-                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * visualWeight;
+                    const PoseOptimizationVisualWeightInfo weightInfo =
+                        GetPoseOptimizationVisualWeight(pFrame, i, pMP);
+                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * weightInfo.weight;
                     e->setInformation(Eigen::Matrix2d::Identity() * invSigma2);
-                    if(visualWeight < 0.9999f)
+                    if(weightInfo.kind != PoseOptimizationVisualWeightKind::None)
                     {
                         nWeightedObs++;
-                        nWeightedLocalProjTriangFar++;
+                        if(weightInfo.kind == PoseOptimizationVisualWeightKind::LocalProjTriangFar)
+                            nWeightedLocalProjTriangFar++;
                     }
 
                     g2o::RobustKernelHuber *rk = new g2o::RobustKernelHuber;
@@ -1183,13 +1373,15 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex *>(optimizer.vertex(0)));
                     e->setMeasurement(obs);
-                    const float visualWeight = GetPoseOptimizationVisualWeight(pFrame, i, pMP);
-                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * visualWeight;
+                    const PoseOptimizationVisualWeightInfo weightInfo =
+                        GetPoseOptimizationVisualWeight(pFrame, i, pMP);
+                    const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * weightInfo.weight;
                     e->setInformation(Eigen::Matrix2d::Identity() * invSigma2);
-                    if(visualWeight < 0.9999f)
+                    if(weightInfo.kind != PoseOptimizationVisualWeightKind::None)
                     {
                         nWeightedObs++;
-                        nWeightedLocalProjTriangFar++;
+                        if(weightInfo.kind == PoseOptimizationVisualWeightKind::LocalProjTriangFar)
+                            nWeightedLocalProjTriangFar++;
                     }
 
                     g2o::RobustKernelHuber *rk = new g2o::RobustKernelHuber;
@@ -1643,6 +1835,8 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
 
     vector<pair<KeyFrame*,MapPoint*> > vToErase;
     vToErase.reserve(vpEdgesMono.size()+vpEdgesBody.size()+vpEdgesStereo.size());
+    const bool bPrintLocalBASourceDepthDiag = ShouldPrintLocalBASourceDepthDiag(pKF->mnId);
+    LocalBASourceDepthStatsGrid localBASourceDepthStats;
 
     // Check inlier observations       
     for(size_t i=0, iend=vpEdgesMono.size(); i<iend;i++)
@@ -1653,7 +1847,13 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         if(pMP->isBad())
             continue;
 
-        if(e->chi2()>5.991 || !e->isDepthPositive())
+        const float chi2 = e->chi2();
+        const bool bDepthPositive = e->isDepthPositive();
+        if(bPrintLocalBASourceDepthDiag)
+            AccumulateLocalBASourceDepthStats(localBASourceDepthStats, pKF, vpEdgeKFMono[i],
+                                              pMP, chi2, 5.991f, bDepthPositive);
+
+        if(chi2>5.991 || !bDepthPositive)
         {
             KeyFrame* pKFi = vpEdgeKFMono[i];
             vToErase.push_back(make_pair(pKFi,pMP));
@@ -1668,7 +1868,13 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         if(pMP->isBad())
             continue;
 
-        if(e->chi2()>5.991 || !e->isDepthPositive())
+        const float chi2 = e->chi2();
+        const bool bDepthPositive = e->isDepthPositive();
+        if(bPrintLocalBASourceDepthDiag)
+            AccumulateLocalBASourceDepthStats(localBASourceDepthStats, pKF, vpEdgeKFBody[i],
+                                              pMP, chi2, 5.991f, bDepthPositive);
+
+        if(chi2>5.991 || !bDepthPositive)
         {
             KeyFrame* pKFi = vpEdgeKFBody[i];
             vToErase.push_back(make_pair(pKFi,pMP));
@@ -1683,12 +1889,21 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         if(pMP->isBad())
             continue;
 
-        if(e->chi2()>7.815 || !e->isDepthPositive())
+        const float chi2 = e->chi2();
+        const bool bDepthPositive = e->isDepthPositive();
+        if(bPrintLocalBASourceDepthDiag)
+            AccumulateLocalBASourceDepthStats(localBASourceDepthStats, pKF, vpEdgeKFStereo[i],
+                                              pMP, chi2, 7.815f, bDepthPositive);
+
+        if(chi2>7.815 || !bDepthPositive)
         {
             KeyFrame* pKFi = vpEdgeKFStereo[i];
             vToErase.push_back(make_pair(pKFi,pMP));
         }
     }
+
+    if(bPrintLocalBASourceDepthDiag)
+        PrintLocalBASourceDepthStats(pKF->mnId, localBASourceDepthStats);
 
 
     // Get Map Mutex

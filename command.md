@@ -365,6 +365,17 @@ XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL=5 \
   2>&1 | tee experiment_logs/Stereo/SePT/SePT01/run_SePT01_stereo_local_proj_precision.log
 ```
 
+格式转化命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/SePT01/SePT01.tum \
+  --est-traj f_SePT01_stereo.txt \
+  --out-est experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum \
+  --timestamp-unit ns \
+  --estimate-right-rot
+```
+
 轨迹评估命令：
 
 ```bash
