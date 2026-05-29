@@ -37,6 +37,8 @@
 #include<iomanip>
 #include<iostream>
 #include<limits>
+#include<map>
+#include<set>
 #include<string>
 #include<tuple>
 #include<unordered_set>
@@ -47,6 +49,14 @@ namespace ORB_SLAM3
 
 namespace
 {
+    constexpr bool kEnableMappingProbationBehavior = false;
+    constexpr bool kEnableXFeatCloseMidPendingTracklet = false;
+    constexpr int kPendingMappingTrackletBootstrapKFs = 5;
+    constexpr int kPendingMappingTrackletMinObservations = 3;
+    constexpr int kPendingMappingTrackletMinUpdatePasses = 2;
+    constexpr int kPendingMappingTrackletMaxAgeKFs = 6;
+    constexpr int kPendingMappingTrackletMaxConflicts = 2;
+
     bool IsLocalMappingEnvFlagEnabled(const char* key)
     {
         const char* env = std::getenv(key);
@@ -179,6 +189,12 @@ namespace
         int found_ratio_culled = 0;
         int low_obs_culled = 0;
         int aged_out_survived = 0;
+        int mapping_probation_active = 0;
+        int mapping_probation_kept = 0;
+        int mapping_probation_promoted = 0;
+        int mapping_probation_culled_no_inlier = 0;
+        int mapping_probation_culled_expired = 0;
+        int mapping_probation_culled_outlier = 0;
         ScalarDistributionStats allDepth;
         ScalarDistributionStats keptDepth;
         ScalarDistributionStats foundRatioCulledDepth;
@@ -191,6 +207,14 @@ namespace
         ScalarDistributionStats agedOutFoundRatio;
     };
 
+    enum class MappingProbationCullReason
+    {
+        None,
+        NoInlier,
+        Expired,
+        OutlierHistory
+    };
+
     constexpr size_t kMapPointCreationSourceCount = 5;
 
     size_t MapPointCreationSourceIndex(const MapPoint::CreationSource source)
@@ -199,6 +223,34 @@ namespace
         if(idx >= kMapPointCreationSourceCount)
             return 0;
         return static_cast<size_t>(idx);
+    }
+
+    int LocalMappingDepthBinIndex(const float depth)
+    {
+        if(!std::isfinite(depth) || depth <= 0.0f)
+            return 0;
+        if(depth < 5.0f)
+            return 1;
+        if(depth < 10.0f)
+            return 2;
+        if(depth < 30.0f)
+            return 3;
+        if(depth < 100.0f)
+            return 4;
+        return 5;
+    }
+
+    const char* LocalMappingDepthBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "0_5";
+            case 2: return "5_10";
+            case 3: return "10_30";
+            case 4: return "30_100";
+            case 5: return "100p";
+            default: return "invalid";
+        }
     }
 
     const char* MapPointCreationSourceName(const MapPoint::CreationSource source)
@@ -217,6 +269,221 @@ namespace
             default:
                 return "unknown";
         }
+    }
+
+    int MappingFeatureGridBin(const int gridX, const int gridY)
+    {
+        if(gridX < 0 || gridY < 0)
+            return 0;
+        if(gridX < 8 || gridX >= FRAME_GRID_COLS - 8 ||
+           gridY < 6 || gridY >= FRAME_GRID_ROWS - 6)
+        {
+            return 1;
+        }
+        if(gridX < 16 || gridX >= FRAME_GRID_COLS - 16 ||
+           gridY < 12 || gridY >= FRAME_GRID_ROWS - 12)
+        {
+            return 2;
+        }
+        return 3;
+    }
+
+    const char* MappingFeatureGridBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "edge";
+            case 2: return "mid";
+            case 3: return "center";
+            default: return "missing";
+        }
+    }
+
+    int MappingFeatureOctaveBin(const int octave)
+    {
+        if(octave < 0)
+            return 0;
+        if(octave == 0)
+            return 1;
+        if(octave == 1)
+            return 2;
+        return 3;
+    }
+
+    const char* MappingFeatureOctaveBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "octave0";
+            case 2: return "octave1";
+            case 3: return "octave2p";
+            default: return "missing";
+        }
+    }
+
+    int MappingFeatureResponseBin(const float response)
+    {
+        if(!std::isfinite(response) || response <= 0.0f)
+            return 0;
+        if(response <= 0.20f)
+            return 1;
+        if(response <= 0.50f)
+            return 2;
+        return 3;
+    }
+
+    const char* MappingFeatureResponseBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "low";
+            case 2: return "mid";
+            case 3: return "high";
+            default: return "missing";
+        }
+    }
+
+    int MappingFeatureStereoQualityBin(const unsigned char quality)
+    {
+        switch(quality)
+        {
+            case Frame::kStereoBirthValid:
+                return 1;
+            case Frame::kStereoBirthCloseHighConf:
+                return 2;
+            case Frame::kStereoBirthCloseLowConf:
+                return 3;
+            case Frame::kStereoBirthInvalid:
+            default:
+                return 0;
+        }
+    }
+
+    const char* MappingFeatureStereoQualityBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "valid";
+            case 2: return "close_high_conf";
+            case 3: return "close_low_conf";
+            default: return "invalid";
+        }
+    }
+
+    int MappingFeatureCombinedBin(const int gridBin,
+                                  const int octaveBin,
+                                  const int responseBin,
+                                  const int stereoQualityBin)
+    {
+        if(gridBin == 0 || octaveBin == 0)
+            return 0;
+        if(stereoQualityBin == 3)
+            return 4;
+        if(gridBin == 1)
+            return 1;
+        if(octaveBin == 3)
+            return 2;
+        if(responseBin == 1)
+            return 3;
+        return 5;
+    }
+
+    const char* MappingFeatureCombinedBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "edge_grid";
+            case 2: return "coarse_scale";
+            case 3: return "low_response";
+            case 4: return "close_low_conf";
+            case 5: return "balanced";
+            default: return "missing";
+        }
+    }
+
+    constexpr int kMappingFeatureBudgetGridCols = 8;
+    constexpr int kMappingFeatureBudgetGridRows = 6;
+    constexpr int kMappingFeatureBudgetGridCells =
+        kMappingFeatureBudgetGridCols * kMappingFeatureBudgetGridRows;
+
+    int MappingFeatureBudgetCellIndex(const int gridX, const int gridY)
+    {
+        if(gridX < 0 || gridY < 0)
+            return -1;
+        const int cellX = std::min(kMappingFeatureBudgetGridCols - 1,
+                                   std::max(0, gridX * kMappingFeatureBudgetGridCols / FRAME_GRID_COLS));
+        const int cellY = std::min(kMappingFeatureBudgetGridRows - 1,
+                                   std::max(0, gridY * kMappingFeatureBudgetGridRows / FRAME_GRID_ROWS));
+        return cellY * kMappingFeatureBudgetGridCols + cellX;
+    }
+
+    int MappingFeatureBudgetCellCap(const int gridBin)
+    {
+        if(gridBin == 1)
+            return 5;
+        return 8;
+    }
+
+    struct MappingFeatureCreateStats
+    {
+        int total = 0;
+        int close = 0;
+        ScalarDistributionStats depth;
+    };
+
+    void AccumulateMappingFeatureCreateStats(MappingFeatureCreateStats& stats,
+                                             const float depth,
+                                             const bool close)
+    {
+        stats.total++;
+        if(close)
+            stats.close++;
+        AccumulateScalarDistribution(stats.depth, depth, true);
+    }
+
+    bool KeyFrameFeatureGridPosition(const KeyFrame* pKF,
+                                     const cv::KeyPoint& kp,
+                                     int& gridX,
+                                     int& gridY)
+    {
+        gridX = -1;
+        gridY = -1;
+        if(!pKF || pKF->mnMaxX <= pKF->mnMinX || pKF->mnMaxY <= pKF->mnMinY)
+            return false;
+        gridX = static_cast<int>(std::round((kp.pt.x - pKF->mnMinX) * pKF->mfGridElementWidthInv));
+        gridY = static_cast<int>(std::round((kp.pt.y - pKF->mnMinY) * pKF->mfGridElementHeightInv));
+        if(gridX < 0 || gridX >= pKF->mnGridCols || gridY < 0 || gridY >= pKF->mnGridRows)
+        {
+            gridX = -1;
+            gridY = -1;
+            return false;
+        }
+        return true;
+    }
+
+    void PrintMappingFeatureCreateStats(const long unsigned int keyFrameId,
+                                        const long unsigned int frameId,
+                                        const char* dimension,
+                                        const char* binName,
+                                        const MappingFeatureCreateStats& stats)
+    {
+        if(stats.total <= 0)
+            return;
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[LocalMapping][MappingFeatureCreate]"
+                  << " kf_id=" << keyFrameId
+                  << " frame_id=" << frameId
+                  << " source=local_mapping_triangulation"
+                  << " dimension=" << dimension
+                  << " bin=" << binName
+                  << " created=" << stats.total
+                  << " close_created=" << stats.close;
+        AppendScalarDistributionStats(std::cout, "depth", stats.depth, true);
+        std::cout << std::endl;
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
     }
 
     void AccumulateRecentMapPointCullingDiag(MapPoint* pMP,
@@ -273,6 +540,101 @@ namespace
         AccumulateRecentMapPointCullingDiag(pMP, diag.agedOutDepth, diag.agedOutFoundRatio);
     }
 
+    int CountMaskBitsLocalMapping(unsigned int mask)
+    {
+        int count = 0;
+        while(mask != 0U)
+        {
+            count += static_cast<int>(mask & 1U);
+            mask >>= 1U;
+        }
+        return count;
+    }
+
+    bool IsActiveCloseMidMappingProbation(MapPoint* pMP)
+    {
+        if(!pMP || !pMP->IsMappingProbation())
+            return false;
+        if(pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
+            return false;
+        const float depth = pMP->mMappingProbationDepthAtCreation;
+        return std::isfinite(depth) && depth > 0.0f && depth <= 10.0f;
+    }
+
+    int MappingProbationAgeKf(MapPoint* pMP, const unsigned long int currentKfId)
+    {
+        if(!pMP)
+            return 0;
+        return currentKfId >= pMP->mnMappingProbationStartKF
+            ? static_cast<int>(currentKfId - pMP->mnMappingProbationStartKF)
+            : 0;
+    }
+
+    MappingProbationCullReason ClassifyMappingProbationCull(MapPoint* pMP,
+                                                            const unsigned long int currentKfId)
+    {
+        if(!pMP)
+            return MappingProbationCullReason::None;
+
+        const int ageKf = MappingProbationAgeKf(pMP, currentKfId);
+        const MapPoint::LocalProjectionHistoryStats history = pMP->GetLocalProjectionHistory();
+        const int optOutcomes = history.optInlierCount + history.optOutlierCount;
+        const float optOutlierRate = optOutcomes > 0
+            ? static_cast<float>(history.optOutlierCount) / static_cast<float>(optOutcomes)
+            : 0.0f;
+        const int recentValid = CountMaskBitsLocalMapping(history.recentValidMask);
+        const int recentOutlier = CountMaskBitsLocalMapping(history.recentOutlierMask);
+        const float recentOutlierRate = recentValid > 0
+            ? static_cast<float>(recentOutlier) / static_cast<float>(recentValid)
+            : 0.0f;
+
+        if((optOutcomes >= 3 && optOutlierRate > 0.35f) ||
+           (recentValid >= 3 && recentOutlierRate > 0.40f))
+        {
+            return MappingProbationCullReason::OutlierHistory;
+        }
+        if(ageKf >= 4 && history.optInlierCount < 1)
+            return MappingProbationCullReason::NoInlier;
+        if(ageKf >= 6)
+            return MappingProbationCullReason::Expired;
+        return MappingProbationCullReason::None;
+    }
+
+    void AccumulateMappingProbationActive(RecentMapPointCullingDiag& diag)
+    {
+        diag.mapping_probation_active++;
+    }
+
+    void AccumulateMappingProbationKept(RecentMapPointCullingDiag& diag)
+    {
+        diag.mapping_probation_kept++;
+    }
+
+    void AccumulateMappingProbationPromoted(RecentMapPointCullingDiag& diag)
+    {
+        diag.mapping_probation_promoted++;
+    }
+
+    void AccumulateMappingProbationCulled(RecentMapPointCullingDiag& diag,
+                                          const MappingProbationCullReason reason)
+    {
+        switch(reason)
+        {
+            case MappingProbationCullReason::NoInlier:
+                diag.mapping_probation_culled_no_inlier++;
+                break;
+            case MappingProbationCullReason::Expired:
+                diag.mapping_probation_culled_expired++;
+                break;
+            case MappingProbationCullReason::OutlierHistory:
+                diag.mapping_probation_culled_outlier++;
+                break;
+            case MappingProbationCullReason::None:
+            default:
+                break;
+        }
+    }
+
     void AppendRecentMapPointCullingDiag(std::ostream& os,
                                          const RecentMapPointCullingDiag& diag)
     {
@@ -281,7 +643,13 @@ namespace
            << " already_bad=" << diag.already_bad
            << " found_ratio_culled=" << diag.found_ratio_culled
            << " low_obs_culled=" << diag.low_obs_culled
-           << " aged_out_survived=" << diag.aged_out_survived;
+           << " aged_out_survived=" << diag.aged_out_survived
+           << " mapping_probation_active=" << diag.mapping_probation_active
+           << " mapping_probation_kept=" << diag.mapping_probation_kept
+           << " mapping_probation_promoted=" << diag.mapping_probation_promoted
+           << " mapping_probation_culled_no_inlier=" << diag.mapping_probation_culled_no_inlier
+           << " mapping_probation_culled_expired=" << diag.mapping_probation_culled_expired
+           << " mapping_probation_culled_outlier=" << diag.mapping_probation_culled_outlier;
         AppendScalarDistributionStats(os, "all_depth", diag.allDepth, true);
         AppendScalarDistributionStats(os, "kept_depth", diag.keptDepth, true);
         AppendScalarDistributionStats(os, "found_cull_depth", diag.foundRatioCulledDepth, true);
@@ -822,6 +1190,52 @@ void LocalMapping::MapPointCulling()
             }
             lit = mlpRecentAddedMapPoints.erase(lit);
         }
+        else if(IsActiveCloseMidMappingProbation(pMP))
+        {
+            if(bPrintDiag)
+            {
+                AccumulateMappingProbationActive(diag);
+                AccumulateMappingProbationActive(*pSourceDiag);
+            }
+
+            if(pMP->TryPromoteMappingProbation(nCurrentKFid))
+            {
+                if(bPrintDiag)
+                {
+                    AccumulateMappingProbationPromoted(diag);
+                    AccumulateMappingProbationPromoted(*pSourceDiag);
+                    AccumulateRecentMapPointCullingDiagAgedOut(diag, pMP);
+                    AccumulateRecentMapPointCullingDiagAgedOut(*pSourceDiag, pMP);
+                }
+                lit = mlpRecentAddedMapPoints.erase(lit);
+            }
+            else
+            {
+                const MappingProbationCullReason cullReason =
+                    ClassifyMappingProbationCull(pMP, nCurrentKFid);
+                if(cullReason != MappingProbationCullReason::None)
+                {
+                    if(bPrintDiag)
+                    {
+                        AccumulateMappingProbationCulled(diag, cullReason);
+                        AccumulateMappingProbationCulled(*pSourceDiag, cullReason);
+                    }
+                    pMP->SetBadFlag();
+                    lit = mlpRecentAddedMapPoints.erase(lit);
+                }
+                else
+                {
+                    if(bPrintDiag)
+                    {
+                        AccumulateMappingProbationKept(diag);
+                        AccumulateMappingProbationKept(*pSourceDiag);
+                        AccumulateRecentMapPointCullingDiagKept(diag, pMP);
+                        AccumulateRecentMapPointCullingDiagKept(*pSourceDiag, pMP);
+                    }
+                    lit++;
+                }
+            }
+        }
         else if(pMP->GetFoundRatio()<0.25f)
         {
             if(bPrintDiag)
@@ -1100,12 +1514,775 @@ void LocalMapping::CreateNewMapPoints()
     int close5To10Candidates = 0;
     int close5To10ParallaxReject = 0;
     int close5To10Created = 0;
+    int mappingFeatureBudgetCandidate = 0;
+    int mappingFeatureBudgetAccept = 0;
+    int mappingFeatureBudgetReject = 0;
+    int mappingFeatureBudgetRejectGrid = 0;
+    int mappingFeatureBudgetRejectLowResponse = 0;
+    int mappingFeatureBudgetRejectOctave2p = 0;
+    int mappingFeatureBudgetRejectEdgeGrid = 0;
+    int mappingFeatureBudgetRejectDuplicate = 0;
+    int mappingFeatureBudgetRejectKeypointDuplicate = 0;
+    int mappingFeatureBudgetUniqueCandidates = 0;
+    int mappingFeatureBudgetAcceptedLowResponse = 0;
+    int mappingFeatureBudgetAcceptedOctave2p = 0;
+    int mappingFeatureBudgetAcceptedEdgeGrid = 0;
+    int mappingFeatureRepeatabilityCandidate = 0;
+    int mappingFeatureRepeatabilityRepeatableCandidate = 0;
+    int mappingFeatureRepeatabilitySingleSupportCandidate = 0;
+    int mappingFeatureRepeatabilityAccept = 0;
+    int mappingFeatureRepeatabilityFallbackAccept = 0;
+    int mappingFeatureRepeatabilityRejectSingleSupport = 0;
+    int mappingFeatureRepeatabilityShadowRejectSingleSupport = 0;
+    int mappingTrackletCandidate = 0;
+    int mappingTrackletCreated = 0;
+    int mappingTrackletUpdated = 0;
+    int mappingTrackletPromoted = 0;
+    int mappingTrackletExpired = 0;
+    int mappingTrackletConflict = 0;
+    int mappingTrackletPromotionFailed = 0;
+    ScalarDistributionStats mappingTrackletPromotedDepthStats;
+    int mappingFeatureBudgetCellCounts[kMappingFeatureBudgetGridCells] = {};
+    int createdMpsTotal = 0;
+    int createdMpsDepth0To5 = 0;
+    int createdMpsDepth5To10 = 0;
+    int createdMpsDepth10To30 = 0;
+    int createdMpsDepth30To100 = 0;
+    int createdMpsDepth100p = 0;
+    int createdMpsDepthInvalid = 0;
+    int mappingProbationCreated = 0;
+    int mappingProbationCreated0To5 = 0;
+    int mappingProbationCreated5To10 = 0;
+    ScalarDistributionStats createdTriangDepthStats;
+    static constexpr int kMappingFeatureGridBins = 4;
+    static constexpr int kMappingFeatureOctaveBins = 4;
+    static constexpr int kMappingFeatureResponseBins = 4;
+    static constexpr int kMappingFeatureDepthBins = 6;
+    static constexpr int kMappingFeatureCombinedBins = 6;
+    MappingFeatureCreateStats mappingFeatureGridStats[kMappingFeatureGridBins];
+    MappingFeatureCreateStats mappingFeatureOctaveStats[kMappingFeatureOctaveBins];
+    MappingFeatureCreateStats mappingFeatureResponseStats[kMappingFeatureResponseBins];
+    MappingFeatureCreateStats mappingFeatureDepthStats[kMappingFeatureDepthBins];
+    MappingFeatureCreateStats mappingFeatureCombinedStats[kMappingFeatureCombinedBins];
+
+    struct MappingTriangulationCandidate
+    {
+        KeyFrame* pKF1 = nullptr;
+        KeyFrame* pKF2 = nullptr;
+        size_t idx1 = 0;
+        size_t idx2 = 0;
+        Eigen::Vector3f x3D = Eigen::Vector3f::Zero();
+        float triangDepth = -1.0f;
+        float cosParallaxRays = 1.0f;
+        float reprojChi2First = std::numeric_limits<float>::quiet_NaN();
+        float reprojChi2Second = std::numeric_limits<float>::quiet_NaN();
+        float reprojChi2Max = std::numeric_limits<float>::quiet_NaN();
+        float reprojChi2Mean = std::numeric_limits<float>::quiet_NaN();
+        float scaleLogResidual = std::numeric_limits<float>::quiet_NaN();
+        float scaleLogMargin = std::numeric_limits<float>::quiet_NaN();
+        MapPoint::TriangulationMatchBackend triangBackend = MapPoint::kTriangBackendUnknown;
+        int mappingFeatureGridX = -1;
+        int mappingFeatureGridY = -1;
+        int mappingFeatureGridBin = 0;
+        int mappingFeatureOctaveBin = 0;
+        int mappingFeatureResponseBin = 0;
+        int mappingFeatureStereoQualityBin = 0;
+        int mappingFeatureCombinedBin = 0;
+        int mappingFeatureBudgetCell = -1;
+        int octave = -1;
+        float response = 0.0f;
+        bool bPointStereo = false;
+        bool bCloseRayCandidate = false;
+        bool bCloseRay0To5 = false;
+        bool bCloseRay5To10 = false;
+        float qualityScore = 0.0f;
+        int repeatabilitySupport = 1;
+        bool bRepeatabilitySupported = false;
+    };
+
+    std::vector<MappingTriangulationCandidate> vPendingMappingFeatureCandidates;
+
+    auto computeMappingCandidateQualityScore =
+        [](const MappingTriangulationCandidate& candidate) -> float
+    {
+        const float parallaxMargin =
+            std::max(0.0f, 0.9994f - candidate.cosParallaxRays);
+        const float parallaxScore = std::min(2.0f, parallaxMargin * 1000.0f);
+        const float reprojPenalty =
+            std::isfinite(candidate.reprojChi2Max) ? 0.45f * candidate.reprojChi2Max : 3.0f;
+        const float scaleScore =
+            std::isfinite(candidate.scaleLogMargin) ?
+                std::max(-1.0f, std::min(1.0f, candidate.scaleLogMargin)) : -1.0f;
+        const float responseScore =
+            std::isfinite(candidate.response) ?
+                std::max(0.0f, std::min(2.0f, candidate.response * 2.0f)) : 0.0f;
+        const float octavePenalty =
+            candidate.octave >= 0 ? 0.60f * static_cast<float>(candidate.octave) : 1.0f;
+        const float edgePenalty = candidate.mappingFeatureGridBin == 1 ? 0.15f : 0.0f;
+
+        return 2.0f * parallaxScore + 1.5f * scaleScore + responseScore -
+               reprojPenalty - octavePenalty - edgePenalty;
+    };
+
+    auto isKeyFrameSlotFree = [](KeyFrame* pKF, const size_t idx) -> bool
+    {
+        if(!pKF)
+            return false;
+        MapPoint* pExisting = pKF->GetMapPoint(idx);
+        return !pExisting || pExisting->isBad();
+    };
+
+    auto createMapPointFromCandidate =
+        [&](const MappingTriangulationCandidate& candidate) -> bool
+    {
+        KeyFrame* pKF1 = candidate.pKF1 ? candidate.pKF1 : mpCurrentKeyFrame;
+        if(!pKF1 || !candidate.pKF2)
+            return false;
+        if(!isKeyFrameSlotFree(pKF1, candidate.idx1) ||
+           !isKeyFrameSlotFree(candidate.pKF2, candidate.idx2))
+        {
+            return false;
+        }
+
+        MapPoint* pMP = new MapPoint(candidate.x3D,
+                                     pKF1,
+                                     mpAtlas->GetCurrentMap());
+        pMP->SetCreationSource(MapPoint::kCreationSourceLocalMappingTriangulation);
+        pMP->SetTriangulationQuality(candidate.triangDepth,
+                                     candidate.cosParallaxRays,
+                                     candidate.reprojChi2Max,
+                                     candidate.reprojChi2Mean,
+                                     candidate.scaleLogResidual,
+                                     candidate.scaleLogMargin,
+                                     candidate.triangBackend,
+                                     pKF1->mnId,
+                                     candidate.pKF2->mnId);
+        pMP->SetMappingFeatureQuality(pKF1->mnId,
+                                      static_cast<int>(candidate.idx1),
+                                      candidate.mappingFeatureGridX,
+                                      candidate.mappingFeatureGridY,
+                                      candidate.octave,
+                                      candidate.response,
+                                      candidate.triangDepth,
+                                      Frame::kStereoBirthInvalid);
+        if(kEnableMappingProbationBehavior &&
+           !bUseORB &&
+           (candidate.bCloseRay0To5 || candidate.bCloseRay5To10))
+        {
+            pMP->SetMappingProbation(true,
+                                     mpCurrentKeyFrame->mnId,
+                                     candidate.triangDepth);
+            mappingProbationCreated++;
+            if(candidate.bCloseRay0To5)
+                mappingProbationCreated0To5++;
+            if(candidate.bCloseRay5To10)
+                mappingProbationCreated5To10++;
+        }
+        if(pMP->HasMappingFeatureQuality())
+        {
+            const int depthBin = LocalMappingDepthBinIndex(pMP->mMappingFeatureDepth);
+            const bool bCloseMappingFeature =
+                std::isfinite(pMP->mMappingFeatureDepth) &&
+                pMP->mMappingFeatureDepth > 0.0f &&
+                pMP->mMappingFeatureDepth <= mpCurrentKeyFrame->mThDepth;
+            AccumulateMappingFeatureCreateStats(mappingFeatureGridStats[candidate.mappingFeatureGridBin],
+                                                pMP->mMappingFeatureDepth,
+                                                bCloseMappingFeature);
+            AccumulateMappingFeatureCreateStats(mappingFeatureOctaveStats[candidate.mappingFeatureOctaveBin],
+                                                pMP->mMappingFeatureDepth,
+                                                bCloseMappingFeature);
+            AccumulateMappingFeatureCreateStats(mappingFeatureResponseStats[candidate.mappingFeatureResponseBin],
+                                                pMP->mMappingFeatureDepth,
+                                                bCloseMappingFeature);
+            AccumulateMappingFeatureCreateStats(mappingFeatureDepthStats[depthBin],
+                                                pMP->mMappingFeatureDepth,
+                                                bCloseMappingFeature);
+            AccumulateMappingFeatureCreateStats(mappingFeatureCombinedStats[candidate.mappingFeatureCombinedBin],
+                                                pMP->mMappingFeatureDepth,
+                                                bCloseMappingFeature);
+        }
+
+        if(candidate.bPointStereo)
+            countStereo++;
+        createdMpsTotal++;
+        AccumulateScalarDistribution(createdTriangDepthStats, candidate.triangDepth, true);
+        switch(LocalMappingDepthBinIndex(candidate.triangDepth))
+        {
+            case 1:
+                createdMpsDepth0To5++;
+                break;
+            case 2:
+                createdMpsDepth5To10++;
+                break;
+            case 3:
+                createdMpsDepth10To30++;
+                break;
+            case 4:
+                createdMpsDepth30To100++;
+                break;
+            case 5:
+                createdMpsDepth100p++;
+                break;
+            case 0:
+            default:
+                createdMpsDepthInvalid++;
+                break;
+        }
+        if(candidate.bCloseRayCandidate)
+        {
+            closeCreated++;
+            if(candidate.bCloseRay0To5)
+                close0To5Created++;
+            if(candidate.bCloseRay5To10)
+                close5To10Created++;
+        }
+
+        pMP->AddObservation(pKF1, candidate.idx1);
+        pMP->AddObservation(candidate.pKF2, candidate.idx2);
+
+        pKF1->AddMapPoint(pMP, candidate.idx1);
+        candidate.pKF2->AddMapPoint(pMP, candidate.idx2);
+
+        pMP->ComputeDistinctiveDescriptors();
+        pMP->UpdateNormalAndDepth();
+
+        mpAtlas->AddMapPoint(pMP);
+        mlpRecentAddedMapPoints.push_back(pMP);
+        return true;
+    };
+
+    auto pendingObservationKey =
+        [](KeyFrame* pKF, const size_t idx) -> std::pair<long unsigned int, size_t>
+    {
+        return std::make_pair(pKF ? pKF->mnId : 0UL, idx);
+    };
+
+    auto erasePendingTrackletIndex = [&](PendingMappingTracklet& tracklet)
+    {
+        for(const PendingMappingObservation& obs : tracklet.observations)
+        {
+            if(obs.pKF)
+                mPendingMappingObservationIndex.erase(pendingObservationKey(obs.pKF, obs.idx));
+        }
+    };
+
+    auto expireOldPendingTracklets = [&]()
+    {
+        if(!mpCurrentKeyFrame)
+            return;
+        const long unsigned int currentKfId = mpCurrentKeyFrame->mnId;
+        for(PendingMappingTracklet& tracklet : mvPendingMappingTracklets)
+        {
+            if(tracklet.bad)
+                continue;
+            const bool bTooOld =
+                currentKfId > tracklet.firstKFid &&
+                static_cast<int>(currentKfId - tracklet.firstKFid) > kPendingMappingTrackletMaxAgeKFs;
+            const bool bTooManyConflicts =
+                tracklet.conflictCount > kPendingMappingTrackletMaxConflicts;
+            if(!bTooOld && !bTooManyConflicts)
+                continue;
+            erasePendingTrackletIndex(tracklet);
+            tracklet.bad = true;
+            mappingTrackletExpired++;
+        }
+    };
+
+    auto addPendingObservation =
+        [&](PendingMappingTracklet& tracklet,
+            const size_t trackletIndex,
+            KeyFrame* pKF,
+            const size_t idx) -> bool
+    {
+        if(!pKF)
+            return false;
+        const auto key = pendingObservationKey(pKF, idx);
+        const auto itExisting = mPendingMappingObservationIndex.find(key);
+        if(itExisting != mPendingMappingObservationIndex.end())
+        {
+            if(itExisting->second == trackletIndex)
+                return false;
+            tracklet.conflictCount++;
+            mappingTrackletConflict++;
+            return false;
+        }
+        if(!isKeyFrameSlotFree(pKF, idx))
+        {
+            tracklet.conflictCount++;
+            mappingTrackletConflict++;
+            return false;
+        }
+        PendingMappingObservation obs;
+        obs.pKF = pKF;
+        obs.idx = idx;
+        tracklet.observations.push_back(obs);
+        mPendingMappingObservationIndex[key] = trackletIndex;
+        return true;
+    };
+
+    auto updatePendingTrackletBest =
+        [](PendingMappingTracklet& tracklet,
+           const MappingTriangulationCandidate& candidate)
+    {
+        if(candidate.qualityScore <= tracklet.qualityScore)
+            return;
+        tracklet.pBestKF1 = candidate.pKF1;
+        tracklet.pBestKF2 = candidate.pKF2;
+        tracklet.bestIdx1 = candidate.idx1;
+        tracklet.bestIdx2 = candidate.idx2;
+        tracklet.x3D = candidate.x3D;
+        tracklet.triangDepth = candidate.triangDepth;
+        tracklet.cosParallaxRays = candidate.cosParallaxRays;
+        tracklet.reprojChi2Max = candidate.reprojChi2Max;
+        tracklet.reprojChi2Mean = candidate.reprojChi2Mean;
+        tracklet.scaleLogResidual = candidate.scaleLogResidual;
+        tracklet.scaleLogMargin = candidate.scaleLogMargin;
+        tracklet.triangBackend = candidate.triangBackend;
+        tracklet.mappingFeatureGridX = candidate.mappingFeatureGridX;
+        tracklet.mappingFeatureGridY = candidate.mappingFeatureGridY;
+        tracklet.mappingFeatureGridBin = candidate.mappingFeatureGridBin;
+        tracklet.mappingFeatureOctaveBin = candidate.mappingFeatureOctaveBin;
+        tracklet.mappingFeatureResponseBin = candidate.mappingFeatureResponseBin;
+        tracklet.mappingFeatureStereoQualityBin = candidate.mappingFeatureStereoQualityBin;
+        tracklet.mappingFeatureCombinedBin = candidate.mappingFeatureCombinedBin;
+        tracklet.octave = candidate.octave;
+        tracklet.response = candidate.response;
+        tracklet.bCloseRay0To5 = candidate.bCloseRay0To5;
+        tracklet.bCloseRay5To10 = candidate.bCloseRay5To10;
+        tracklet.qualityScore = candidate.qualityScore;
+    };
+
+    auto createMapPointFromPendingTracklet =
+        [&](PendingMappingTracklet& tracklet) -> bool
+    {
+        if(tracklet.bad ||
+           tracklet.updatePasses < kPendingMappingTrackletMinUpdatePasses ||
+           static_cast<int>(tracklet.observations.size()) < kPendingMappingTrackletMinObservations ||
+           !tracklet.pBestKF1 ||
+           !tracklet.pBestKF2)
+        {
+            return false;
+        }
+
+        std::vector<PendingMappingObservation> freeObservations;
+        freeObservations.reserve(tracklet.observations.size());
+        std::set<long unsigned int> uniqueKFs;
+        std::set<long unsigned int> selectedObservationKFs;
+        for(const PendingMappingObservation& obs : tracklet.observations)
+        {
+            if(!obs.pKF || obs.pKF->isBad())
+                continue;
+            if(!isKeyFrameSlotFree(obs.pKF, obs.idx))
+                continue;
+            if(!selectedObservationKFs.insert(obs.pKF->mnId).second)
+                continue;
+            freeObservations.push_back(obs);
+            uniqueKFs.insert(obs.pKF->mnId);
+        }
+
+        if(static_cast<int>(uniqueKFs.size()) < kPendingMappingTrackletMinObservations ||
+           freeObservations.size() < 2)
+        {
+            mappingTrackletPromotionFailed++;
+            return false;
+        }
+
+        KeyFrame* pCreationKF = freeObservations.front().pKF;
+        if(!pCreationKF)
+        {
+            mappingTrackletPromotionFailed++;
+            return false;
+        }
+
+        MapPoint* pMP = new MapPoint(tracklet.x3D,
+                                     pCreationKF,
+                                     mpAtlas->GetCurrentMap());
+        pMP->SetCreationSource(MapPoint::kCreationSourceLocalMappingTriangulation);
+        pMP->SetTriangulationQuality(tracklet.triangDepth,
+                                     tracklet.cosParallaxRays,
+                                     tracklet.reprojChi2Max,
+                                     tracklet.reprojChi2Mean,
+                                     tracklet.scaleLogResidual,
+                                     tracklet.scaleLogMargin,
+                                     tracklet.triangBackend,
+                                     tracklet.pBestKF1->mnId,
+                                     tracklet.pBestKF2->mnId);
+        pMP->SetMappingFeatureQuality(tracklet.pBestKF1->mnId,
+                                      static_cast<int>(tracklet.bestIdx1),
+                                      tracklet.mappingFeatureGridX,
+                                      tracklet.mappingFeatureGridY,
+                                      tracklet.octave,
+                                      tracklet.response,
+                                      tracklet.triangDepth,
+                                      Frame::kStereoBirthInvalid);
+
+        if(pMP->HasMappingFeatureQuality())
+        {
+            const int depthBin = LocalMappingDepthBinIndex(pMP->mMappingFeatureDepth);
+            const bool bCloseMappingFeature =
+                std::isfinite(pMP->mMappingFeatureDepth) &&
+                pMP->mMappingFeatureDepth > 0.0f &&
+                pMP->mMappingFeatureDepth <= mpCurrentKeyFrame->mThDepth;
+            AccumulateMappingFeatureCreateStats(mappingFeatureGridStats[tracklet.mappingFeatureGridBin],
+                                                pMP->mMappingFeatureDepth,
+                                                bCloseMappingFeature);
+            AccumulateMappingFeatureCreateStats(mappingFeatureOctaveStats[tracklet.mappingFeatureOctaveBin],
+                                                pMP->mMappingFeatureDepth,
+                                                bCloseMappingFeature);
+            AccumulateMappingFeatureCreateStats(mappingFeatureResponseStats[tracklet.mappingFeatureResponseBin],
+                                                pMP->mMappingFeatureDepth,
+                                                bCloseMappingFeature);
+            AccumulateMappingFeatureCreateStats(mappingFeatureDepthStats[depthBin],
+                                                pMP->mMappingFeatureDepth,
+                                                bCloseMappingFeature);
+            AccumulateMappingFeatureCreateStats(mappingFeatureCombinedStats[tracklet.mappingFeatureCombinedBin],
+                                                pMP->mMappingFeatureDepth,
+                                                bCloseMappingFeature);
+        }
+
+        createdMpsTotal++;
+        AccumulateScalarDistribution(createdTriangDepthStats, tracklet.triangDepth, true);
+        AccumulateScalarDistribution(mappingTrackletPromotedDepthStats, tracklet.triangDepth, true);
+        switch(LocalMappingDepthBinIndex(tracklet.triangDepth))
+        {
+            case 1:
+                createdMpsDepth0To5++;
+                break;
+            case 2:
+                createdMpsDepth5To10++;
+                break;
+            case 3:
+                createdMpsDepth10To30++;
+                break;
+            case 4:
+                createdMpsDepth30To100++;
+                break;
+            case 5:
+                createdMpsDepth100p++;
+                break;
+            case 0:
+            default:
+                createdMpsDepthInvalid++;
+                break;
+        }
+
+        closeCreated++;
+        if(tracklet.bCloseRay0To5)
+            close0To5Created++;
+        if(tracklet.bCloseRay5To10)
+            close5To10Created++;
+
+        for(const PendingMappingObservation& obs : freeObservations)
+        {
+            pMP->AddObservation(obs.pKF, obs.idx);
+            obs.pKF->AddMapPoint(pMP, obs.idx);
+        }
+
+        pMP->ComputeDistinctiveDescriptors();
+        pMP->UpdateNormalAndDepth();
+
+        mpAtlas->AddMapPoint(pMP);
+        mlpRecentAddedMapPoints.push_back(pMP);
+
+        erasePendingTrackletIndex(tracklet);
+        tracklet.bad = true;
+        mappingTrackletPromoted++;
+        return true;
+    };
+
+    auto updateOrCreatePendingTracklet =
+        [&](const MappingTriangulationCandidate& candidate)
+    {
+        if(!candidate.pKF1 || !candidate.pKF2)
+            return;
+
+        mappingTrackletCandidate++;
+        const auto key1 = pendingObservationKey(candidate.pKF1, candidate.idx1);
+        const auto key2 = pendingObservationKey(candidate.pKF2, candidate.idx2);
+        size_t trackletIndex = std::numeric_limits<size_t>::max();
+        const auto it1 = mPendingMappingObservationIndex.find(key1);
+        const auto it2 = mPendingMappingObservationIndex.find(key2);
+        if(it1 != mPendingMappingObservationIndex.end())
+            trackletIndex = it1->second;
+        if(it2 != mPendingMappingObservationIndex.end())
+        {
+            if(trackletIndex == std::numeric_limits<size_t>::max())
+            {
+                trackletIndex = it2->second;
+            }
+            else if(trackletIndex != it2->second &&
+                    trackletIndex < mvPendingMappingTracklets.size())
+            {
+                mvPendingMappingTracklets[trackletIndex].conflictCount++;
+                mappingTrackletConflict++;
+            }
+        }
+
+        if(trackletIndex == std::numeric_limits<size_t>::max() ||
+           trackletIndex >= mvPendingMappingTracklets.size() ||
+           mvPendingMappingTracklets[trackletIndex].bad)
+        {
+            PendingMappingTracklet tracklet;
+            tracklet.id = mnNextPendingMappingTrackletId++;
+            tracklet.firstKFid = candidate.pKF1->mnId;
+            tracklet.lastKFid = std::max(candidate.pKF1->mnId, candidate.pKF2->mnId);
+            tracklet.lastUpdateKFid = mpCurrentKeyFrame ? mpCurrentKeyFrame->mnId : candidate.pKF1->mnId;
+            tracklet.updatePasses = 1;
+            updatePendingTrackletBest(tracklet, candidate);
+            mvPendingMappingTracklets.push_back(tracklet);
+            trackletIndex = mvPendingMappingTracklets.size() - 1;
+            PendingMappingTracklet& storedTracklet = mvPendingMappingTracklets.back();
+            addPendingObservation(storedTracklet, trackletIndex, candidate.pKF1, candidate.idx1);
+            addPendingObservation(storedTracklet, trackletIndex, candidate.pKF2, candidate.idx2);
+            mappingTrackletCreated++;
+            return;
+        }
+
+        PendingMappingTracklet& tracklet = mvPendingMappingTracklets[trackletIndex];
+        const long unsigned int currentKfId =
+            mpCurrentKeyFrame ? mpCurrentKeyFrame->mnId : candidate.pKF1->mnId;
+        if(tracklet.lastUpdateKFid != currentKfId)
+        {
+            tracklet.updatePasses++;
+            tracklet.lastUpdateKFid = currentKfId;
+        }
+        tracklet.lastKFid =
+            std::max(tracklet.lastKFid, std::max(candidate.pKF1->mnId, candidate.pKF2->mnId));
+        updatePendingTrackletBest(tracklet, candidate);
+        addPendingObservation(tracklet, trackletIndex, candidate.pKF1, candidate.idx1);
+        addPendingObservation(tracklet, trackletIndex, candidate.pKF2, candidate.idx2);
+        mappingTrackletUpdated++;
+        createMapPointFromPendingTracklet(tracklet);
+    };
+
+    const bool bUsePendingMappingTracklets =
+        kEnableXFeatCloseMidPendingTracklet &&
+        !bUseORB &&
+        mpAtlas &&
+        mpAtlas->GetCurrentMap() &&
+        mpAtlas->GetCurrentMap()->KeyFramesInMap() >=
+            static_cast<long unsigned int>(kPendingMappingTrackletBootstrapKFs);
+    expireOldPendingTracklets();
+
+    auto processPendingMappingFeatureCandidates = [&]()
+    {
+        std::map<size_t, std::set<long unsigned int>> currentKeypointSupportKFs;
+        for(const MappingTriangulationCandidate& candidate : vPendingMappingFeatureCandidates)
+        {
+            if(candidate.pKF2)
+                currentKeypointSupportKFs[candidate.idx1].insert(candidate.pKF2->mnId);
+        }
+
+        for(MappingTriangulationCandidate& candidate : vPendingMappingFeatureCandidates)
+        {
+            const auto itSupport = currentKeypointSupportKFs.find(candidate.idx1);
+            candidate.repeatabilitySupport =
+                itSupport != currentKeypointSupportKFs.end()
+                    ? static_cast<int>(itSupport->second.size())
+                    : 1;
+            candidate.bRepeatabilitySupported = candidate.repeatabilitySupport >= 2;
+            if(candidate.bRepeatabilitySupported)
+                candidate.qualityScore += 1.0f + 0.25f * static_cast<float>(candidate.repeatabilitySupport - 2);
+        }
+
+        std::sort(vPendingMappingFeatureCandidates.begin(),
+                  vPendingMappingFeatureCandidates.end(),
+                  [](const MappingTriangulationCandidate& a,
+                     const MappingTriangulationCandidate& b)
+                  {
+                      if(a.bRepeatabilitySupported != b.bRepeatabilitySupported)
+                          return a.bRepeatabilitySupported;
+                      if(a.repeatabilitySupport != b.repeatabilitySupport)
+                          return a.repeatabilitySupport > b.repeatabilitySupport;
+                      if(a.qualityScore != b.qualityScore)
+                          return a.qualityScore > b.qualityScore;
+                      if(a.reprojChi2Max != b.reprojChi2Max)
+                          return a.reprojChi2Max < b.reprojChi2Max;
+                      if(a.cosParallaxRays != b.cosParallaxRays)
+                          return a.cosParallaxRays < b.cosParallaxRays;
+                      if(a.response != b.response)
+                          return a.response > b.response;
+                      if(a.octave != b.octave)
+                          return a.octave < b.octave;
+                      if(a.idx1 != b.idx1)
+                          return a.idx1 < b.idx1;
+                      return a.idx2 < b.idx2;
+                  });
+
+        std::unordered_set<size_t> usedCurrentKeypoints;
+        usedCurrentKeypoints.reserve(vPendingMappingFeatureCandidates.size());
+        std::vector<MappingTriangulationCandidate> vUniqueCandidates;
+        vUniqueCandidates.reserve(vPendingMappingFeatureCandidates.size());
+        for(const MappingTriangulationCandidate& candidate : vPendingMappingFeatureCandidates)
+        {
+            if(!usedCurrentKeypoints.insert(candidate.idx1).second)
+            {
+                mappingFeatureBudgetReject++;
+                mappingFeatureBudgetRejectDuplicate++;
+                mappingFeatureBudgetRejectKeypointDuplicate++;
+                continue;
+            }
+            vUniqueCandidates.push_back(candidate);
+        }
+        mappingFeatureBudgetUniqueCandidates =
+            static_cast<int>(vUniqueCandidates.size());
+        for(const MappingTriangulationCandidate& candidate : vUniqueCandidates)
+        {
+            mappingFeatureRepeatabilityCandidate++;
+            if(candidate.bRepeatabilitySupported)
+                mappingFeatureRepeatabilityRepeatableCandidate++;
+            else
+                mappingFeatureRepeatabilitySingleSupportCandidate++;
+        }
+
+        static constexpr int kMappingFeatureBudgetDepthGroups = 3;
+        static constexpr int kMappingFeatureSingleSupportGlobalCap = 45;
+        static constexpr int kMappingFeatureSingleSupportGroupCap = 1;
+        const int nGroups =
+            kMappingFeatureBudgetGridCells * kMappingFeatureBudgetDepthGroups;
+        std::vector<std::vector<size_t>> groupedCandidates(nGroups);
+        for(size_t i = 0; i < vUniqueCandidates.size(); ++i)
+        {
+            const MappingTriangulationCandidate& candidate = vUniqueCandidates[i];
+            int depthGroup = 2;
+            const int depthBin = LocalMappingDepthBinIndex(candidate.triangDepth);
+            if(depthBin == 1)
+                depthGroup = 0;
+            else if(depthBin == 2)
+                depthGroup = 1;
+
+            int cell = candidate.mappingFeatureBudgetCell;
+            if(cell < 0 || cell >= kMappingFeatureBudgetGridCells)
+                cell = kMappingFeatureBudgetGridCells - 1;
+            groupedCandidates[cell * kMappingFeatureBudgetDepthGroups + depthGroup].push_back(i);
+        }
+
+        std::vector<size_t> groupOffsets(groupedCandidates.size(), 0);
+        std::vector<int> singleSupportGroupAccepted(groupedCandidates.size(), 0);
+        bool bAdvanced = true;
+        while(bAdvanced)
+        {
+            bAdvanced = false;
+            for(size_t groupIdx = 0; groupIdx < groupedCandidates.size(); ++groupIdx)
+            {
+                if(groupOffsets[groupIdx] >= groupedCandidates[groupIdx].size())
+                    continue;
+                bAdvanced = true;
+
+                const MappingTriangulationCandidate& candidate =
+                    vUniqueCandidates[groupedCandidates[groupIdx][groupOffsets[groupIdx]++]];
+                bool bBudgetReject = false;
+                bool bRejectGrid = false;
+                bool bRejectLowResponse = false;
+                bool bRejectOctave2p = false;
+                bool bRejectEdgeGrid = false;
+
+                if(!isKeyFrameSlotFree(mpCurrentKeyFrame, candidate.idx1) ||
+                   !isKeyFrameSlotFree(candidate.pKF2, candidate.idx2))
+                {
+                    mappingFeatureBudgetReject++;
+                    mappingFeatureBudgetRejectDuplicate++;
+                    continue;
+                }
+
+                if(candidate.mappingFeatureBudgetCell >= 0 &&
+                   candidate.mappingFeatureBudgetCell < kMappingFeatureBudgetGridCells &&
+                   mappingFeatureBudgetCellCounts[candidate.mappingFeatureBudgetCell] >=
+                       MappingFeatureBudgetCellCap(candidate.mappingFeatureGridBin))
+                {
+                    bBudgetReject = true;
+                    bRejectGrid = true;
+                }
+
+                if(candidate.mappingFeatureResponseBin == 1 &&
+                   mappingFeatureBudgetAcceptedLowResponse >= 80)
+                {
+                    bBudgetReject = true;
+                    bRejectLowResponse = true;
+                }
+
+                if(candidate.mappingFeatureOctaveBin == 3 &&
+                   mappingFeatureBudgetAcceptedOctave2p >= 100)
+                {
+                    bBudgetReject = true;
+                    bRejectOctave2p = true;
+                }
+
+                if(candidate.mappingFeatureGridBin == 1 &&
+                   mappingFeatureBudgetAcceptedEdgeGrid >= 70)
+                {
+                    bBudgetReject = true;
+                    bRejectEdgeGrid = true;
+                }
+
+                if(!candidate.bRepeatabilitySupported &&
+                   (mappingFeatureRepeatabilityFallbackAccept >= kMappingFeatureSingleSupportGlobalCap ||
+                    singleSupportGroupAccepted[groupIdx] >= kMappingFeatureSingleSupportGroupCap))
+                {
+                    mappingFeatureRepeatabilityShadowRejectSingleSupport++;
+                }
+
+                if(bBudgetReject)
+                {
+                    mappingFeatureBudgetReject++;
+                    if(bRejectGrid)
+                        mappingFeatureBudgetRejectGrid++;
+                    if(bRejectLowResponse)
+                        mappingFeatureBudgetRejectLowResponse++;
+                    if(bRejectOctave2p)
+                        mappingFeatureBudgetRejectOctave2p++;
+                    if(bRejectEdgeGrid)
+                        mappingFeatureBudgetRejectEdgeGrid++;
+                    continue;
+                }
+
+                mappingFeatureBudgetAccept++;
+                mappingFeatureRepeatabilityAccept++;
+                if(candidate.mappingFeatureBudgetCell >= 0 &&
+                   candidate.mappingFeatureBudgetCell < kMappingFeatureBudgetGridCells)
+                {
+                    mappingFeatureBudgetCellCounts[candidate.mappingFeatureBudgetCell]++;
+                }
+                if(candidate.mappingFeatureResponseBin == 1)
+                    mappingFeatureBudgetAcceptedLowResponse++;
+                if(candidate.mappingFeatureOctaveBin == 3)
+                    mappingFeatureBudgetAcceptedOctave2p++;
+                if(candidate.mappingFeatureGridBin == 1)
+                    mappingFeatureBudgetAcceptedEdgeGrid++;
+                if(!candidate.bRepeatabilitySupported)
+                {
+                    mappingFeatureRepeatabilityFallbackAccept++;
+                    singleSupportGroupAccepted[groupIdx]++;
+                }
+
+                if(bUsePendingMappingTracklets && candidate.bCloseRayCandidate)
+                {
+                    updateOrCreatePendingTracklet(candidate);
+                    continue;
+                }
+
+                if(!createMapPointFromCandidate(candidate))
+                {
+                    mappingFeatureBudgetAccept--;
+                    mappingFeatureRepeatabilityAccept--;
+                    if(!candidate.bRepeatabilitySupported)
+                        mappingFeatureRepeatabilityFallbackAccept--;
+                    mappingFeatureBudgetReject++;
+                    mappingFeatureBudgetRejectDuplicate++;
+                }
+            }
+        }
+        vPendingMappingFeatureCandidates.clear();
+    };
 
     // Search matches with epipolar restriction and triangulate
     for(size_t i=0; i<vpNeighKFs.size(); i++)
     {
         if(i>0 && CheckNewKeyFrames())
+        {
+            processPendingMappingFeatureCandidates();
             return;
+        }
 
         KeyFrame* pKF2 = vpNeighKFs[i];
 
@@ -1487,48 +2664,105 @@ void LocalMapping::CreateNewMapPoints()
                 continue;
             }
 
-            // Triangulation is succesfull
-            MapPoint* pMP = new MapPoint(x3D, mpCurrentKeyFrame, mpAtlas->GetCurrentMap());
-            pMP->SetCreationSource(MapPoint::kCreationSourceLocalMappingTriangulation);
-            const float reprojChi2Max = std::max(reprojChi2First, reprojChi2Second);
-            const float reprojChi2Mean = 0.5f * (reprojChi2First + reprojChi2Second);
-            pMP->SetTriangulationQuality(triangDepth,
-                                         cosParallaxRays,
-                                         reprojChi2Max,
-                                         reprojChi2Mean,
-                                         scaleLogResidual,
-                                         scaleLogMargin,
-                                         triangBackend,
-                                         mpCurrentKeyFrame->mnId,
-                                         pKF2->mnId);
-            if (bPointStereo)
-                countStereo++;
-            if(bCloseRayCandidate)
+            int mappingFeatureGridX = -1;
+            int mappingFeatureGridY = -1;
+            KeyFrameFeatureGridPosition(mpCurrentKeyFrame, kp1, mappingFeatureGridX, mappingFeatureGridY);
+            const int mappingFeatureGridBin =
+                MappingFeatureGridBin(mappingFeatureGridX, mappingFeatureGridY);
+            const int mappingFeatureOctaveBin = MappingFeatureOctaveBin(kp1.octave);
+            const int mappingFeatureResponseBin = MappingFeatureResponseBin(kp1.response);
+            const int mappingFeatureStereoQualityBin =
+                MappingFeatureStereoQualityBin(Frame::kStereoBirthInvalid);
+            const int mappingFeatureCombinedBin =
+                MappingFeatureCombinedBin(mappingFeatureGridBin,
+                                          mappingFeatureOctaveBin,
+                                          mappingFeatureResponseBin,
+                                          mappingFeatureStereoQualityBin);
+            const int mappingFeatureBudgetCell =
+                MappingFeatureBudgetCellIndex(mappingFeatureGridX, mappingFeatureGridY);
+            const bool bUseMappingFeatureBudget = !bUseORB && bCloseRayCandidate;
+            MappingTriangulationCandidate candidate;
+            candidate.pKF1 = mpCurrentKeyFrame;
+            candidate.pKF2 = pKF2;
+            candidate.idx1 = static_cast<size_t>(idx1);
+            candidate.idx2 = static_cast<size_t>(idx2);
+            candidate.x3D = x3D;
+            candidate.triangDepth = triangDepth;
+            candidate.cosParallaxRays = cosParallaxRays;
+            candidate.reprojChi2First = reprojChi2First;
+            candidate.reprojChi2Second = reprojChi2Second;
+            candidate.reprojChi2Max = std::max(reprojChi2First, reprojChi2Second);
+            candidate.reprojChi2Mean = 0.5f * (reprojChi2First + reprojChi2Second);
+            candidate.scaleLogResidual = scaleLogResidual;
+            candidate.scaleLogMargin = scaleLogMargin;
+            candidate.triangBackend = triangBackend;
+            candidate.mappingFeatureGridX = mappingFeatureGridX;
+            candidate.mappingFeatureGridY = mappingFeatureGridY;
+            candidate.mappingFeatureGridBin = mappingFeatureGridBin;
+            candidate.mappingFeatureOctaveBin = mappingFeatureOctaveBin;
+            candidate.mappingFeatureResponseBin = mappingFeatureResponseBin;
+            candidate.mappingFeatureStereoQualityBin = mappingFeatureStereoQualityBin;
+            candidate.mappingFeatureCombinedBin = mappingFeatureCombinedBin;
+            candidate.mappingFeatureBudgetCell = mappingFeatureBudgetCell;
+            candidate.octave = kp1.octave;
+            candidate.response = kp1.response;
+            candidate.bPointStereo = bPointStereo;
+            candidate.bCloseRayCandidate = bCloseRayCandidate;
+            candidate.bCloseRay0To5 = bCloseRay0To5;
+            candidate.bCloseRay5To10 = bCloseRay5To10;
+            candidate.qualityScore = computeMappingCandidateQualityScore(candidate);
+
+            if(bUseMappingFeatureBudget)
             {
-                closeCreated++;
-                if(bCloseRay0To5)
-                    close0To5Created++;
-                if(bCloseRay5To10)
-                    close5To10Created++;
+                mappingFeatureBudgetCandidate++;
+                vPendingMappingFeatureCandidates.push_back(candidate);
+                continue;
             }
-            
-            pMP->AddObservation(mpCurrentKeyFrame,idx1);
-            pMP->AddObservation(pKF2,idx2);
 
-            mpCurrentKeyFrame->AddMapPoint(pMP,idx1);
-            pKF2->AddMapPoint(pMP,idx2);
-
-            pMP->ComputeDistinctiveDescriptors();
-
-            pMP->UpdateNormalAndDepth();
-
-            mpAtlas->AddMapPoint(pMP);
-            mlpRecentAddedMapPoints.push_back(pMP);
+            createMapPointFromCandidate(candidate);
         }
     }
 
+    processPendingMappingFeatureCandidates();
+
+    int mappingTrackletAlive = 0;
+    int mappingTrackletObsSum = 0;
+    int mappingTrackletPassSum = 0;
+    int mappingTrackletAgeSum = 0;
+    if(mpCurrentKeyFrame)
+    {
+        for(const PendingMappingTracklet& tracklet : mvPendingMappingTracklets)
+        {
+            if(tracklet.bad)
+                continue;
+            mappingTrackletAlive++;
+            mappingTrackletObsSum += static_cast<int>(tracklet.observations.size());
+            mappingTrackletPassSum += tracklet.updatePasses;
+            if(mpCurrentKeyFrame->mnId >= tracklet.firstKFid)
+            {
+                mappingTrackletAgeSum +=
+                    static_cast<int>(mpCurrentKeyFrame->mnId - tracklet.firstKFid);
+            }
+        }
+    }
+    const double mappingTrackletObsAvg = mappingTrackletAlive > 0
+        ? static_cast<double>(mappingTrackletObsSum) / mappingTrackletAlive
+        : 0.0;
+    const double mappingTrackletPassAvg = mappingTrackletAlive > 0
+        ? static_cast<double>(mappingTrackletPassSum) / mappingTrackletAlive
+        : 0.0;
+    const double mappingTrackletAgeAvg = mappingTrackletAlive > 0
+        ? static_cast<double>(mappingTrackletAgeSum) / mappingTrackletAlive
+        : 0.0;
+
     if(bPrintTriangDiag)
     {
+        const std::set<KeyFrame*> connectedKFs = mpCurrentKeyFrame->GetConnectedKeyFrames();
+        const std::vector<KeyFrame*> covisibleKFs = mpCurrentKeyFrame->GetVectorCovisibleKeyFrames();
+        const int trackedObs2 = mpCurrentKeyFrame->TrackedMapPoints(2);
+        const int trackedObs3 = mpCurrentKeyFrame->TrackedMapPoints(3);
+        const float medianDepth = mpCurrentKeyFrame->ComputeSceneMedianDepth(2);
+
         std::cout << "[LocalMapping][TriangCreate]"
                   << " kf_id=" << mpCurrentKeyFrame->mnId
                   << " close_candidates=" << closeCandidates
@@ -1545,7 +2779,153 @@ void LocalMapping::CreateNewMapPoints()
                   << " close_5_10_candidates=" << close5To10Candidates
                   << " close_5_10_parallax_reject=" << close5To10ParallaxReject
                   << " close_5_10_created=" << close5To10Created
+                  << " mapping_feature_budget_candidate=" << mappingFeatureBudgetCandidate
+                  << " mapping_feature_budget_unique_candidates=" << mappingFeatureBudgetUniqueCandidates
+                  << " mapping_feature_budget_accept=" << mappingFeatureBudgetAccept
+                  << " mapping_feature_budget_reject=" << mappingFeatureBudgetReject
+                  << " mapping_feature_budget_reject_grid=" << mappingFeatureBudgetRejectGrid
+                  << " mapping_feature_budget_reject_low_response=" << mappingFeatureBudgetRejectLowResponse
+                  << " mapping_feature_budget_reject_octave2p=" << mappingFeatureBudgetRejectOctave2p
+                  << " mapping_feature_budget_reject_edge_grid=" << mappingFeatureBudgetRejectEdgeGrid
+                  << " mapping_feature_budget_reject_duplicate=" << mappingFeatureBudgetRejectDuplicate
+                  << " mapping_feature_budget_reject_keypoint_duplicate=" << mappingFeatureBudgetRejectKeypointDuplicate
+                  << " mapping_feature_budget_accepted_low_response=" << mappingFeatureBudgetAcceptedLowResponse
+                  << " mapping_feature_budget_accepted_octave2p=" << mappingFeatureBudgetAcceptedOctave2p
+                  << " mapping_feature_budget_accepted_edge_grid=" << mappingFeatureBudgetAcceptedEdgeGrid
+                  << " mapping_feature_repeatability_candidate=" << mappingFeatureRepeatabilityCandidate
+                  << " mapping_feature_repeatability_repeatable_candidate=" << mappingFeatureRepeatabilityRepeatableCandidate
+                  << " mapping_feature_repeatability_single_support_candidate=" << mappingFeatureRepeatabilitySingleSupportCandidate
+                  << " mapping_feature_repeatability_accept=" << mappingFeatureRepeatabilityAccept
+                  << " mapping_feature_repeatability_fallback_accept=" << mappingFeatureRepeatabilityFallbackAccept
+                  << " mapping_feature_repeatability_reject_single_support=" << mappingFeatureRepeatabilityRejectSingleSupport
+                  << " mapping_feature_repeatability_shadow_reject_single_support="
+                  << mappingFeatureRepeatabilityShadowRejectSingleSupport
+                  << " mapping_probation_created=" << mappingProbationCreated
+                  << " mapping_probation_created_0_5=" << mappingProbationCreated0To5
+                  << " mapping_probation_created_5_10=" << mappingProbationCreated5To10
+                  << " mapping_tracklet_enabled=" << (bUsePendingMappingTracklets ? 1 : 0)
+                  << " mapping_tracklet_candidate=" << mappingTrackletCandidate
+                  << " mapping_tracklet_created=" << mappingTrackletCreated
+                  << " mapping_tracklet_updated=" << mappingTrackletUpdated
+                  << " mapping_tracklet_promoted=" << mappingTrackletPromoted
+                  << " mapping_tracklet_expired=" << mappingTrackletExpired
+                  << " mapping_tracklet_conflict=" << mappingTrackletConflict
+                  << " mapping_tracklet_promotion_failed=" << mappingTrackletPromotionFailed
+                  << " mapping_tracklet_alive=" << mappingTrackletAlive
                   << std::endl;
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[LocalMapping][KFCreateStructure]"
+                  << " kf_id=" << mpCurrentKeyFrame->mnId
+                  << " neighbor_kfs=" << vpNeighKFs.size()
+                  << " connected_kfs=" << connectedKFs.size()
+                  << " covisible_kfs=" << covisibleKFs.size()
+                  << " tracked_mps_obs2=" << trackedObs2
+                  << " tracked_mps_obs3=" << trackedObs3
+                  << " median_depth=" << medianDepth
+                  << " created_mps_total=" << createdMpsTotal
+                  << " created_mps_close=" << closeCreated
+                  << " created_mps_far=" << std::max(0, createdMpsTotal - closeCreated)
+                  << " created_mps_depth_invalid=" << createdMpsDepthInvalid
+                  << " created_mps_depth_0_5=" << createdMpsDepth0To5
+                  << " created_mps_depth_5_10=" << createdMpsDepth5To10
+                  << " created_mps_depth_10_30=" << createdMpsDepth10To30
+                  << " created_mps_depth_30_100=" << createdMpsDepth30To100
+                  << " created_mps_depth_100p=" << createdMpsDepth100p
+                  << " close_stereo_fallback_reject=" << closeStereoFallbackReject
+                  << " close_parallax_reject=" << closeParallaxReject
+                  << " close_reproj_reject=" << closeReprojReject
+                  << " close_scale_reject=" << closeScaleReject
+                  << " mapping_feature_budget_candidate=" << mappingFeatureBudgetCandidate
+                  << " mapping_feature_budget_unique_candidates=" << mappingFeatureBudgetUniqueCandidates
+                  << " mapping_feature_budget_reject=" << mappingFeatureBudgetReject
+                  << " mapping_feature_repeatability_candidate=" << mappingFeatureRepeatabilityCandidate
+                  << " mapping_feature_repeatability_repeatable_candidate=" << mappingFeatureRepeatabilityRepeatableCandidate
+                  << " mapping_feature_repeatability_single_support_candidate=" << mappingFeatureRepeatabilitySingleSupportCandidate
+                  << " mapping_feature_repeatability_accept=" << mappingFeatureRepeatabilityAccept
+                  << " mapping_feature_repeatability_fallback_accept=" << mappingFeatureRepeatabilityFallbackAccept
+                  << " mapping_feature_repeatability_reject_single_support=" << mappingFeatureRepeatabilityRejectSingleSupport
+                  << " mapping_feature_repeatability_shadow_reject_single_support="
+                  << mappingFeatureRepeatabilityShadowRejectSingleSupport
+                  << " mapping_probation_created=" << mappingProbationCreated
+                  << " mapping_probation_created_0_5=" << mappingProbationCreated0To5
+                  << " mapping_probation_created_5_10=" << mappingProbationCreated5To10
+                  << " mapping_tracklet_enabled=" << (bUsePendingMappingTracklets ? 1 : 0)
+                  << " mapping_tracklet_candidate=" << mappingTrackletCandidate
+                  << " mapping_tracklet_created=" << mappingTrackletCreated
+                  << " mapping_tracklet_updated=" << mappingTrackletUpdated
+                  << " mapping_tracklet_promoted=" << mappingTrackletPromoted
+                  << " mapping_tracklet_expired=" << mappingTrackletExpired
+                  << " mapping_tracklet_conflict=" << mappingTrackletConflict
+                  << " mapping_tracklet_promotion_failed=" << mappingTrackletPromotionFailed
+                  << " mapping_tracklet_alive=" << mappingTrackletAlive;
+        AppendScalarDistributionStats(std::cout, "created_depth", createdTriangDepthStats, true);
+        std::cout << std::endl;
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[LocalMapping][MappingTracklet]"
+                  << " kf_id=" << mpCurrentKeyFrame->mnId
+                  << " frame_id=" << mpCurrentKeyFrame->mnFrameId
+                  << " enabled=" << (bUsePendingMappingTracklets ? 1 : 0)
+                  << " alive=" << mappingTrackletAlive
+                  << " created=" << mappingTrackletCreated
+                  << " updated=" << mappingTrackletUpdated
+                  << " promoted=" << mappingTrackletPromoted
+                  << " expired=" << mappingTrackletExpired
+                  << " conflict=" << mappingTrackletConflict
+                  << " promotion_failed=" << mappingTrackletPromotionFailed
+                  << " obs_avg=" << mappingTrackletObsAvg
+                  << " pass_avg=" << mappingTrackletPassAvg
+                  << " age_avg=" << mappingTrackletAgeAvg;
+        AppendScalarDistributionStats(std::cout, "promoted_depth", mappingTrackletPromotedDepthStats, true);
+        std::cout << std::endl;
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+
+        if(IsLocalMappingFeatureDiagEnabled())
+        {
+            for(int bin = 0; bin < kMappingFeatureGridBins; ++bin)
+            {
+                PrintMappingFeatureCreateStats(mpCurrentKeyFrame->mnId,
+                                               mpCurrentKeyFrame->mnFrameId,
+                                               "grid_bin",
+                                               MappingFeatureGridBinName(bin),
+                                               mappingFeatureGridStats[bin]);
+            }
+            for(int bin = 0; bin < kMappingFeatureOctaveBins; ++bin)
+            {
+                PrintMappingFeatureCreateStats(mpCurrentKeyFrame->mnId,
+                                               mpCurrentKeyFrame->mnFrameId,
+                                               "octave_bin",
+                                               MappingFeatureOctaveBinName(bin),
+                                               mappingFeatureOctaveStats[bin]);
+            }
+            for(int bin = 0; bin < kMappingFeatureResponseBins; ++bin)
+            {
+                PrintMappingFeatureCreateStats(mpCurrentKeyFrame->mnId,
+                                               mpCurrentKeyFrame->mnFrameId,
+                                               "response_bin",
+                                               MappingFeatureResponseBinName(bin),
+                                               mappingFeatureResponseStats[bin]);
+            }
+            for(int bin = 0; bin < kMappingFeatureDepthBins; ++bin)
+            {
+                PrintMappingFeatureCreateStats(mpCurrentKeyFrame->mnId,
+                                               mpCurrentKeyFrame->mnFrameId,
+                                               "creation_depth_bin",
+                                               LocalMappingDepthBinName(bin),
+                                               mappingFeatureDepthStats[bin]);
+            }
+            for(int bin = 0; bin < kMappingFeatureCombinedBins; ++bin)
+            {
+                PrintMappingFeatureCreateStats(mpCurrentKeyFrame->mnId,
+                                               mpCurrentKeyFrame->mnFrameId,
+                                               "mapping_feature_bin",
+                                               MappingFeatureCombinedBinName(bin),
+                                               mappingFeatureCombinedStats[bin]);
+            }
+        }
     }
 }
 
@@ -1946,6 +3326,9 @@ void LocalMapping::ResetIfRequested()
             cout << "LM: Reseting Atlas in Local Mapping..." << endl;
             mlNewKeyFrames.clear();
             mlpRecentAddedMapPoints.clear();
+            mvPendingMappingTracklets.clear();
+            mPendingMappingObservationIndex.clear();
+            mnNextPendingMappingTrackletId = 1;
             mbResetRequested = false;
             mbResetRequestedActiveMap = false;
 
@@ -1965,6 +3348,9 @@ void LocalMapping::ResetIfRequested()
             cout << "LM: Reseting current map in Local Mapping..." << endl;
             mlNewKeyFrames.clear();
             mlpRecentAddedMapPoints.clear();
+            mvPendingMappingTracklets.clear();
+            mPendingMappingObservationIndex.clear();
+            mnNextPendingMappingTrackletId = 1;
 
             // Inertial parameters
             mTinit = 0.f;

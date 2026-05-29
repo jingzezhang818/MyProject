@@ -21,6 +21,7 @@
 #define FRAME_H
 
 #include<vector>
+#include <unordered_set>
 
 #include "thirdparty/DBoW2/DBoW2/BowVector.h"
 #include "thirdparty/DBoW2/DBoW2/FeatureVector.h"
@@ -273,6 +274,8 @@ public:
     std::vector<bool> mvbOutlier;
     // XFeat diagnostics only: source tag for each current-frame MapPoint association.
     std::vector<unsigned char> mvXFeatMatchSource;
+    // XFeat diagnostics only: local-projection pool tag for each current-frame association.
+    std::vector<unsigned char> mvXFeatLocalProjPool;
     // XFeat local projection shadow diagnostics. Runtime-only, one entry per current-frame feature.
     std::vector<float> mvLocalProjBestDist;
     std::vector<float> mvLocalProjSecondDist;
@@ -287,6 +290,9 @@ public:
     std::vector<int> mvLocalProjMatchLevel;
     std::vector<int> mvLocalProjLevelDiff;
     std::vector<unsigned char> mvLocalProjSide;
+    // XFeat diagnostics only: reference stable close/mid MapPoints that should be
+    // recoverable by local projection in this frame.
+    std::unordered_set<long unsigned int> mLocalProjReferenceTargetMPIds;
     int mnCloseMPs;
 
     // Keypoints are assigned to cells in a grid to reduce matching complexity when projecting MapPoints.
@@ -391,7 +397,8 @@ public:
     //Stereo fisheye
     void ComputeStereoFishEyeMatches();
 
-    bool isInFrustumChecks(MapPoint* pMP, float viewingCosLimit, bool bRight = false);
+    bool isInFrustumChecks(MapPoint* pMP, float viewingCosLimit, bool bRight = false,
+                           unsigned char* pFrustumStatus = nullptr);
 
     Eigen::Vector3f UnprojectStereoFishEye(const int &i);
 

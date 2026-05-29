@@ -227,6 +227,7 @@ bool ShouldPrintLocalBASourceDepthDiag(const long unsigned int kfId)
 {
     return IsEnvFlagEnabled("XFEAT_DEBUG") &&
            IsEnvFlagEnabled("XFEAT_DIAG_FEATURE_DISTRIBUTION") &&
+           IsEnvFlagEnabled("XFEAT_DIAG_DEEP") &&
            (kfId == 0 || (kfId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0);
 }
 

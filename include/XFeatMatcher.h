@@ -28,6 +28,39 @@ public:
         int local_proj_triang_0_10_proj_edge_65_80_shadow = 0;
         int local_proj_triang_0_10_proj_edge_80_100_shadow = 0;
         int local_proj_triang_0_10_companion_outside_reject = 0;
+        int ref_target_input = 0;
+        int ref_target_skip_not_in_view = 0;
+        int ref_target_skip_far = 0;
+        int ref_target_skip_bad = 0;
+        int ref_target_skip_no_desc = 0;
+        int ref_target_projected = 0;
+        int ref_target_side_attempt = 0;
+        int ref_target_invalid_level = 0;
+        int ref_target_empty_area = 0;
+        int ref_target_area_candidates = 0;
+        int ref_target_invalid_candidate = 0;
+        int ref_target_occupied_candidate = 0;
+        int ref_target_geom_ur_reject = 0;
+        int ref_target_geom_depth_reject = 0;
+        int ref_target_valid_candidate = 0;
+        int ref_target_no_valid_candidate = 0;
+        int ref_target_raw_candidate = 0;
+        int ref_target_dist_reject = 0;
+        int ref_target_ratio_reject = 0;
+        int ref_target_candidate_pool = 0;
+        int ref_target_spatial_reject = 0;
+        int ref_target_assign_reject = 0;
+        int ref_target_outside_reject = 0;
+        int ref_target_assigned = 0;
+        int ref_target_fallback_shadow_target = 0;
+        int ref_target_fallback_shadow_found_area = 0;
+        int ref_target_fallback_shadow_area_candidates = 0;
+        int ref_target_fallback_shadow_valid_candidate = 0;
+        int ref_target_fallback_shadow_raw_candidate = 0;
+        int ref_target_fallback_shadow_ratio_pass = 0;
+        int ref_target_fallback_shadow_strict_pass = 0;
+        double ref_target_fallback_shadow_best_dist_sum = 0.0;
+        double ref_target_fallback_shadow_proj_norm_sum = 0.0;
     };
 
     XFeatMatcher(float nnratio = 0.8f, bool checkOri = false);
@@ -54,7 +87,9 @@ public:
                            const float th = 3.0f,
                            const bool bFarPoints = false,
                            const float thFarPoints = 50.0f,
-                           const float thHighOverride = -1.0f);
+                           const float thHighOverride = -1.0f,
+                           const int maxNewMatches = -1,
+                           const bool bResetDiagnostics = true);
 
     // Project points tracked in last frame to current frame and search matches.
     int SearchByProjection(Frame &CurrentFrame,

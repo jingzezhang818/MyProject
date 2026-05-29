@@ -33,6 +33,7 @@ namespace
 // XFeat路径: 每个MapPoint保留固定数量的描述子原型。
 constexpr int kXFeatDescriptorBankSize = 4;
 constexpr unsigned int kLocalProjRecentHistoryMask = 0xffu;
+constexpr unsigned int kLocalMapVisibilityRecentHistoryMask = 0xffu;
 constexpr long unsigned int kInvalidLocalProjHistoryFrame =
     std::numeric_limits<long unsigned int>::max();
 
@@ -115,6 +116,17 @@ float BestXFeatDescriptorDistanceNoLock(const cv::Mat& descriptor,
         return bestDist;
     return DescriptorDistanceAdaptive(descriptor, query);
 }
+
+int CountMaskBits(unsigned int mask)
+{
+    int count = 0;
+    while(mask != 0U)
+    {
+        count += static_cast<int>(mask & 1U);
+        mask >>= 1U;
+    }
+    return count;
+}
 }
 
 long unsigned int MapPoint::nNextId=0;
@@ -124,7 +136,7 @@ MapPoint::MapPoint():
     mnFirstKFid(0), mnFirstFrame(0), nObs(0), mnTrackReferenceForFrame(0),
     mnLastFrameSeen(0), mnBALocalForKF(0), mnFuseCandidateForKF(0), mnLoopPointForKF(0), mnCorrectedByKF(0),
     mnCorrectedReference(0), mnBAGlobalForKF(0), mnVisible(1), mnFound(1),
-    mCreationSource(kCreationSourceUnknown), mbHasTriangulationQuality(false),
+    mCreationSource(kCreationSourceUnknown), mTrackFrustumStatus(kTrackFrustumUnchecked), mbHasTriangulationQuality(false),
     mTriangDepthAtCreation(std::numeric_limits<float>::quiet_NaN()),
     mTriangCosParallax(std::numeric_limits<float>::quiet_NaN()),
     mTriangReprojChi2Max(std::numeric_limits<float>::quiet_NaN()),
@@ -132,12 +144,26 @@ MapPoint::MapPoint():
     mTriangScaleLogResidual(std::numeric_limits<float>::quiet_NaN()),
     mTriangScaleLogMargin(std::numeric_limits<float>::quiet_NaN()),
     mTriangMatchBackend(kTriangBackendUnknown), mnTriangAnchorKF1Id(0),
-    mnTriangAnchorKF2Id(0), mLocalProjAttemptCount(0),
+    mnTriangAnchorKF2Id(0), mbHasMappingFeatureQuality(false),
+    mnMappingFeatureKeyFrameId(0), mnMappingFeatureKeyPointIdx(-1),
+    mnMappingFeatureGridX(-1), mnMappingFeatureGridY(-1), mnMappingFeatureOctave(-1),
+    mMappingFeatureResponse(std::numeric_limits<float>::quiet_NaN()),
+    mMappingFeatureDepth(std::numeric_limits<float>::quiet_NaN()),
+    mMappingFeatureStereoBirthQuality(0), mLocalProjAttemptCount(0),
     mLocalProjMatchCount(0), mLocalProjOptInlierCount(0),
     mLocalProjOptOutlierCount(0), mLocalProjRecentValidMask(0),
     mLocalProjRecentOutlierMask(0), mnLastLocalProjAttemptFrame(kInvalidLocalProjHistoryFrame),
     mnLastLocalProjMatchFrame(kInvalidLocalProjHistoryFrame),
-    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame), mbBad(false),
+    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame),
+    mLocalMapVisibilityEvaluationCount(0), mLocalMapVisibilityAcceptedCount(0),
+    mLocalMapVisibilityNegativeDepthCount(0), mLocalMapVisibilityOutsideImageCount(0),
+    mLocalMapVisibilityScaleRangeCount(0), mLocalMapVisibilityViewAngleCount(0),
+    mLocalMapVisibilityRecentAcceptedMask(0), mLocalMapVisibilityRecentIrrelevantMask(0),
+    mnLastLocalMapVisibilityFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseProjectionAttemptFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseProjectionMatchFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseOptInlierFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseOptOutlierFrame(kInvalidLocalProjHistoryFrame), mbBad(false),
     mpReplaced(static_cast<MapPoint*>(NULL))
 {
     mpReplaced = static_cast<MapPoint*>(NULL);
@@ -147,7 +173,7 @@ MapPoint::MapPoint(const Eigen::Vector3f &Pos, KeyFrame *pRefKF, Map* pMap):
     mnFirstKFid(pRefKF->mnId), mnFirstFrame(pRefKF->mnFrameId), nObs(0), mnTrackReferenceForFrame(0),
     mnLastFrameSeen(0), mnBALocalForKF(0), mnFuseCandidateForKF(0), mnLoopPointForKF(0), mnCorrectedByKF(0),
     mnCorrectedReference(0), mnBAGlobalForKF(0), mpRefKF(pRefKF), mnVisible(1), mnFound(1),
-    mCreationSource(kCreationSourceUnknown), mbHasTriangulationQuality(false),
+    mCreationSource(kCreationSourceUnknown), mTrackFrustumStatus(kTrackFrustumUnchecked), mbHasTriangulationQuality(false),
     mTriangDepthAtCreation(std::numeric_limits<float>::quiet_NaN()),
     mTriangCosParallax(std::numeric_limits<float>::quiet_NaN()),
     mTriangReprojChi2Max(std::numeric_limits<float>::quiet_NaN()),
@@ -155,12 +181,26 @@ MapPoint::MapPoint(const Eigen::Vector3f &Pos, KeyFrame *pRefKF, Map* pMap):
     mTriangScaleLogResidual(std::numeric_limits<float>::quiet_NaN()),
     mTriangScaleLogMargin(std::numeric_limits<float>::quiet_NaN()),
     mTriangMatchBackend(kTriangBackendUnknown), mnTriangAnchorKF1Id(0),
-    mnTriangAnchorKF2Id(0), mLocalProjAttemptCount(0),
+    mnTriangAnchorKF2Id(0), mbHasMappingFeatureQuality(false),
+    mnMappingFeatureKeyFrameId(0), mnMappingFeatureKeyPointIdx(-1),
+    mnMappingFeatureGridX(-1), mnMappingFeatureGridY(-1), mnMappingFeatureOctave(-1),
+    mMappingFeatureResponse(std::numeric_limits<float>::quiet_NaN()),
+    mMappingFeatureDepth(std::numeric_limits<float>::quiet_NaN()),
+    mMappingFeatureStereoBirthQuality(0), mLocalProjAttemptCount(0),
     mLocalProjMatchCount(0), mLocalProjOptInlierCount(0),
     mLocalProjOptOutlierCount(0), mLocalProjRecentValidMask(0),
     mLocalProjRecentOutlierMask(0), mnLastLocalProjAttemptFrame(kInvalidLocalProjHistoryFrame),
     mnLastLocalProjMatchFrame(kInvalidLocalProjHistoryFrame),
-    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame), mbBad(false),
+    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame),
+    mLocalMapVisibilityEvaluationCount(0), mLocalMapVisibilityAcceptedCount(0),
+    mLocalMapVisibilityNegativeDepthCount(0), mLocalMapVisibilityOutsideImageCount(0),
+    mLocalMapVisibilityScaleRangeCount(0), mLocalMapVisibilityViewAngleCount(0),
+    mLocalMapVisibilityRecentAcceptedMask(0), mLocalMapVisibilityRecentIrrelevantMask(0),
+    mnLastLocalMapVisibilityFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseProjectionAttemptFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseProjectionMatchFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseOptInlierFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseOptOutlierFrame(kInvalidLocalProjHistoryFrame), mbBad(false),
     mpReplaced(static_cast<MapPoint*>(NULL)), mfMinDistance(0), mfMaxDistance(0), mpMap(pMap),
     mnOriginMapId(pMap->GetId())
 {
@@ -180,7 +220,7 @@ MapPoint::MapPoint(const double invDepth, cv::Point2f uv_init, KeyFrame* pRefKF,
     mnFirstKFid(pRefKF->mnId), mnFirstFrame(pRefKF->mnFrameId), nObs(0), mnTrackReferenceForFrame(0),
     mnLastFrameSeen(0), mnBALocalForKF(0), mnFuseCandidateForKF(0), mnLoopPointForKF(0), mnCorrectedByKF(0),
     mnCorrectedReference(0), mnBAGlobalForKF(0), mpRefKF(pRefKF), mnVisible(1), mnFound(1),
-    mCreationSource(kCreationSourceUnknown), mbHasTriangulationQuality(false),
+    mCreationSource(kCreationSourceUnknown), mTrackFrustumStatus(kTrackFrustumUnchecked), mbHasTriangulationQuality(false),
     mTriangDepthAtCreation(std::numeric_limits<float>::quiet_NaN()),
     mTriangCosParallax(std::numeric_limits<float>::quiet_NaN()),
     mTriangReprojChi2Max(std::numeric_limits<float>::quiet_NaN()),
@@ -188,12 +228,26 @@ MapPoint::MapPoint(const double invDepth, cv::Point2f uv_init, KeyFrame* pRefKF,
     mTriangScaleLogResidual(std::numeric_limits<float>::quiet_NaN()),
     mTriangScaleLogMargin(std::numeric_limits<float>::quiet_NaN()),
     mTriangMatchBackend(kTriangBackendUnknown), mnTriangAnchorKF1Id(0),
-    mnTriangAnchorKF2Id(0), mLocalProjAttemptCount(0),
+    mnTriangAnchorKF2Id(0), mbHasMappingFeatureQuality(false),
+    mnMappingFeatureKeyFrameId(0), mnMappingFeatureKeyPointIdx(-1),
+    mnMappingFeatureGridX(-1), mnMappingFeatureGridY(-1), mnMappingFeatureOctave(-1),
+    mMappingFeatureResponse(std::numeric_limits<float>::quiet_NaN()),
+    mMappingFeatureDepth(std::numeric_limits<float>::quiet_NaN()),
+    mMappingFeatureStereoBirthQuality(0), mLocalProjAttemptCount(0),
     mLocalProjMatchCount(0), mLocalProjOptInlierCount(0),
     mLocalProjOptOutlierCount(0), mLocalProjRecentValidMask(0),
     mLocalProjRecentOutlierMask(0), mnLastLocalProjAttemptFrame(kInvalidLocalProjHistoryFrame),
     mnLastLocalProjMatchFrame(kInvalidLocalProjHistoryFrame),
-    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame), mbBad(false),
+    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame),
+    mLocalMapVisibilityEvaluationCount(0), mLocalMapVisibilityAcceptedCount(0),
+    mLocalMapVisibilityNegativeDepthCount(0), mLocalMapVisibilityOutsideImageCount(0),
+    mLocalMapVisibilityScaleRangeCount(0), mLocalMapVisibilityViewAngleCount(0),
+    mLocalMapVisibilityRecentAcceptedMask(0), mLocalMapVisibilityRecentIrrelevantMask(0),
+    mnLastLocalMapVisibilityFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseProjectionAttemptFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseProjectionMatchFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseOptInlierFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseOptOutlierFrame(kInvalidLocalProjHistoryFrame), mbBad(false),
     mpReplaced(static_cast<MapPoint*>(NULL)), mfMinDistance(0), mfMaxDistance(0), mpMap(pMap),
     mnOriginMapId(pMap->GetId())
 {
@@ -214,7 +268,7 @@ MapPoint::MapPoint(const Eigen::Vector3f &Pos, Map* pMap, Frame* pFrame, const i
     mnFirstKFid(-1), mnFirstFrame(pFrame->mnId), nObs(0), mnTrackReferenceForFrame(0), mnLastFrameSeen(0),
     mnBALocalForKF(0), mnFuseCandidateForKF(0),mnLoopPointForKF(0), mnCorrectedByKF(0),
     mnCorrectedReference(0), mnBAGlobalForKF(0), mpRefKF(static_cast<KeyFrame*>(NULL)), mnVisible(1),
-    mnFound(1), mCreationSource(kCreationSourceUnknown), mbHasTriangulationQuality(false),
+    mnFound(1), mCreationSource(kCreationSourceUnknown), mTrackFrustumStatus(kTrackFrustumUnchecked), mbHasTriangulationQuality(false),
     mTriangDepthAtCreation(std::numeric_limits<float>::quiet_NaN()),
     mTriangCosParallax(std::numeric_limits<float>::quiet_NaN()),
     mTriangReprojChi2Max(std::numeric_limits<float>::quiet_NaN()),
@@ -222,12 +276,26 @@ MapPoint::MapPoint(const Eigen::Vector3f &Pos, Map* pMap, Frame* pFrame, const i
     mTriangScaleLogResidual(std::numeric_limits<float>::quiet_NaN()),
     mTriangScaleLogMargin(std::numeric_limits<float>::quiet_NaN()),
     mTriangMatchBackend(kTriangBackendUnknown), mnTriangAnchorKF1Id(0),
-    mnTriangAnchorKF2Id(0), mLocalProjAttemptCount(0),
+    mnTriangAnchorKF2Id(0), mbHasMappingFeatureQuality(false),
+    mnMappingFeatureKeyFrameId(0), mnMappingFeatureKeyPointIdx(-1),
+    mnMappingFeatureGridX(-1), mnMappingFeatureGridY(-1), mnMappingFeatureOctave(-1),
+    mMappingFeatureResponse(std::numeric_limits<float>::quiet_NaN()),
+    mMappingFeatureDepth(std::numeric_limits<float>::quiet_NaN()),
+    mMappingFeatureStereoBirthQuality(0), mLocalProjAttemptCount(0),
     mLocalProjMatchCount(0), mLocalProjOptInlierCount(0),
     mLocalProjOptOutlierCount(0), mLocalProjRecentValidMask(0),
     mLocalProjRecentOutlierMask(0), mnLastLocalProjAttemptFrame(kInvalidLocalProjHistoryFrame),
     mnLastLocalProjMatchFrame(kInvalidLocalProjHistoryFrame),
-    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame), mbBad(false), mpReplaced(NULL), mpMap(pMap),
+    mnLastLocalProjOutcomeFrame(kInvalidLocalProjHistoryFrame),
+    mLocalMapVisibilityEvaluationCount(0), mLocalMapVisibilityAcceptedCount(0),
+    mLocalMapVisibilityNegativeDepthCount(0), mLocalMapVisibilityOutsideImageCount(0),
+    mLocalMapVisibilityScaleRangeCount(0), mLocalMapVisibilityViewAngleCount(0),
+    mLocalMapVisibilityRecentAcceptedMask(0), mLocalMapVisibilityRecentIrrelevantMask(0),
+    mnLastLocalMapVisibilityFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseProjectionAttemptFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseProjectionMatchFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseOptInlierFrame(kInvalidLocalProjHistoryFrame),
+    mnFirstCloseReuseOptOutlierFrame(kInvalidLocalProjHistoryFrame), mbBad(false), mpReplaced(NULL), mpMap(pMap),
     mnOriginMapId(pMap->GetId())
 {
     SetWorldPos(Pos);
@@ -522,6 +590,128 @@ bool MapPoint::HasTriangulationQuality() const
     return mbHasTriangulationQuality;
 }
 
+void MapPoint::SetMappingFeatureQuality(const long unsigned int keyFrameId,
+                                        const int keyPointIdx,
+                                        const int gridX,
+                                        const int gridY,
+                                        const int octave,
+                                        const float response,
+                                        const float depth,
+                                        const unsigned char stereoBirthQuality)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    mbHasMappingFeatureQuality = true;
+    mnMappingFeatureKeyFrameId = keyFrameId;
+    mnMappingFeatureKeyPointIdx = keyPointIdx;
+    mnMappingFeatureGridX = gridX;
+    mnMappingFeatureGridY = gridY;
+    mnMappingFeatureOctave = octave;
+    mMappingFeatureResponse = response;
+    mMappingFeatureDepth = depth;
+    mMappingFeatureStereoBirthQuality = stereoBirthQuality;
+}
+
+bool MapPoint::HasMappingFeatureQuality() const
+{
+    unique_lock<mutex> lock(const_cast<MapPoint*>(this)->mMutexFeatures);
+    return mbHasMappingFeatureQuality;
+}
+
+void MapPoint::SetMappingProbation(const bool active,
+                                   const long unsigned int startKfId,
+                                   const float depthAtCreation)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    mbMappingProbation = active;
+    if(active)
+    {
+        mbMappingProbationEver = true;
+        mbMappingProbationPromoted = false;
+        mnMappingProbationStartKF = startKfId;
+        mnMappingProbationPromotedKF = 0;
+        mMappingProbationDepthAtCreation = depthAtCreation;
+    }
+}
+
+bool MapPoint::IsMappingProbation() const
+{
+    unique_lock<mutex> lock(const_cast<MapPoint*>(this)->mMutexFeatures);
+    return mbMappingProbation;
+}
+
+bool MapPoint::WasMappingProbation() const
+{
+    unique_lock<mutex> lock(const_cast<MapPoint*>(this)->mMutexFeatures);
+    return mbMappingProbationEver;
+}
+
+bool MapPoint::IsMappingProbationPromoted() const
+{
+    unique_lock<mutex> lock(const_cast<MapPoint*>(this)->mMutexFeatures);
+    return mbMappingProbationPromoted;
+}
+
+bool MapPoint::TryPromoteMappingProbation(const long unsigned int currentKfId)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(!mbMappingProbation)
+        return false;
+
+    const int ageKf = currentKfId >= mnMappingProbationStartKF
+        ? static_cast<int>(currentKfId - mnMappingProbationStartKF)
+        : 0;
+    const int obs = nObs;
+    const float foundRatio = mnVisible > 0
+        ? static_cast<float>(mnFound) / static_cast<float>(mnVisible)
+        : 0.0f;
+    const int visibilityEval = mLocalMapVisibilityEvaluationCount;
+    const int irrelevant = mLocalMapVisibilityNegativeDepthCount +
+                           mLocalMapVisibilityOutsideImageCount;
+    const float irrelevantRate = visibilityEval > 0
+        ? static_cast<float>(irrelevant) / static_cast<float>(visibilityEval)
+        : 0.0f;
+    const int recentCount = std::min(visibilityEval, 8);
+    const float recentIrrelevantRate = recentCount > 0
+        ? static_cast<float>(CountMaskBits(mLocalMapVisibilityRecentIrrelevantMask)) /
+          static_cast<float>(recentCount)
+        : 0.0f;
+    const bool longLowRelevance =
+        visibilityEval >= 5 &&
+        (irrelevantRate >= 0.70f ||
+         (recentCount >= 4 && recentIrrelevantRate >= 0.75f));
+
+    const int optOutcomes = mLocalProjOptInlierCount + mLocalProjOptOutlierCount;
+    const float optOutlierRate = optOutcomes > 0
+        ? static_cast<float>(mLocalProjOptOutlierCount) / static_cast<float>(optOutcomes)
+        : 0.0f;
+    const int recentProjValid = CountMaskBits(mLocalProjRecentValidMask);
+    const int recentProjOutlier = CountMaskBits(mLocalProjRecentOutlierMask);
+    const float recentOutlierRate = recentProjValid > 0
+        ? static_cast<float>(recentProjOutlier) / static_cast<float>(recentProjValid)
+        : 0.0f;
+    const bool optUnstable = optOutcomes >= 3 && optOutlierRate > 0.35f;
+    const bool recentUnstable = recentProjValid >= 3 && recentOutlierRate > 0.40f;
+
+    if(ageKf >= 3 &&
+       obs >= 4 &&
+       std::isfinite(foundRatio) &&
+       foundRatio >= 0.35f &&
+       mLocalProjAttemptCount >= 2 &&
+       mLocalProjMatchCount >= 1 &&
+       mLocalProjOptInlierCount >= 1 &&
+       !optUnstable &&
+       !recentUnstable &&
+       !longLowRelevance)
+    {
+        mbMappingProbation = false;
+        mbMappingProbationPromoted = true;
+        mnMappingProbationPromotedKF = currentKfId;
+        return true;
+    }
+
+    return false;
+}
+
 void MapPoint::RecordLocalProjectionAttempt(const long unsigned int frameId)
 {
     unique_lock<mutex> lock(mMutexFeatures);
@@ -566,6 +756,98 @@ MapPoint::LocalProjectionHistoryStats MapPoint::GetLocalProjectionHistory() cons
     stats.optOutlierCount = mLocalProjOptOutlierCount;
     stats.recentValidMask = mLocalProjRecentValidMask;
     stats.recentOutlierMask = mLocalProjRecentOutlierMask;
+    return stats;
+}
+
+void MapPoint::RecordLocalMapVisibilityOutcome(const long unsigned int frameId,
+                                               const TrackFrustumStatus status)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(mnLastLocalMapVisibilityFrame == frameId)
+        return;
+    mnLastLocalMapVisibilityFrame = frameId;
+    mLocalMapVisibilityEvaluationCount++;
+
+    const bool bAccepted = status == kTrackFrustumAccepted;
+    const bool bIrrelevant = status == kTrackFrustumNegativeDepth ||
+                             status == kTrackFrustumOutsideImage;
+    switch(status)
+    {
+        case kTrackFrustumAccepted:
+            mLocalMapVisibilityAcceptedCount++;
+            break;
+        case kTrackFrustumNegativeDepth:
+            mLocalMapVisibilityNegativeDepthCount++;
+            break;
+        case kTrackFrustumOutsideImage:
+            mLocalMapVisibilityOutsideImageCount++;
+            break;
+        case kTrackFrustumScaleRange:
+            mLocalMapVisibilityScaleRangeCount++;
+            break;
+        case kTrackFrustumViewAngle:
+            mLocalMapVisibilityViewAngleCount++;
+            break;
+        case kTrackFrustumUnchecked:
+        default:
+            break;
+    }
+
+    mLocalMapVisibilityRecentAcceptedMask =
+        ((mLocalMapVisibilityRecentAcceptedMask << 1U) | (bAccepted ? 1U : 0U)) &
+        kLocalMapVisibilityRecentHistoryMask;
+    mLocalMapVisibilityRecentIrrelevantMask =
+        ((mLocalMapVisibilityRecentIrrelevantMask << 1U) | (bIrrelevant ? 1U : 0U)) &
+        kLocalMapVisibilityRecentHistoryMask;
+}
+
+MapPoint::LocalMapVisibilityHistoryStats MapPoint::GetLocalMapVisibilityHistory() const
+{
+    unique_lock<mutex> lock(const_cast<MapPoint*>(this)->mMutexFeatures);
+    LocalMapVisibilityHistoryStats stats;
+    stats.evaluationCount = mLocalMapVisibilityEvaluationCount;
+    stats.acceptedCount = mLocalMapVisibilityAcceptedCount;
+    stats.negativeDepthCount = mLocalMapVisibilityNegativeDepthCount;
+    stats.outsideImageCount = mLocalMapVisibilityOutsideImageCount;
+    stats.scaleRangeCount = mLocalMapVisibilityScaleRangeCount;
+    stats.viewAngleCount = mLocalMapVisibilityViewAngleCount;
+    stats.recentAcceptedMask = mLocalMapVisibilityRecentAcceptedMask;
+    stats.recentIrrelevantMask = mLocalMapVisibilityRecentIrrelevantMask;
+    return stats;
+}
+
+void MapPoint::RecordCloseReuseProjectionAttempt(const long unsigned int frameId)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(mnFirstCloseReuseProjectionAttemptFrame == kInvalidLocalProjHistoryFrame)
+        mnFirstCloseReuseProjectionAttemptFrame = frameId;
+}
+
+void MapPoint::RecordCloseReuseProjectionMatch(const long unsigned int frameId)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(mnFirstCloseReuseProjectionMatchFrame == kInvalidLocalProjHistoryFrame)
+        mnFirstCloseReuseProjectionMatchFrame = frameId;
+}
+
+void MapPoint::RecordCloseReuseOutcome(const long unsigned int frameId, const bool bInlier)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    long unsigned int& firstOutcomeFrame = bInlier
+        ? mnFirstCloseReuseOptInlierFrame
+        : mnFirstCloseReuseOptOutlierFrame;
+    if(firstOutcomeFrame == kInvalidLocalProjHistoryFrame)
+        firstOutcomeFrame = frameId;
+}
+
+MapPoint::CloseReuseCohortStats MapPoint::GetCloseReuseCohortStats() const
+{
+    unique_lock<mutex> lock(const_cast<MapPoint*>(this)->mMutexFeatures);
+    CloseReuseCohortStats stats;
+    stats.firstProjectionAttemptFrame = mnFirstCloseReuseProjectionAttemptFrame;
+    stats.firstProjectionMatchFrame = mnFirstCloseReuseProjectionMatchFrame;
+    stats.firstOptInlierFrame = mnFirstCloseReuseOptInlierFrame;
+    stats.firstOptOutlierFrame = mnFirstCloseReuseOptOutlierFrame;
     return stats;
 }
 

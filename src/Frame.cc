@@ -1060,13 +1060,16 @@ Frame::Frame(const Frame &frame)
      mvDepth(frame.mvDepth), mvStereoBirthQuality(frame.mvStereoBirthQuality), mBowVec(frame.mBowVec), mFeatVec(frame.mFeatVec),
      mDescriptors(frame.mDescriptors.clone()), mDescriptorsRight(frame.mDescriptorsRight.clone()),
      mvpMapPoints(frame.mvpMapPoints), mvbOutlier(frame.mvbOutlier), mvXFeatMatchSource(frame.mvXFeatMatchSource),
+     mvXFeatLocalProjPool(frame.mvXFeatLocalProjPool),
      mvLocalProjBestDist(frame.mvLocalProjBestDist), mvLocalProjSecondDist(frame.mvLocalProjSecondDist),
      mvLocalProjRatio(frame.mvLocalProjRatio), mvLocalProjCandidateCount(frame.mvLocalProjCandidateCount),
      mvLocalProjRadiusPx(frame.mvLocalProjRadiusPx), mvLocalProjProjX(frame.mvLocalProjProjX),
      mvLocalProjProjY(frame.mvLocalProjProjY), mvLocalProjProjErrPx(frame.mvLocalProjProjErrPx),
      mvLocalProjProjErrNorm(frame.mvLocalProjProjErrNorm), mvLocalProjPredLevel(frame.mvLocalProjPredLevel),
      mvLocalProjMatchLevel(frame.mvLocalProjMatchLevel), mvLocalProjLevelDiff(frame.mvLocalProjLevelDiff),
-     mvLocalProjSide(frame.mvLocalProjSide), mImuCalib(frame.mImuCalib), mnCloseMPs(frame.mnCloseMPs),
+     mvLocalProjSide(frame.mvLocalProjSide),
+     mLocalProjReferenceTargetMPIds(frame.mLocalProjReferenceTargetMPIds),
+     mImuCalib(frame.mImuCalib), mnCloseMPs(frame.mnCloseMPs),
      mpImuPreintegrated(frame.mpImuPreintegrated), mpImuPreintegratedFrame(frame.mpImuPreintegratedFrame), mImuBias(frame.mImuBias),
      mnId(frame.mnId), mpReferenceKF(frame.mpReferenceKF), mnScaleLevels(frame.mnScaleLevels),
      mfScaleFactor(frame.mfScaleFactor), mfLogScaleFactor(frame.mfLogScaleFactor),
@@ -1156,6 +1159,7 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvbOutlier = vector<bool>(N,false);
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
+    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
 
@@ -1260,6 +1264,7 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvbOutlier = vector<bool>(N,false);
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
+    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
 
@@ -1346,6 +1351,7 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
+    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
@@ -1435,6 +1441,7 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
+    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
@@ -1528,6 +1535,7 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
+    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();// = map<long unsigned int, cv::Point2f>(N, static_cast<cv::Point2f>(NULL));
     mmMatchedInImage.clear();
@@ -1636,6 +1644,7 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, XFextractor* extrac
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
+    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();// = map<long unsigned int, cv::Point2f>(N, static_cast<cv::Point2f>(NULL));
     mmMatchedInImage.clear();
@@ -1828,6 +1837,7 @@ Eigen::Vector3f Frame::GetRelativePoseTlr_translation() {
 
 bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
 {
+    pMP->mTrackFrustumStatus = MapPoint::kTrackFrustumUnchecked;
     if(Nleft == -1){
         pMP->mbTrackInView = false;
         pMP->mTrackProjX = -1;
@@ -1844,14 +1854,23 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
         const float &PcZ = Pc(2);
         const float invz = 1.0f/PcZ;
         if(PcZ<0.0f)
+        {
+            pMP->mTrackFrustumStatus = MapPoint::kTrackFrustumNegativeDepth;
             return false;
+        }
 
         const Eigen::Vector2f uv = mpCamera->project(Pc);
 
         if(uv(0)<mnMinX || uv(0)>mnMaxX)
+        {
+            pMP->mTrackFrustumStatus = MapPoint::kTrackFrustumOutsideImage;
             return false;
+        }
         if(uv(1)<mnMinY || uv(1)>mnMaxY)
+        {
+            pMP->mTrackFrustumStatus = MapPoint::kTrackFrustumOutsideImage;
             return false;
+        }
 
         pMP->mTrackProjX = uv(0);
         pMP->mTrackProjY = uv(1);
@@ -1863,7 +1882,10 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
         const float dist = PO.norm();
 
         if(dist<minDistance || dist>maxDistance)
+        {
+            pMP->mTrackFrustumStatus = MapPoint::kTrackFrustumScaleRange;
             return false;
+        }
 
         // Check viewing angle
         Eigen::Vector3f Pn = pMP->GetNormal();
@@ -1871,7 +1893,10 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
         const float viewCos = PO.dot(Pn)/dist;
 
         if(viewCos<viewingCosLimit)
+        {
+            pMP->mTrackFrustumStatus = MapPoint::kTrackFrustumViewAngle;
             return false;
+        }
 
         // Predict scale in the image
         const int nPredictedLevel = pMP->PredictScale(dist,this);
@@ -1886,6 +1911,7 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
         pMP->mTrackProjY = uv(1);
         pMP->mnTrackScaleLevel= nPredictedLevel;
         pMP->mTrackViewCos = viewCos;
+        pMP->mTrackFrustumStatus = MapPoint::kTrackFrustumAccepted;
 
         return true;
     }
@@ -1895,8 +1921,14 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
         pMP -> mnTrackScaleLevel = -1;
         pMP -> mnTrackScaleLevelR = -1;
 
-        pMP->mbTrackInView = isInFrustumChecks(pMP,viewingCosLimit);
-        pMP->mbTrackInViewR = isInFrustumChecks(pMP,viewingCosLimit,true);
+        unsigned char leftStatus = static_cast<unsigned char>(MapPoint::kTrackFrustumUnchecked);
+        unsigned char rightStatus = static_cast<unsigned char>(MapPoint::kTrackFrustumUnchecked);
+        pMP->mbTrackInView = isInFrustumChecks(pMP,viewingCosLimit,false,&leftStatus);
+        pMP->mbTrackInViewR = isInFrustumChecks(pMP,viewingCosLimit,true,&rightStatus);
+        if(pMP->mbTrackInView || pMP->mbTrackInViewR)
+            pMP->mTrackFrustumStatus = MapPoint::kTrackFrustumAccepted;
+        else
+            pMP->mTrackFrustumStatus = static_cast<MapPoint::TrackFrustumStatus>(leftStatus);
 
         return pMP->mbTrackInView || pMP->mbTrackInViewR;
     }
@@ -3064,6 +3096,7 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(nullptr));
     mvbOutlier = vector<bool>(N,false);
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
+    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
 
     AssignFeaturesToGrid();
 
@@ -3115,7 +3148,10 @@ void Frame::ComputeStereoFishEyeMatches() {
     }
 }
 
-bool Frame::isInFrustumChecks(MapPoint *pMP, float viewingCosLimit, bool bRight) {
+bool Frame::isInFrustumChecks(MapPoint *pMP, float viewingCosLimit, bool bRight,
+                              unsigned char* pFrustumStatus) {
+    if(pFrustumStatus)
+        *pFrustumStatus = static_cast<unsigned char>(MapPoint::kTrackFrustumUnchecked);
     // 3D in absolute coordinates
     Eigen::Vector3f P = pMP->GetWorldPos();
 
@@ -3141,7 +3177,11 @@ bool Frame::isInFrustumChecks(MapPoint *pMP, float viewingCosLimit, bool bRight)
 
     // Check positive depth
     if(PcZ<0.0f)
+    {
+        if(pFrustumStatus)
+            *pFrustumStatus = static_cast<unsigned char>(MapPoint::kTrackFrustumNegativeDepth);
         return false;
+    }
 
     // Project in image and check it is not outside
     Eigen::Vector2f uv;
@@ -3149,9 +3189,17 @@ bool Frame::isInFrustumChecks(MapPoint *pMP, float viewingCosLimit, bool bRight)
     else uv = mpCamera->project(Pc);
 
     if(uv(0)<mnMinX || uv(0)>mnMaxX)
+    {
+        if(pFrustumStatus)
+            *pFrustumStatus = static_cast<unsigned char>(MapPoint::kTrackFrustumOutsideImage);
         return false;
+    }
     if(uv(1)<mnMinY || uv(1)>mnMaxY)
+    {
+        if(pFrustumStatus)
+            *pFrustumStatus = static_cast<unsigned char>(MapPoint::kTrackFrustumOutsideImage);
         return false;
+    }
 
     // Check distance is in the scale invariance region of the MapPoint
     const float maxDistance = pMP->GetMaxDistanceInvariance();
@@ -3160,7 +3208,11 @@ bool Frame::isInFrustumChecks(MapPoint *pMP, float viewingCosLimit, bool bRight)
     const float dist = PO.norm();
 
     if(dist<minDistance || dist>maxDistance)
+    {
+        if(pFrustumStatus)
+            *pFrustumStatus = static_cast<unsigned char>(MapPoint::kTrackFrustumScaleRange);
         return false;
+    }
 
     // Check viewing angle
     Eigen::Vector3f Pn = pMP->GetNormal();
@@ -3168,7 +3220,11 @@ bool Frame::isInFrustumChecks(MapPoint *pMP, float viewingCosLimit, bool bRight)
     const float viewCos = PO.dot(Pn) / dist;
 
     if(viewCos<viewingCosLimit)
+    {
+        if(pFrustumStatus)
+            *pFrustumStatus = static_cast<unsigned char>(MapPoint::kTrackFrustumViewAngle);
         return false;
+    }
 
     // Predict scale in the image
     const int nPredictedLevel = pMP->PredictScale(dist,this);
@@ -3188,6 +3244,8 @@ bool Frame::isInFrustumChecks(MapPoint *pMP, float viewingCosLimit, bool bRight)
         pMP->mTrackDepth = Pc_dist;
     }
 
+    if(pFrustumStatus)
+        *pFrustumStatus = static_cast<unsigned char>(MapPoint::kTrackFrustumAccepted);
     return true;
 }
 

@@ -124,6 +124,16 @@ public:
         kTriangBackendORB = 3
     };
 
+    enum TrackFrustumStatus : unsigned char
+    {
+        kTrackFrustumUnchecked = 0,
+        kTrackFrustumAccepted = 1,
+        kTrackFrustumNegativeDepth = 2,
+        kTrackFrustumOutsideImage = 3,
+        kTrackFrustumScaleRange = 4,
+        kTrackFrustumViewAngle = 5
+    };
+
     struct LocalProjectionHistoryStats
     {
         int attemptCount;
@@ -132,6 +142,26 @@ public:
         int optOutlierCount;
         unsigned int recentValidMask;
         unsigned int recentOutlierMask;
+    };
+
+    struct LocalMapVisibilityHistoryStats
+    {
+        int evaluationCount;
+        int acceptedCount;
+        int negativeDepthCount;
+        int outsideImageCount;
+        int scaleRangeCount;
+        int viewAngleCount;
+        unsigned int recentAcceptedMask;
+        unsigned int recentIrrelevantMask;
+    };
+
+    struct CloseReuseCohortStats
+    {
+        long unsigned int firstProjectionAttemptFrame;
+        long unsigned int firstProjectionMatchFrame;
+        long unsigned int firstOptInlierFrame;
+        long unsigned int firstOptOutlierFrame;
     };
 
     MapPoint();
@@ -206,10 +236,33 @@ public:
                                  const long unsigned int anchorKf1Id,
                                  const long unsigned int anchorKf2Id);
     bool HasTriangulationQuality() const;
+    void SetMappingFeatureQuality(const long unsigned int keyFrameId,
+                                  const int keyPointIdx,
+                                  const int gridX,
+                                  const int gridY,
+                                  const int octave,
+                                  const float response,
+                                  const float depth,
+                                  const unsigned char stereoBirthQuality);
+    bool HasMappingFeatureQuality() const;
+    void SetMappingProbation(const bool active,
+                             const long unsigned int startKfId,
+                             const float depthAtCreation);
+    bool IsMappingProbation() const;
+    bool WasMappingProbation() const;
+    bool IsMappingProbationPromoted() const;
+    bool TryPromoteMappingProbation(const long unsigned int currentKfId);
     void RecordLocalProjectionAttempt(const long unsigned int frameId);
     void RecordLocalProjectionMatch(const long unsigned int frameId);
     void RecordLocalProjectionOutcome(const long unsigned int frameId, const bool bInlier);
     LocalProjectionHistoryStats GetLocalProjectionHistory() const;
+    void RecordLocalMapVisibilityOutcome(const long unsigned int frameId,
+                                         const TrackFrustumStatus status);
+    LocalMapVisibilityHistoryStats GetLocalMapVisibilityHistory() const;
+    void RecordCloseReuseProjectionAttempt(const long unsigned int frameId);
+    void RecordCloseReuseProjectionMatch(const long unsigned int frameId);
+    void RecordCloseReuseOutcome(const long unsigned int frameId, const bool bInlier);
+    CloseReuseCohortStats GetCloseReuseCohortStats() const;
 
     void PrintObservations();
 
@@ -223,6 +276,7 @@ public:
     long int mnFirstFrame;
     int nObs;
     CreationSource mCreationSource;
+    TrackFrustumStatus mTrackFrustumStatus;
     bool mbHasTriangulationQuality;
     float mTriangDepthAtCreation;
     float mTriangCosParallax;
@@ -233,6 +287,21 @@ public:
     TriangulationMatchBackend mTriangMatchBackend;
     long unsigned int mnTriangAnchorKF1Id;
     long unsigned int mnTriangAnchorKF2Id;
+    bool mbHasMappingFeatureQuality;
+    long unsigned int mnMappingFeatureKeyFrameId;
+    int mnMappingFeatureKeyPointIdx;
+    int mnMappingFeatureGridX;
+    int mnMappingFeatureGridY;
+    int mnMappingFeatureOctave;
+    float mMappingFeatureResponse;
+    float mMappingFeatureDepth;
+    unsigned char mMappingFeatureStereoBirthQuality;
+    bool mbMappingProbation = false;
+    bool mbMappingProbationEver = false;
+    bool mbMappingProbationPromoted = false;
+    long unsigned int mnMappingProbationStartKF = 0;
+    long unsigned int mnMappingProbationPromotedKF = 0;
+    float mMappingProbationDepthAtCreation = -1.0f;
     int mLocalProjAttemptCount;
     int mLocalProjMatchCount;
     int mLocalProjOptInlierCount;
@@ -242,6 +311,19 @@ public:
     long unsigned int mnLastLocalProjAttemptFrame;
     long unsigned int mnLastLocalProjMatchFrame;
     long unsigned int mnLastLocalProjOutcomeFrame;
+    int mLocalMapVisibilityEvaluationCount;
+    int mLocalMapVisibilityAcceptedCount;
+    int mLocalMapVisibilityNegativeDepthCount;
+    int mLocalMapVisibilityOutsideImageCount;
+    int mLocalMapVisibilityScaleRangeCount;
+    int mLocalMapVisibilityViewAngleCount;
+    unsigned int mLocalMapVisibilityRecentAcceptedMask;
+    unsigned int mLocalMapVisibilityRecentIrrelevantMask;
+    long unsigned int mnLastLocalMapVisibilityFrame;
+    long unsigned int mnFirstCloseReuseProjectionAttemptFrame;
+    long unsigned int mnFirstCloseReuseProjectionMatchFrame;
+    long unsigned int mnFirstCloseReuseOptInlierFrame;
+    long unsigned int mnFirstCloseReuseOptOutlierFrame;
 
     // Variables used by the tracking
     float mTrackProjX;

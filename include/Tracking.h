@@ -303,12 +303,40 @@ public:
         int bestVoteCount = 0;
         int localObservations = 0;
         long int bestKeyFrameAge = -1;
+        KeyFrame* pBestKeyFrame = nullptr;
         long unsigned int frameId = 0;
     };
 
 protected:
     std::unordered_map<KeyFrame*, LocalKFProvenance> mmLocalKFProvenance;
     std::unordered_map<MapPoint*, LocalMPProvenance> mmLocalMPProvenance;
+    int mnLocalMapVotedKFCandidates = 0;
+    int mnLocalMapVotedKFKept = 0;
+    int mnLocalMapVotedKFSkippedByBudget = 0;
+    int mnLocalMapVotedKFWouldSkipByBudget = 0;
+    int mnLocalMapVotedKFVisibilityKept = 0;
+    int mnLocalMapVotedKFVisibilitySkipped = 0;
+    int mnLocalMapRepeatabilityVoteTargetPoints = 0;
+    int mnLocalMapRepeatabilityWeakVotePoints = 0;
+    int mnLocalMapRepeatabilityWeakLowObsPoints = 0;
+    int mnLocalMapRepeatabilityWeakLowFoundPoints = 0;
+    int mnLocalMapRepeatabilityWeakOptUnstablePoints = 0;
+    int mnLocalMapRepeatabilityWeakLowRelevancePoints = 0;
+    int mnLocalMapRepeatabilityWeakVoteRaw = 0;
+    int mnLocalMapRepeatabilityWeakVoteEffective = 0;
+    int mnLocalMapRepeatabilityWeakVoteSuppressed = 0;
+    int mnLocalMapRepeatabilityWeakVoteKFs = 0;
+    int mnLocalMapMappingProbationVoteTargetPoints = 0;
+    int mnLocalMapMappingProbationActivePoints = 0;
+    int mnLocalMapMappingProbationPromotedPoints = 0;
+    int mnLocalMapMappingProbationVoteRaw = 0;
+    int mnLocalMapMappingProbationVoteEffective = 0;
+    int mnLocalMapMappingProbationVoteSuppressed = 0;
+    int mnLocalMapMappingProbationVoteKFs = 0;
+    bool mbLocalMapVotedKFBudgetActive = false;
+    bool mbLocalMapVotedKFBudgetShadowActive = false;
+    std::unordered_set<MapPoint*> msLocalKFContributionShadowMapPoints;
+    long unsigned int mnLocalKFContributionShadowFrameId = 0;
     
     // System
     System* mpSystem;
