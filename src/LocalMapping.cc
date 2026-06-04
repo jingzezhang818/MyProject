@@ -51,6 +51,11 @@ namespace
 {
     constexpr bool kEnableMappingProbationBehavior = false;
     constexpr bool kEnableXFeatCloseMidPendingTracklet = false;
+    constexpr bool kEnableMappingFeatureBudgetBehavior = false;
+    constexpr bool kEnableXFeatMappingProfileBehavior = false;
+    constexpr bool kEnableXFeatCloseMidPairSelectionBehavior = true;
+    constexpr int kXFeatMappingProfileCloseCreatedFloor = 90;
+    constexpr int kXFeatMappingProfileFallbackCreateCap = 45;
     constexpr int kPendingMappingTrackletBootstrapKFs = 5;
     constexpr int kPendingMappingTrackletMinObservations = 3;
     constexpr int kPendingMappingTrackletMinUpdatePasses = 2;
@@ -95,6 +100,26 @@ namespace
     {
         static const bool enabled = IsLocalMappingEnvFlagEnabled("XFEAT_DIAG_FEATURE_DISTRIBUTION");
         return enabled;
+    }
+
+    bool IsLocalMappingDeepDiagEnabled()
+    {
+        static const bool enabled = IsLocalMappingEnvFlagEnabled("XFEAT_DIAG_DEEP");
+        return enabled;
+    }
+
+    bool IsXFeatKeyFrameDescriptor(const KeyFrame* pKF)
+    {
+        return pKF && !pKF->mDescriptors.empty() && pKF->mDescriptors.type() == CV_32F;
+    }
+
+    bool IsXFeatMappingProfileEligible(const KeyFrame* pKF, const size_t idx)
+    {
+        if(!IsXFeatKeyFrameDescriptor(pKF))
+            return true;
+        if(idx >= pKF->mvXFeatMappingEligible.size())
+            return false;
+        return pKF->mvXFeatMappingEligible[idx] != 0;
     }
 
     struct ScalarDistributionStats
@@ -439,6 +464,381 @@ namespace
         if(close)
             stats.close++;
         AccumulateScalarDistribution(stats.depth, depth, true);
+    }
+
+    enum class TriangInputTerminalEvent
+    {
+        StereoFallbackReject,
+        ParallaxReject,
+        CheiralityReject,
+        ReprojectionReject,
+        ScaleReject,
+        Created
+    };
+
+    struct TriangInputFailureStats
+    {
+        int total = 0;
+        int stereoFallbackReject = 0;
+        int parallaxReject = 0;
+        int cheiralityReject = 0;
+        int reprojReject = 0;
+        int reprojKf1Only = 0;
+        int reprojKf2Only = 0;
+        int reprojBoth = 0;
+        int scaleReject = 0;
+        int created = 0;
+        int chi2Kf1Samples = 0;
+        int chi2Kf2Samples = 0;
+        int chi2MaxSamples = 0;
+        int cosSamples = 0;
+        int scaleResidualSamples = 0;
+        double chi2Kf1Sum = 0.0;
+        double chi2Kf2Sum = 0.0;
+        double chi2MaxSum = 0.0;
+        double cosParallaxSum = 0.0;
+        double scaleResidualSum = 0.0;
+    };
+
+    struct TriangInputPairContext
+    {
+        int neighborRank = -1;
+        int covisWeight = -1;
+        float baseline = std::numeric_limits<float>::quiet_NaN();
+        float baselineDepthRatio = std::numeric_limits<float>::quiet_NaN();
+    };
+
+    void AccumulateTriangInputFailureStats(TriangInputFailureStats& stats,
+                                           const TriangInputTerminalEvent event,
+                                           const float chi2Kf1,
+                                           const float chi2Kf2,
+                                           const bool reprojKf1Reject,
+                                           const bool reprojKf2Reject,
+                                           const float cosParallax,
+                                           const float scaleResidual)
+    {
+        stats.total++;
+        switch(event)
+        {
+            case TriangInputTerminalEvent::StereoFallbackReject:
+                stats.stereoFallbackReject++;
+                break;
+            case TriangInputTerminalEvent::ParallaxReject:
+                stats.parallaxReject++;
+                break;
+            case TriangInputTerminalEvent::CheiralityReject:
+                stats.cheiralityReject++;
+                break;
+            case TriangInputTerminalEvent::ReprojectionReject:
+                stats.reprojReject++;
+                if(reprojKf1Reject && reprojKf2Reject)
+                    stats.reprojBoth++;
+                else if(reprojKf1Reject)
+                    stats.reprojKf1Only++;
+                else if(reprojKf2Reject)
+                    stats.reprojKf2Only++;
+                break;
+            case TriangInputTerminalEvent::ScaleReject:
+                stats.scaleReject++;
+                break;
+            case TriangInputTerminalEvent::Created:
+                stats.created++;
+                break;
+        }
+
+        if(std::isfinite(chi2Kf1))
+        {
+            stats.chi2Kf1Samples++;
+            stats.chi2Kf1Sum += chi2Kf1;
+        }
+        if(std::isfinite(chi2Kf2))
+        {
+            stats.chi2Kf2Samples++;
+            stats.chi2Kf2Sum += chi2Kf2;
+        }
+        if(std::isfinite(chi2Kf1) || std::isfinite(chi2Kf2))
+        {
+            float chi2Max = 0.0f;
+            if(std::isfinite(chi2Kf1))
+                chi2Max = std::max(chi2Max, chi2Kf1);
+            if(std::isfinite(chi2Kf2))
+                chi2Max = std::max(chi2Max, chi2Kf2);
+            stats.chi2MaxSamples++;
+            stats.chi2MaxSum += chi2Max;
+        }
+        if(std::isfinite(cosParallax))
+        {
+            stats.cosSamples++;
+            stats.cosParallaxSum += cosParallax;
+        }
+        if(std::isfinite(scaleResidual))
+        {
+            stats.scaleResidualSamples++;
+            stats.scaleResidualSum += scaleResidual;
+        }
+    }
+
+    void PrintTriangInputFailureStats(const long unsigned int keyFrameId,
+                                      const char* dimension,
+                                      const char* binName,
+                                      const TriangInputFailureStats& stats)
+    {
+        if(stats.total <= 0)
+            return;
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        const auto avgOrMissing = [](const double sum, const int samples) -> double
+        {
+            return samples > 0 ? sum / static_cast<double>(samples) : -1.0;
+        };
+
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[LocalMapping][TriangInputFailure]"
+                  << " kf_id=" << keyFrameId
+                  << " dimension=" << dimension
+                  << " bin=" << binName
+                  << " total=" << stats.total
+                  << " stereo_fallback_reject=" << stats.stereoFallbackReject
+                  << " parallax_reject=" << stats.parallaxReject
+                  << " cheirality_reject=" << stats.cheiralityReject
+                  << " reproj_reject=" << stats.reprojReject
+                  << " reproj_kf1_only=" << stats.reprojKf1Only
+                  << " reproj_kf2_only=" << stats.reprojKf2Only
+                  << " reproj_both=" << stats.reprojBoth
+                  << " scale_reject=" << stats.scaleReject
+                  << " created=" << stats.created
+                  << " chi2_kf1_avg=" << avgOrMissing(stats.chi2Kf1Sum, stats.chi2Kf1Samples)
+                  << " chi2_kf2_avg=" << avgOrMissing(stats.chi2Kf2Sum, stats.chi2Kf2Samples)
+                  << " chi2_max_avg=" << avgOrMissing(stats.chi2MaxSum, stats.chi2MaxSamples)
+                  << " cos_parallax_avg=" << avgOrMissing(stats.cosParallaxSum, stats.cosSamples)
+                  << " scale_residual_avg=" << avgOrMissing(stats.scaleResidualSum, stats.scaleResidualSamples)
+                  << std::endl;
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
+    int TriangInputBackendBin(const MapPoint::TriangulationMatchBackend backend)
+    {
+        switch(backend)
+        {
+            case MapPoint::kTriangBackendXFeatBF:
+                return 1;
+            case MapPoint::kTriangBackendLightGlue:
+                return 2;
+            case MapPoint::kTriangBackendORB:
+            case MapPoint::kTriangBackendUnknown:
+            default:
+                return 0;
+        }
+    }
+
+    const char* TriangInputBackendBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "xfeat_bf";
+            case 2: return "lightglue";
+            case 3: return "tracklet";
+            default: return "unknown";
+        }
+    }
+
+    int TriangInputCloseDepthBin(const float depth)
+    {
+        if(!std::isfinite(depth) || depth <= 0.0f || depth > 10.0f)
+            return -1;
+        return depth <= 5.0f ? 0 : 1;
+    }
+
+    const char* TriangInputCloseDepthBinName(const int bin)
+    {
+        return bin == 0 ? "0_5" : "5_10";
+    }
+
+    int TriangInputOctavePairBin(const int octave1, const int octave2)
+    {
+        if(octave1 < 0 || octave2 < 0)
+            return 0;
+        const int diff = std::abs(octave1 - octave2);
+        if(diff == 0)
+            return 1;
+        if(diff == 1)
+            return 2;
+        return 3;
+    }
+
+    const char* TriangInputOctavePairBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "same";
+            case 2: return "off1";
+            case 3: return "off2p";
+            default: return "missing";
+        }
+    }
+
+    const char* TriangInputCurrentOctaveBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "0";
+            case 2: return "1";
+            case 3: return "2p";
+            default: return "missing";
+        }
+    }
+
+    int TriangInputEdgeDistanceBin(const KeyFrame* pKF, const cv::KeyPoint& kp)
+    {
+        if(!pKF)
+            return 0;
+        const float left = kp.pt.x - static_cast<float>(pKF->mnMinX);
+        const float right = static_cast<float>(pKF->mnMaxX) - kp.pt.x;
+        const float top = kp.pt.y - static_cast<float>(pKF->mnMinY);
+        const float bottom = static_cast<float>(pKF->mnMaxY) - kp.pt.y;
+        const float minDist = std::min(std::min(left, right), std::min(top, bottom));
+        if(!std::isfinite(minDist))
+            return 0;
+        if(minDist <= 20.0f)
+            return 1;
+        if(minDist <= 50.0f)
+            return 2;
+        return 3;
+    }
+
+    const char* TriangInputEdgeDistanceBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "near_edge";
+            case 2: return "mid";
+            case 3: return "interior";
+            default: return "missing";
+        }
+    }
+
+    int TriangInputNeighborRankBin(const int rank)
+    {
+        if(rank < 0)
+            return 0;
+        if(rank == 0)
+            return 1;
+        if(rank < 3)
+            return 2;
+        if(rank < 10)
+            return 3;
+        return 4;
+    }
+
+    const char* TriangInputNeighborRankBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "top1";
+            case 2: return "top3";
+            case 3: return "top10";
+            case 4: return "late";
+            default: return "missing";
+        }
+    }
+
+    int TriangInputKfIdDeltaBin(const KeyFrame* pKF1, const KeyFrame* pKF2)
+    {
+        if(!pKF1 || !pKF2)
+            return 0;
+        const long long id1 = static_cast<long long>(pKF1->mnId);
+        const long long id2 = static_cast<long long>(pKF2->mnId);
+        const long long delta = std::llabs(id1 - id2);
+        if(delta <= 2)
+            return 1;
+        if(delta <= 5)
+            return 2;
+        if(delta <= 15)
+            return 3;
+        return 4;
+    }
+
+    const char* TriangInputKfIdDeltaBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "0_2";
+            case 2: return "3_5";
+            case 3: return "6_15";
+            case 4: return "16p";
+            default: return "missing";
+        }
+    }
+
+    int TriangInputCovisWeightBin(const int weight)
+    {
+        if(weight < 0)
+            return 0;
+        if(weight < 15)
+            return 1;
+        if(weight < 50)
+            return 2;
+        return 3;
+    }
+
+    const char* TriangInputCovisWeightBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "low";
+            case 2: return "mid";
+            case 3: return "high";
+            default: return "missing";
+        }
+    }
+
+    int TriangInputBaselineBin(const float baseline)
+    {
+        if(!std::isfinite(baseline) || baseline < 0.0f)
+            return 0;
+        if(baseline < 0.05f)
+            return 1;
+        if(baseline < 0.15f)
+            return 2;
+        return 3;
+    }
+
+    const char* TriangInputBaselineBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "small";
+            case 2: return "mid";
+            case 3: return "large";
+            default: return "missing";
+        }
+    }
+
+    int TriangInputBaselineDepthRatioBin(const float ratio)
+    {
+        if(!std::isfinite(ratio) || ratio < 0.0f)
+            return 0;
+        if(ratio < 0.01f)
+            return 1;
+        if(ratio < 0.03f)
+            return 2;
+        if(ratio < 0.08f)
+            return 3;
+        return 4;
+    }
+
+    const char* TriangInputBaselineDepthRatioBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "weak";
+            case 2: return "low";
+            case 3: return "mid";
+            case 4: return "strong";
+            default: return "missing";
+        }
     }
 
     bool KeyFrameFeatureGridPosition(const KeyFrame* pKF,
@@ -1456,9 +1856,10 @@ void LocalMapping::CreateNewMapPoints()
 {
     // Retrieve neighbor keyframes in covisibility graph
     int nn = 10;
-    // For stereo inertial case
+    // Keep monocular triangulation fan-out aligned with the ORB/Rover-style
+    // backend contract; wider neighbor sets overproduce weak XFeat MapPoints.
     if(mbMonocular)
-        nn=30;
+        nn=10;
     vector<KeyFrame*> vpNeighKFs = mpCurrentKeyFrame->GetBestCovisibilityKeyFrames(nn);
 
     if (mbInertial)
@@ -1527,6 +1928,20 @@ void LocalMapping::CreateNewMapPoints()
     int mappingFeatureBudgetAcceptedLowResponse = 0;
     int mappingFeatureBudgetAcceptedOctave2p = 0;
     int mappingFeatureBudgetAcceptedEdgeGrid = 0;
+    int closeProfileEligibleCandidates = 0;
+    int closeProfileEligibleCreated = 0;
+    int closeProfileFallbackCandidates = 0;
+    int closeProfileFallbackCreated = 0;
+    int closePairSelectionCandidate = 0;
+    int closePairSelectionUniqueCurrent = 0;
+    int closePairSelectionCreated = 0;
+    int closePairSelectionDuplicateReject = 0;
+    int closePairSelectionBestTop1 = 0;
+    int closePairSelectionBestTop3 = 0;
+    int closePairSelectionBestTop10 = 0;
+    int closePairSelectionBestLate = 0;
+    int closePairSelection5To10Candidate = 0;
+    int closePairSelection5To10Created = 0;
     int mappingFeatureRepeatabilityCandidate = 0;
     int mappingFeatureRepeatabilityRepeatableCandidate = 0;
     int mappingFeatureRepeatabilitySingleSupportCandidate = 0;
@@ -1564,6 +1979,249 @@ void LocalMapping::CreateNewMapPoints()
     MappingFeatureCreateStats mappingFeatureResponseStats[kMappingFeatureResponseBins];
     MappingFeatureCreateStats mappingFeatureDepthStats[kMappingFeatureDepthBins];
     MappingFeatureCreateStats mappingFeatureCombinedStats[kMappingFeatureCombinedBins];
+    static constexpr int kTriangInputBackendBins = 4;
+    static constexpr int kTriangInputDepthBins = 2;
+    static constexpr int kTriangInputOctavePairBins = 4;
+    static constexpr int kTriangInputCurrentOctaveBins = 4;
+    static constexpr int kTriangInputResponseBins = 4;
+    static constexpr int kTriangInputGridBins = 4;
+    static constexpr int kTriangInputEdgeDistanceBins = 4;
+    static constexpr int kTriangInputNeighborRankBins = 5;
+    static constexpr int kTriangInputKfIdDeltaBins = 5;
+    static constexpr int kTriangInputCovisWeightBins = 4;
+    static constexpr int kTriangInputBaselineBins = 4;
+    static constexpr int kTriangInputBaselineDepthRatioBins = 5;
+    static constexpr int kTriangInputKf2OctaveBins = 4;
+    static constexpr int kTriangInputKf2ResponseBins = 4;
+    static constexpr int kTriangInputKf2EdgeDistanceBins = 4;
+    TriangInputFailureStats triangInputBackendStats[kTriangInputBackendBins];
+    TriangInputFailureStats triangInputDepthStats[kTriangInputDepthBins];
+    TriangInputFailureStats triangInputOctavePairStats[kTriangInputOctavePairBins];
+    TriangInputFailureStats triangInputCurrentOctaveStats[kTriangInputCurrentOctaveBins];
+    TriangInputFailureStats triangInputResponseStats[kTriangInputResponseBins];
+    TriangInputFailureStats triangInputGridStats[kTriangInputGridBins];
+    TriangInputFailureStats triangInputEdgeDistanceStats[kTriangInputEdgeDistanceBins];
+    TriangInputFailureStats triangInputNeighborRankStats[kTriangInputNeighborRankBins];
+    TriangInputFailureStats triangInputKfIdDeltaStats[kTriangInputKfIdDeltaBins];
+    TriangInputFailureStats triangInputCovisWeightStats[kTriangInputCovisWeightBins];
+    TriangInputFailureStats triangInputBaselineStats[kTriangInputBaselineBins];
+    TriangInputFailureStats triangInputBaselineDepthRatioStats[kTriangInputBaselineDepthRatioBins];
+    TriangInputFailureStats triangInputKf2OctaveStats[kTriangInputKf2OctaveBins];
+    TriangInputFailureStats triangInputKf2ResponseStats[kTriangInputKf2ResponseBins];
+    TriangInputFailureStats triangInputKf2EdgeDistanceStats[kTriangInputKf2EdgeDistanceBins];
+    const bool bCollectTriangInputFailureDiag =
+        bPrintTriangDiag &&
+        IsLocalMappingFeatureDiagEnabled() &&
+        IsLocalMappingDeepDiagEnabled() &&
+        !bUseORB &&
+        IsXFeatKeyFrameDescriptor(mpCurrentKeyFrame);
+
+    TriangInputPairContext currentTriangInputPairContext;
+
+    auto accumulateTriangInputFailureDiagWithContext =
+        [&](const TriangInputPairContext& context,
+            KeyFrame* pKF2,
+            const cv::KeyPoint& kp1,
+            const cv::KeyPoint& kp2,
+            const MapPoint::TriangulationMatchBackend backend,
+            const float closeDepth,
+            const TriangInputTerminalEvent event,
+            const float chi2Kf1,
+            const float chi2Kf2,
+            const bool reprojKf1Reject,
+            const bool reprojKf2Reject,
+            const float cosParallax,
+            const float scaleResidual)
+    {
+        if(!bCollectTriangInputFailureDiag || !IsXFeatKeyFrameDescriptor(pKF2))
+            return;
+        const int depthBin = TriangInputCloseDepthBin(closeDepth);
+        if(depthBin < 0 || depthBin >= kTriangInputDepthBins)
+            return;
+
+        int gridX = -1;
+        int gridY = -1;
+        KeyFrameFeatureGridPosition(mpCurrentKeyFrame, kp1, gridX, gridY);
+
+        const int backendBin = std::max(0, std::min(kTriangInputBackendBins - 1,
+                                                    TriangInputBackendBin(backend)));
+        const int octavePairBin = std::max(0, std::min(kTriangInputOctavePairBins - 1,
+                                                       TriangInputOctavePairBin(kp1.octave, kp2.octave)));
+        const int currentOctaveBin = std::max(0, std::min(kTriangInputCurrentOctaveBins - 1,
+                                                          MappingFeatureOctaveBin(kp1.octave)));
+        const int responseBin = std::max(0, std::min(kTriangInputResponseBins - 1,
+                                                     MappingFeatureResponseBin(kp1.response)));
+        const int gridBin = std::max(0, std::min(kTriangInputGridBins - 1,
+                                                 MappingFeatureGridBin(gridX, gridY)));
+        const int edgeDistanceBin = std::max(0, std::min(kTriangInputEdgeDistanceBins - 1,
+                                                         TriangInputEdgeDistanceBin(mpCurrentKeyFrame, kp1)));
+        const int neighborRankBin = std::max(0, std::min(kTriangInputNeighborRankBins - 1,
+                                                         TriangInputNeighborRankBin(context.neighborRank)));
+        const int kfIdDeltaBin = std::max(0, std::min(kTriangInputKfIdDeltaBins - 1,
+                                                      TriangInputKfIdDeltaBin(mpCurrentKeyFrame, pKF2)));
+        const int covisWeightBin = std::max(0, std::min(kTriangInputCovisWeightBins - 1,
+                                                        TriangInputCovisWeightBin(context.covisWeight)));
+        const int baselineBin = std::max(0, std::min(kTriangInputBaselineBins - 1,
+                                                     TriangInputBaselineBin(context.baseline)));
+        const int baselineDepthRatioBin = std::max(0, std::min(kTriangInputBaselineDepthRatioBins - 1,
+                                                               TriangInputBaselineDepthRatioBin(context.baselineDepthRatio)));
+        const int kf2OctaveBin = std::max(0, std::min(kTriangInputKf2OctaveBins - 1,
+                                                      MappingFeatureOctaveBin(kp2.octave)));
+        const int kf2ResponseBin = std::max(0, std::min(kTriangInputKf2ResponseBins - 1,
+                                                        MappingFeatureResponseBin(kp2.response)));
+        const int kf2EdgeDistanceBin = std::max(0, std::min(kTriangInputKf2EdgeDistanceBins - 1,
+                                                            TriangInputEdgeDistanceBin(pKF2, kp2)));
+
+        AccumulateTriangInputFailureStats(triangInputBackendStats[backendBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputDepthStats[depthBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputOctavePairStats[octavePairBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputCurrentOctaveStats[currentOctaveBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputResponseStats[responseBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputGridStats[gridBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputEdgeDistanceStats[edgeDistanceBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputNeighborRankStats[neighborRankBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputKfIdDeltaStats[kfIdDeltaBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputCovisWeightStats[covisWeightBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputBaselineStats[baselineBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputBaselineDepthRatioStats[baselineDepthRatioBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputKf2OctaveStats[kf2OctaveBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputKf2ResponseStats[kf2ResponseBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+        AccumulateTriangInputFailureStats(triangInputKf2EdgeDistanceStats[kf2EdgeDistanceBin],
+                                          event,
+                                          chi2Kf1,
+                                          chi2Kf2,
+                                          reprojKf1Reject,
+                                          reprojKf2Reject,
+                                          cosParallax,
+                                          scaleResidual);
+    };
+
+    auto accumulateTriangInputFailureDiag =
+        [&](KeyFrame* pKF2,
+            const cv::KeyPoint& kp1,
+            const cv::KeyPoint& kp2,
+            const MapPoint::TriangulationMatchBackend backend,
+            const float closeDepth,
+            const TriangInputTerminalEvent event,
+            const float chi2Kf1,
+            const float chi2Kf2,
+            const bool reprojKf1Reject,
+            const bool reprojKf2Reject,
+            const float cosParallax,
+            const float scaleResidual)
+    {
+        accumulateTriangInputFailureDiagWithContext(currentTriangInputPairContext,
+                                                    pKF2,
+                                                    kp1,
+                                                    kp2,
+                                                    backend,
+                                                    closeDepth,
+                                                    event,
+                                                    chi2Kf1,
+                                                    chi2Kf2,
+                                                    reprojKf1Reject,
+                                                    reprojKf2Reject,
+                                                    cosParallax,
+                                                    scaleResidual);
+    };
 
     struct MappingTriangulationCandidate
     {
@@ -1571,6 +2229,8 @@ void LocalMapping::CreateNewMapPoints()
         KeyFrame* pKF2 = nullptr;
         size_t idx1 = 0;
         size_t idx2 = 0;
+        cv::KeyPoint diagKp1;
+        cv::KeyPoint diagKp2;
         Eigen::Vector3f x3D = Eigen::Vector3f::Zero();
         float triangDepth = -1.0f;
         float cosParallaxRays = 1.0f;
@@ -1595,12 +2255,16 @@ void LocalMapping::CreateNewMapPoints()
         bool bCloseRayCandidate = false;
         bool bCloseRay0To5 = false;
         bool bCloseRay5To10 = false;
+        bool bProfileEligible = true;
         float qualityScore = 0.0f;
         int repeatabilitySupport = 1;
         bool bRepeatabilitySupported = false;
+        TriangInputPairContext triangInputPairContext;
     };
 
     std::vector<MappingTriangulationCandidate> vPendingMappingFeatureCandidates;
+    std::vector<MappingTriangulationCandidate> vProfileFallbackCandidates;
+    std::vector<MappingTriangulationCandidate> vCloseMidPairSelectionCandidates;
 
     auto computeMappingCandidateQualityScore =
         [](const MappingTriangulationCandidate& candidate) -> float
@@ -1622,6 +2286,32 @@ void LocalMapping::CreateNewMapPoints()
 
         return 2.0f * parallaxScore + 1.5f * scaleScore + responseScore -
                reprojPenalty - octavePenalty - edgePenalty;
+    };
+
+    auto computeCloseMidPairSelectionScore =
+        [](const MappingTriangulationCandidate& candidate) -> float
+    {
+        const float baselineDepthRatio = candidate.triangInputPairContext.baselineDepthRatio;
+        float baselineDepthScore = 0.0f;
+        if(std::isfinite(baselineDepthRatio) && baselineDepthRatio > 0.0f)
+        {
+            baselineDepthScore = std::min(2.0f, baselineDepthRatio * 25.0f);
+        }
+
+        const float parallaxMargin =
+            std::max(0.0f, 0.9994f - candidate.cosParallaxRays);
+        const float parallaxScore = std::min(2.0f, parallaxMargin * 1000.0f);
+        const float reprojPenalty =
+            std::isfinite(candidate.reprojChi2Max) ? 0.35f * candidate.reprojChi2Max : 2.0f;
+        const float scaleScore =
+            std::isfinite(candidate.scaleLogMargin) ?
+                std::max(-1.0f, std::min(1.0f, candidate.scaleLogMargin)) : -1.0f;
+
+        return candidate.qualityScore +
+               1.25f * baselineDepthScore +
+               0.75f * parallaxScore +
+               0.50f * scaleScore -
+               reprojPenalty;
     };
 
     auto isKeyFrameSlotFree = [](KeyFrame* pKF, const size_t idx) -> bool
@@ -1735,6 +2425,19 @@ void LocalMapping::CreateNewMapPoints()
                 close0To5Created++;
             if(candidate.bCloseRay5To10)
                 close5To10Created++;
+            accumulateTriangInputFailureDiagWithContext(candidate.triangInputPairContext,
+                                                        candidate.pKF2,
+                                                        candidate.diagKp1,
+                                                        candidate.diagKp2,
+                                                        candidate.triangBackend,
+                                                        candidate.triangDepth,
+                                                        TriangInputTerminalEvent::Created,
+                                                        candidate.reprojChi2First,
+                                                        candidate.reprojChi2Second,
+                                                        false,
+                                                        false,
+                                                        candidate.cosParallaxRays,
+                                                        candidate.scaleLogResidual);
         }
 
         pMP->AddObservation(pKF1, candidate.idx1);
@@ -2275,12 +2978,134 @@ void LocalMapping::CreateNewMapPoints()
         vPendingMappingFeatureCandidates.clear();
     };
 
+    auto processProfileFallbackCandidates = [&]()
+    {
+        if(vProfileFallbackCandidates.empty())
+            return;
+
+        std::sort(vProfileFallbackCandidates.begin(),
+                  vProfileFallbackCandidates.end(),
+                  [](const MappingTriangulationCandidate& a,
+                     const MappingTriangulationCandidate& b)
+                  {
+                      if(a.qualityScore != b.qualityScore)
+                          return a.qualityScore > b.qualityScore;
+                      if(a.reprojChi2Max != b.reprojChi2Max)
+                          return a.reprojChi2Max < b.reprojChi2Max;
+                      if(a.cosParallaxRays != b.cosParallaxRays)
+                          return a.cosParallaxRays < b.cosParallaxRays;
+                      if(a.response != b.response)
+                          return a.response > b.response;
+                      if(a.octave != b.octave)
+                          return a.octave < b.octave;
+                      if(a.idx1 != b.idx1)
+                          return a.idx1 < b.idx1;
+                      return a.idx2 < b.idx2;
+                  });
+
+        int fallbackCreatedThisPass = 0;
+        for(const MappingTriangulationCandidate& candidate : vProfileFallbackCandidates)
+        {
+            if(closeCreated >= kXFeatMappingProfileCloseCreatedFloor ||
+               fallbackCreatedThisPass >= kXFeatMappingProfileFallbackCreateCap)
+            {
+                break;
+            }
+
+            if(createMapPointFromCandidate(candidate))
+            {
+                closeProfileFallbackCreated++;
+                fallbackCreatedThisPass++;
+            }
+        }
+        vProfileFallbackCandidates.clear();
+    };
+
+    auto processCloseMidPairSelectionCandidates = [&]()
+    {
+        if(vCloseMidPairSelectionCandidates.empty())
+            return;
+
+        std::set<size_t> uniqueCurrentKeypoints;
+        for(const MappingTriangulationCandidate& candidate : vCloseMidPairSelectionCandidates)
+            uniqueCurrentKeypoints.insert(candidate.idx1);
+        closePairSelectionUniqueCurrent += static_cast<int>(uniqueCurrentKeypoints.size());
+
+        std::sort(vCloseMidPairSelectionCandidates.begin(),
+                  vCloseMidPairSelectionCandidates.end(),
+                  [&](const MappingTriangulationCandidate& a,
+                      const MappingTriangulationCandidate& b)
+                  {
+                      const float scoreA = computeCloseMidPairSelectionScore(a);
+                      const float scoreB = computeCloseMidPairSelectionScore(b);
+                      if(scoreA != scoreB)
+                          return scoreA > scoreB;
+                      if(a.reprojChi2Max != b.reprojChi2Max)
+                          return a.reprojChi2Max < b.reprojChi2Max;
+                      if(a.cosParallaxRays != b.cosParallaxRays)
+                          return a.cosParallaxRays < b.cosParallaxRays;
+                      if(a.scaleLogResidual != b.scaleLogResidual)
+                          return a.scaleLogResidual < b.scaleLogResidual;
+                      if(a.response != b.response)
+                          return a.response > b.response;
+                      if(a.octave != b.octave)
+                          return a.octave < b.octave;
+                      if(a.idx1 != b.idx1)
+                          return a.idx1 < b.idx1;
+                      return a.idx2 < b.idx2;
+                  });
+
+        std::unordered_set<size_t> selectedCurrentKeypoints;
+        selectedCurrentKeypoints.reserve(vCloseMidPairSelectionCandidates.size());
+        for(const MappingTriangulationCandidate& candidate : vCloseMidPairSelectionCandidates)
+        {
+            if(selectedCurrentKeypoints.find(candidate.idx1) != selectedCurrentKeypoints.end())
+            {
+                closePairSelectionDuplicateReject++;
+                continue;
+            }
+
+            if(!isKeyFrameSlotFree(mpCurrentKeyFrame, candidate.idx1) ||
+               !isKeyFrameSlotFree(candidate.pKF2, candidate.idx2))
+            {
+                closePairSelectionDuplicateReject++;
+                continue;
+            }
+
+            selectedCurrentKeypoints.insert(candidate.idx1);
+            if(!createMapPointFromCandidate(candidate))
+            {
+                selectedCurrentKeypoints.erase(candidate.idx1);
+                closePairSelectionDuplicateReject++;
+                continue;
+            }
+
+            closePairSelectionCreated++;
+            if(candidate.bCloseRay5To10)
+                closePairSelection5To10Created++;
+
+            const int rankBin = TriangInputNeighborRankBin(
+                candidate.triangInputPairContext.neighborRank);
+            if(rankBin == 1)
+                closePairSelectionBestTop1++;
+            else if(rankBin == 2)
+                closePairSelectionBestTop3++;
+            else if(rankBin == 3)
+                closePairSelectionBestTop10++;
+            else if(rankBin == 4)
+                closePairSelectionBestLate++;
+        }
+        vCloseMidPairSelectionCandidates.clear();
+    };
+
     // Search matches with epipolar restriction and triangulate
     for(size_t i=0; i<vpNeighKFs.size(); i++)
     {
         if(i>0 && CheckNewKeyFrames())
         {
+            processCloseMidPairSelectionCandidates();
             processPendingMappingFeatureCandidates();
+            processProfileFallbackCandidates();
             return;
         }
 
@@ -2292,6 +3117,14 @@ void LocalMapping::CreateNewMapPoints()
         Eigen::Vector3f Ow2 = pKF2->GetCameraCenter();
         Eigen::Vector3f vBaseline = Ow2-Ow1;
         const float baseline = vBaseline.norm();
+        const float medianDepthKF2ForDiag = pKF2->ComputeSceneMedianDepth(2);
+        const float ratioBaselineDepthForDiag =
+            medianDepthKF2ForDiag > 0.0f ? baseline / medianDepthKF2ForDiag
+                                         : std::numeric_limits<float>::quiet_NaN();
+        currentTriangInputPairContext.neighborRank = static_cast<int>(i);
+        currentTriangInputPairContext.covisWeight = mpCurrentKeyFrame->GetWeight(pKF2);
+        currentTriangInputPairContext.baseline = baseline;
+        currentTriangInputPairContext.baselineDepthRatio = ratioBaselineDepthForDiag;
 
         if(!mbMonocular)
         {
@@ -2300,8 +3133,8 @@ void LocalMapping::CreateNewMapPoints()
         }
         else
         {
-            const float medianDepthKF2 = pKF2->ComputeSceneMedianDepth(2);
-            const float ratioBaselineDepth = baseline/medianDepthKF2;
+            const float medianDepthKF2 = medianDepthKF2ForDiag;
+            const float ratioBaselineDepth = ratioBaselineDepthForDiag;
 
             if(ratioBaselineDepth<0.01)
                 continue;
@@ -2516,11 +3349,51 @@ void LocalMapping::CreateNewMapPoints()
             //Check triangulation in front of cameras
             float z1 = Rcw1.row(2).dot(x3D) + tcw1(2);
             if(z1<=0)
+            {
+                if(bPointStereo &&
+                   std::isfinite(stereoFallbackDepth) &&
+                   stereoFallbackDepth > 0.0f &&
+                   stereoFallbackDepth <= 10.0f)
+                {
+                    accumulateTriangInputFailureDiag(pKF2,
+                                                     kp1,
+                                                     kp2,
+                                                     triangBackend,
+                                                     stereoFallbackDepth,
+                                                     TriangInputTerminalEvent::CheiralityReject,
+                                                     std::numeric_limits<float>::quiet_NaN(),
+                                                     std::numeric_limits<float>::quiet_NaN(),
+                                                     false,
+                                                     false,
+                                                     cosParallaxRays,
+                                                     std::numeric_limits<float>::quiet_NaN());
+                }
                 continue;
+            }
 
             float z2 = Rcw2.row(2).dot(x3D) + tcw2(2);
             if(z2<=0)
+            {
+                if(bPointStereo &&
+                   std::isfinite(stereoFallbackDepth) &&
+                   stereoFallbackDepth > 0.0f &&
+                   stereoFallbackDepth <= 10.0f)
+                {
+                    accumulateTriangInputFailureDiag(pKF2,
+                                                     kp1,
+                                                     kp2,
+                                                     triangBackend,
+                                                     stereoFallbackDepth,
+                                                     TriangInputTerminalEvent::CheiralityReject,
+                                                     std::numeric_limits<float>::quiet_NaN(),
+                                                     std::numeric_limits<float>::quiet_NaN(),
+                                                     false,
+                                                     false,
+                                                     cosParallaxRays,
+                                                     std::numeric_limits<float>::quiet_NaN());
+                }
                 continue;
+            }
 
             const float triangDepth = std::min(z1, z2);
             const bool bCloseRay0To5 = !bPointStereo && triangDepth <= 5.0f;
@@ -2539,6 +3412,18 @@ void LocalMapping::CreateNewMapPoints()
                 {
                     closeStereoFallbackCandidates++;
                     closeStereoFallbackReject++;
+                    accumulateTriangInputFailureDiag(pKF2,
+                                                     kp1,
+                                                     kp2,
+                                                     triangBackend,
+                                                     stereoFallbackDepth,
+                                                     TriangInputTerminalEvent::StereoFallbackReject,
+                                                     std::numeric_limits<float>::quiet_NaN(),
+                                                     std::numeric_limits<float>::quiet_NaN(),
+                                                     false,
+                                                     false,
+                                                     cosParallaxRays,
+                                                     std::numeric_limits<float>::quiet_NaN());
                     continue;
                 }
 
@@ -2556,6 +3441,18 @@ void LocalMapping::CreateNewMapPoints()
                         close0To5ParallaxReject++;
                     if(bCloseRay5To10)
                         close5To10ParallaxReject++;
+                    accumulateTriangInputFailureDiag(pKF2,
+                                                     kp1,
+                                                     kp2,
+                                                     triangBackend,
+                                                     triangDepth,
+                                                     TriangInputTerminalEvent::ParallaxReject,
+                                                     std::numeric_limits<float>::quiet_NaN(),
+                                                     std::numeric_limits<float>::quiet_NaN(),
+                                                     false,
+                                                     false,
+                                                     cosParallaxRays,
+                                                     std::numeric_limits<float>::quiet_NaN());
                     continue;
                 }
             }
@@ -2569,6 +3466,8 @@ void LocalMapping::CreateNewMapPoints()
             const float stereoReprojFactor = bCloseRayCandidate ? 6.0f : 7.8f;
             float reprojChi2First = std::numeric_limits<float>::quiet_NaN();
             float reprojChi2Second = std::numeric_limits<float>::quiet_NaN();
+            bool bReprojRejectFirst = false;
+            bool bReprojRejectSecond = false;
 
             if(!bStereo1)
             {
@@ -2578,11 +3477,7 @@ void LocalMapping::CreateNewMapPoints()
                 reprojChi2First = (errX1*errX1+errY1*errY1) / sigmaSquare1;
 
                 if(reprojChi2First > monoReprojFactor)
-                {
-                    if(bCloseRayCandidate)
-                        closeReprojReject++;
-                    continue;
-                }
+                    bReprojRejectFirst = true;
 
             }
             else
@@ -2595,11 +3490,7 @@ void LocalMapping::CreateNewMapPoints()
                 float errX1_r = u1_r - kp1_ur;
                 reprojChi2First = (errX1*errX1+errY1*errY1+errX1_r*errX1_r) / sigmaSquare1;
                 if(reprojChi2First > stereoReprojFactor)
-                {
-                    if(bCloseRayCandidate)
-                        closeReprojReject++;
-                    continue;
-                }
+                    bReprojRejectFirst = true;
             }
 
             //Check reprojection error in second keyframe
@@ -2614,11 +3505,7 @@ void LocalMapping::CreateNewMapPoints()
                 float errY2 = uv2.y - kp2.pt.y;
                 reprojChi2Second = (errX2*errX2+errY2*errY2) / sigmaSquare2;
                 if(reprojChi2Second > monoReprojFactor)
-                {
-                    if(bCloseRayCandidate)
-                        closeReprojReject++;
-                    continue;
-                }
+                    bReprojRejectSecond = true;
             }
             else
             {
@@ -2630,11 +3517,28 @@ void LocalMapping::CreateNewMapPoints()
                 float errX2_r = u2_r - kp2_ur;
                 reprojChi2Second = (errX2*errX2+errY2*errY2+errX2_r*errX2_r) / sigmaSquare2;
                 if(reprojChi2Second > stereoReprojFactor)
+                    bReprojRejectSecond = true;
+            }
+
+            if(bReprojRejectFirst || bReprojRejectSecond)
+            {
+                if(bCloseRayCandidate)
                 {
-                    if(bCloseRayCandidate)
-                        closeReprojReject++;
-                    continue;
+                    closeReprojReject++;
+                    accumulateTriangInputFailureDiag(pKF2,
+                                                     kp1,
+                                                     kp2,
+                                                     triangBackend,
+                                                     triangDepth,
+                                                     TriangInputTerminalEvent::ReprojectionReject,
+                                                     reprojChi2First,
+                                                     reprojChi2Second,
+                                                     bReprojRejectFirst,
+                                                     bReprojRejectSecond,
+                                                     cosParallaxRays,
+                                                     std::numeric_limits<float>::quiet_NaN());
                 }
+                continue;
             }
 
             //Check scale consistency
@@ -2660,7 +3564,21 @@ void LocalMapping::CreateNewMapPoints()
             if(ratioDist*activeRatioFactor<ratioOctave || ratioDist>ratioOctave*activeRatioFactor)
             {
                 if(bCloseRayCandidate)
+                {
                     closeScaleReject++;
+                    accumulateTriangInputFailureDiag(pKF2,
+                                                     kp1,
+                                                     kp2,
+                                                     triangBackend,
+                                                     triangDepth,
+                                                     TriangInputTerminalEvent::ScaleReject,
+                                                     reprojChi2First,
+                                                     reprojChi2Second,
+                                                     false,
+                                                     false,
+                                                     cosParallaxRays,
+                                                     scaleLogResidual);
+                }
                 continue;
             }
 
@@ -2680,12 +3598,21 @@ void LocalMapping::CreateNewMapPoints()
                                           mappingFeatureStereoQualityBin);
             const int mappingFeatureBudgetCell =
                 MappingFeatureBudgetCellIndex(mappingFeatureGridX, mappingFeatureGridY);
-            const bool bUseMappingFeatureBudget = !bUseORB && bCloseRayCandidate;
+            const bool bUseMappingFeatureBudget =
+                kEnableMappingFeatureBudgetBehavior && !bUseORB && bCloseRayCandidate;
+            const bool bUseMappingProfile =
+                kEnableXFeatMappingProfileBehavior && !bUseORB && bCloseRayCandidate;
+            const bool bCurrentProfileEligible =
+                !bUseMappingProfile || IsXFeatMappingProfileEligible(mpCurrentKeyFrame, static_cast<size_t>(idx1));
+            const bool bNeighborProfileEligible =
+                !bUseMappingProfile || IsXFeatMappingProfileEligible(pKF2, static_cast<size_t>(idx2));
             MappingTriangulationCandidate candidate;
             candidate.pKF1 = mpCurrentKeyFrame;
             candidate.pKF2 = pKF2;
             candidate.idx1 = static_cast<size_t>(idx1);
             candidate.idx2 = static_cast<size_t>(idx2);
+            candidate.diagKp1 = kp1;
+            candidate.diagKp2 = kp2;
             candidate.x3D = x3D;
             candidate.triangDepth = triangDepth;
             candidate.cosParallaxRays = cosParallaxRays;
@@ -2710,7 +3637,25 @@ void LocalMapping::CreateNewMapPoints()
             candidate.bCloseRayCandidate = bCloseRayCandidate;
             candidate.bCloseRay0To5 = bCloseRay0To5;
             candidate.bCloseRay5To10 = bCloseRay5To10;
+            candidate.bProfileEligible = bCurrentProfileEligible && bNeighborProfileEligible;
             candidate.qualityScore = computeMappingCandidateQualityScore(candidate);
+            candidate.triangInputPairContext = currentTriangInputPairContext;
+
+            if(bUseMappingProfile)
+            {
+                if(candidate.bProfileEligible)
+                {
+                    closeProfileEligibleCandidates++;
+                    if(createMapPointFromCandidate(candidate))
+                        closeProfileEligibleCreated++;
+                }
+                else
+                {
+                    closeProfileFallbackCandidates++;
+                    vProfileFallbackCandidates.push_back(candidate);
+                }
+                continue;
+            }
 
             if(bUseMappingFeatureBudget)
             {
@@ -2719,11 +3664,22 @@ void LocalMapping::CreateNewMapPoints()
                 continue;
             }
 
+            if(kEnableXFeatCloseMidPairSelectionBehavior && !bUseORB && bCloseRayCandidate)
+            {
+                closePairSelectionCandidate++;
+                if(bCloseRay5To10)
+                    closePairSelection5To10Candidate++;
+                vCloseMidPairSelectionCandidates.push_back(candidate);
+                continue;
+            }
+
             createMapPointFromCandidate(candidate);
         }
     }
 
+    processCloseMidPairSelectionCandidates();
     processPendingMappingFeatureCandidates();
+    processProfileFallbackCandidates();
 
     int mappingTrackletAlive = 0;
     int mappingTrackletObsSum = 0;
@@ -2779,6 +3735,21 @@ void LocalMapping::CreateNewMapPoints()
                   << " close_5_10_candidates=" << close5To10Candidates
                   << " close_5_10_parallax_reject=" << close5To10ParallaxReject
                   << " close_5_10_created=" << close5To10Created
+                  << " close_profile_eligible_candidates=" << closeProfileEligibleCandidates
+                  << " close_profile_eligible_created=" << closeProfileEligibleCreated
+                  << " close_profile_fallback_candidates=" << closeProfileFallbackCandidates
+                  << " close_profile_fallback_created=" << closeProfileFallbackCreated
+                  << " close_pair_select_active=" << (kEnableXFeatCloseMidPairSelectionBehavior && !bUseORB ? 1 : 0)
+                  << " close_pair_select_candidate=" << closePairSelectionCandidate
+                  << " close_pair_select_unique_current=" << closePairSelectionUniqueCurrent
+                  << " close_pair_select_created=" << closePairSelectionCreated
+                  << " close_pair_select_duplicate_reject=" << closePairSelectionDuplicateReject
+                  << " close_pair_select_best_top1=" << closePairSelectionBestTop1
+                  << " close_pair_select_best_top3=" << closePairSelectionBestTop3
+                  << " close_pair_select_best_top10=" << closePairSelectionBestTop10
+                  << " close_pair_select_best_late=" << closePairSelectionBestLate
+                  << " close_pair_select_5_10_candidate=" << closePairSelection5To10Candidate
+                  << " close_pair_select_5_10_created=" << closePairSelection5To10Created
                   << " mapping_feature_budget_candidate=" << mappingFeatureBudgetCandidate
                   << " mapping_feature_budget_unique_candidates=" << mappingFeatureBudgetUniqueCandidates
                   << " mapping_feature_budget_accept=" << mappingFeatureBudgetAccept
@@ -2813,6 +3784,115 @@ void LocalMapping::CreateNewMapPoints()
                   << " mapping_tracklet_promotion_failed=" << mappingTrackletPromotionFailed
                   << " mapping_tracklet_alive=" << mappingTrackletAlive
                   << std::endl;
+
+        if(bCollectTriangInputFailureDiag)
+        {
+            for(int bin = 0; bin < kTriangInputBackendBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "backend_bin",
+                                             TriangInputBackendBinName(bin),
+                                             triangInputBackendStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputDepthBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "depth_bin",
+                                             TriangInputCloseDepthBinName(bin),
+                                             triangInputDepthStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputOctavePairBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "octave_pair_bin",
+                                             TriangInputOctavePairBinName(bin),
+                                             triangInputOctavePairStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputCurrentOctaveBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "current_octave_bin",
+                                             TriangInputCurrentOctaveBinName(bin),
+                                             triangInputCurrentOctaveStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputResponseBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "response_bin",
+                                             MappingFeatureResponseBinName(bin),
+                                             triangInputResponseStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputGridBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "grid_bin",
+                                             MappingFeatureGridBinName(bin),
+                                             triangInputGridStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputEdgeDistanceBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "edge_distance_bin",
+                                             TriangInputEdgeDistanceBinName(bin),
+                                             triangInputEdgeDistanceStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputNeighborRankBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "neighbor_rank_bin",
+                                             TriangInputNeighborRankBinName(bin),
+                                             triangInputNeighborRankStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputKfIdDeltaBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "kf_id_delta_bin",
+                                             TriangInputKfIdDeltaBinName(bin),
+                                             triangInputKfIdDeltaStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputCovisWeightBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "covis_weight_bin",
+                                             TriangInputCovisWeightBinName(bin),
+                                             triangInputCovisWeightStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputBaselineBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "baseline_bin",
+                                             TriangInputBaselineBinName(bin),
+                                             triangInputBaselineStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputBaselineDepthRatioBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "baseline_depth_ratio_bin",
+                                             TriangInputBaselineDepthRatioBinName(bin),
+                                             triangInputBaselineDepthRatioStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputKf2OctaveBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "kf2_octave_bin",
+                                             TriangInputCurrentOctaveBinName(bin),
+                                             triangInputKf2OctaveStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputKf2ResponseBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "kf2_response_bin",
+                                             MappingFeatureResponseBinName(bin),
+                                             triangInputKf2ResponseStats[bin]);
+            }
+            for(int bin = 0; bin < kTriangInputKf2EdgeDistanceBins; ++bin)
+            {
+                PrintTriangInputFailureStats(mpCurrentKeyFrame->mnId,
+                                             "kf2_edge_distance_bin",
+                                             TriangInputEdgeDistanceBinName(bin),
+                                             triangInputKf2EdgeDistanceStats[bin]);
+            }
+        }
 
         const std::ios::fmtflags oldFlags = std::cout.flags();
         const std::streamsize oldPrecision = std::cout.precision();

@@ -73,6 +73,14 @@ public:
         return mvInvLevelSigma2;
     }
 
+    int inline GetNFeatures() const {
+        return nfeatures;
+    }
+
+    std::vector<int> inline GetFeaturesPerLevel() const {
+        return mnFeaturesPerLevel;
+    }
+
     std::vector<cv::Mat> mvImagePyramid;
 
 protected:

@@ -10,6 +10,7 @@
 #include <vector>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/features2d.hpp>
+#include <opencv2/imgproc.hpp>
 
 namespace ORB_SLAM3
 {
@@ -88,6 +89,15 @@ bool UseLegacyLevelAwareRatioGate()
 {
     //调试: 兼容旧逻辑时仅在同octave下做ratio过滤；默认关闭（即所有候选都做ratio）。
     static const bool enabled = IsEnvFlagEnabled("XFEAT_LEGACY_LEVEL_RATIO");
+    return enabled;
+}
+
+bool UseXFeatRoverBackendContract()
+{
+    // Rover-style learned-feature contract is an explicit A/B only. The
+    // default backend contract stays ORB-like because broad Rover mode admitted
+    // many low-quality local projection candidates in SePT01.
+    static const bool enabled = IsEnvFlagEnabled("XFEAT_ENABLE_ROVER_BACKEND");
     return enabled;
 }
 
@@ -178,9 +188,22 @@ float GetXFeatMatchSpatialCapScale()
 
 bool UseXFeatProjectionLevelGate()
 {
-    //调试: 投影匹配的尺度层级门控总开关，默认开启；`XFEAT_PROJ_DISABLE_LEVEL_GATE=1` 可关闭。
+    // Default XFeat behavior is ORB-like: use the predicted octave gate unless
+    // explicitly disabled. Rover A/B keeps its weak-scale behavior opt-in.
+    if(UseXFeatRoverBackendContract())
+        return IsEnvFlagEnabled("XFEAT_PROJ_ENABLE_LEVEL_GATE");
+
     static const bool enabled = !IsEnvFlagEnabled("XFEAT_PROJ_DISABLE_LEVEL_GATE");
     return enabled;
+}
+
+float ApplyXFeatProjectionRadiusContract(const float radiusPx)
+{
+    if(!UseXFeatRoverBackendContract())
+        return radiusPx;
+
+    static constexpr float kRoverMinProjectionRadiusPx = 6.0f;
+    return std::max(radiusPx, kRoverMinProjectionRadiusPx);
 }
 
 float ResolveMapPointDepthInFrame(const Frame& F, MapPoint* pMP)
@@ -380,6 +403,8 @@ struct CandidateMatch
     float radiusPx = -1.0f;
     int predictedLevel = -1;
     unsigned char side = 0;
+    float projX = std::numeric_limits<float>::quiet_NaN();
+    float projY = std::numeric_limits<float>::quiet_NaN();
 };
 
 struct LocalProjectionMatcherDiagnosticValues
@@ -484,11 +509,21 @@ LocalProjectionMatcherDiagnosticValues ComputeLocalProjectionMatcherDiagnosticVa
 
     const bool bRight = (F.Nleft != -1 && featIdx >= F.Nleft);
     values.side = bRight ? 2 : 1;
-    const float projX = bRight ? pMP->mTrackProjXR : pMP->mTrackProjX;
-    const float projY = bRight ? pMP->mTrackProjYR : pMP->mTrackProjY;
+    float projX = bRight ? pMP->mTrackProjXR : pMP->mTrackProjX;
+    float projY = bRight ? pMP->mTrackProjYR : pMP->mTrackProjY;
+    if((!std::isfinite(projX) || !std::isfinite(projY)) &&
+       c.side == values.side &&
+       std::isfinite(c.projX) &&
+       std::isfinite(c.projY))
+    {
+        projX = c.projX;
+        projY = c.projY;
+    }
     values.projX = projX;
     values.projY = projY;
     values.predLevel = bRight ? pMP->mnTrackScaleLevelR : pMP->mnTrackScaleLevel;
+    if(values.predLevel < 0 && c.side == values.side)
+        values.predLevel = c.predictedLevel;
     const float viewCos = bRight ? pMP->mTrackViewCosR : pMP->mTrackViewCos;
     values.radiusPx = (c.side == values.side) ? c.radiusPx : -1.0f;
     if(values.radiusPx <= 0.0f || !std::isfinite(values.radiusPx))
@@ -1795,7 +1830,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
         ? std::min(2.0f, std::max(0.05f, thHighOverride))
         : TH_HIGH;
     mLastProjectionMapPointStats = ProjectionMapPointStats();
-    if(bResetDiagnostics)
+    if(bResetDiagnostics && F.mvLocalProjBestDist.size() != static_cast<size_t>(F.N))
         ResetLocalProjectionMatcherDiagnostics(F);
 
     int rawMatches = 0;
@@ -1861,7 +1896,8 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                                   minLevel,
                                   maxLevel);
 
-        const float fallbackRadiusPx = 1.5f * baseRadius * F.mvScaleFactors[nPredictedLevel];
+        const float fallbackRadiusPx =
+            ApplyXFeatProjectionRadiusContract(1.5f * baseRadius * F.mvScaleFactors[nPredictedLevel]);
         const bool bRight = side == 2;
         const float projX = bRight ? pMP->mTrackProjXR : pMP->mTrackProjX;
         const float projY = bRight ? pMP->mTrackProjYR : pMP->mTrackProjY;
@@ -2060,7 +2096,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             float r = RadiusByViewingCos(pMP->mTrackViewCos);
             if(bFactor)
                 r *= th;
-            const float radiusPx = r * F.mvScaleFactors[nPredictedLevel];
+            const float radiusPx = ApplyXFeatProjectionRadiusContract(r * F.mvScaleFactors[nPredictedLevel]);
 
             int minLevel = -1;
             int maxLevel = -1;
@@ -2114,7 +2150,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                 if(F.Nleft == -1 && idx < F.mvuRight.size() && F.mvuRight[idx] > 0)
                 {
                     const float er = std::fabs(pMP->mTrackProjXR - F.mvuRight[idx]);
-                    const float baseUrThreshold = r * F.mvScaleFactors[nPredictedLevel];
+                    const float baseUrThreshold = radiusPx;
                     const float urThreshold = useCloseTrackingStereoGeomGate ? (0.5f * baseUrThreshold) : baseUrThreshold;
                     if(er > urThreshold)
                     {
@@ -2235,7 +2271,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
             }
 
             const float r = RadiusByViewingCos(pMP->mTrackViewCosR);
-            const float radiusPx = r * F.mvScaleFactors[nPredictedLevel];
+            const float radiusPx = ApplyXFeatProjectionRadiusContract(r * F.mvScaleFactors[nPredictedLevel]);
 
             int minLevel = -1;
             int maxLevel = -1;
@@ -2520,6 +2556,7 @@ int XFeatMatcher::SearchByProjection(Frame &F,
                   << " th_high=" << thHigh
                   << " nnratio=" << mfNNratio
                   << " level_gate=" << (UseXFeatProjectionLevelGate() ? 1 : 0)
+                  << " rover_backend=" << (UseXFeatRoverBackendContract() ? 1 : 0)
                   << " lvl_off=[" << GetXFeatProjMapMinOffset() << "," << GetXFeatProjMapMaxOffset() << "]"
                   << " legacy_level_ratio=" << (UseLegacyLevelAwareRatioGate() ? 1 : 0)
                   << " spatial=" << (spatialStats.applied ? 1 : 0)
@@ -2612,6 +2649,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
     const float thHigh = (std::isfinite(thHighOverride) && thHighOverride > 0.0f)
         ? std::min(2.0f, std::max(0.05f, thHighOverride))
         : TH_HIGH;
+    ResetLocalProjectionMatcherDiagnostics(CurrentFrame);
 
     int rawMatches = 0;
     int ratioMatches = 0;
@@ -2734,7 +2772,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
 
         nLastOctave = std::max(0, std::min(nLastOctave, static_cast<int>(CurrentFrame.mvScaleFactors.size()) - 1));
 
-        const float radius = th * CurrentFrame.mvScaleFactors[nLastOctave];
+        const float radius = ApplyXFeatProjectionRadiusContract(th * CurrentFrame.mvScaleFactors[nLastOctave]);
 
         int minLevel = -1;
         int maxLevel = -1;
@@ -2756,6 +2794,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
         int bestIdx2 = -1;
         int bestLevel = -1;
         int bestLevel2 = -1;
+        int validCandidateCount = 0;
 
         for(size_t iC = 0; iC < vIndices2.size(); ++iC)
         {
@@ -2774,6 +2813,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
                     continue;
             }
 
+            ++validCandidateCount;
             const float dist = candidateDistances[iC];
             if(dist < bestDist)
             {
@@ -2818,7 +2858,12 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
             else
             {
                 ++ratioMatches;
-                candidates.push_back({bestIdx2, pMP, bestDist});
+                const float ratio = (std::isfinite(bestDist2) && bestDist2 > 0.0f)
+                    ? bestDist / bestDist2
+                    : -1.0f;
+                candidates.push_back({bestIdx2, pMP, bestDist, bestDist2, ratio,
+                                      validCandidateCount, radius, nLastOctave, 1,
+                                      uv(0), uv(1)});
             }
         }
 
@@ -2847,6 +2892,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
             int bestIdxR = -1;
             int bestLevelR = -1;
             int bestLevel2R = -1;
+            int validCandidateCountR = 0;
 
             for(size_t iC = 0; iC < vIndicesRight.size(); ++iC)
             {
@@ -2858,6 +2904,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
                 if(CurrentFrame.mvpMapPoints[featIdx] && CurrentFrame.mvpMapPoints[featIdx]->Observations() > 0)
                     continue;
 
+                ++validCandidateCountR;
                 const float dist = candidateDistancesRight[iC];
                 if(dist < bestDistR)
                 {
@@ -2889,7 +2936,12 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
                 else
                 {
                     ++ratioMatches;
-                    candidates.push_back({bestIdxR + CurrentFrame.Nleft, pMP, bestDistR});
+                    const float ratioR = (std::isfinite(bestDist2R) && bestDist2R > 0.0f)
+                        ? bestDistR / bestDist2R
+                        : -1.0f;
+                    candidates.push_back({bestIdxR + CurrentFrame.Nleft, pMP, bestDistR, bestDist2R, ratioR,
+                                          validCandidateCountR, radius, nLastOctave, 2,
+                                          uvR(0), uvR(1)});
                 }
             }
         }
@@ -2930,7 +2982,10 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
             continue;
 
         if(assignIfFree(featIdx, c.pMP))
+        {
             ++finalMatches;
+            RecordLocalProjectionMatcherDiagnostics(CurrentFrame, featIdx, c.pMP, c);
+        }
         else
             ++assignRejectMatches;
 
@@ -2946,7 +3001,10 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
                 {
                     const int rightFeat = rightIdxLocal + CurrentFrame.Nleft;
                     if(assignIfFree(rightFeat, c.pMP))
+                    {
                         ++finalMatches;
+                        RecordLocalProjectionMatcherDiagnostics(CurrentFrame, rightFeat, c.pMP, c);
+                    }
                 }
             }
         }
@@ -2959,7 +3017,10 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
                 if(leftFeat >= 0 && leftFeat < CurrentFrame.Nleft)
                 {
                     if(assignIfFree(leftFeat, c.pMP))
+                    {
                         ++finalMatches;
+                        RecordLocalProjectionMatcherDiagnostics(CurrentFrame, leftFeat, c.pMP, c);
+                    }
                 }
             }
         }
@@ -2976,6 +3037,7 @@ int XFeatMatcher::SearchByProjection(Frame &CurrentFrame,
                   << " th_high=" << thHigh
                   << " nnratio=" << mfNNratio
                   << " level_gate=" << (UseXFeatProjectionLevelGate() ? 1 : 0)
+                  << " rover_backend=" << (UseXFeatRoverBackendContract() ? 1 : 0)
                   << " dir_bias=" << (UseXFeatLastFrameDirectionalBias() ? 1 : 0)
                   << " lvl_off_neutral=[" << GetXFeatProjLastNeutralMinOffset() << "," << GetXFeatProjLastNeutralMaxOffset() << "]"
                   << " lvl_off_fwd=[" << GetXFeatProjLastForwardMinOffset() << "," << GetXFeatProjLastForwardMaxOffset() << "]"

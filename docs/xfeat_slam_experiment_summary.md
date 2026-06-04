@@ -10,9 +10,247 @@
 - `CreateNewMapPoints()` 保留 close/mid 入口控质：close/mid stereo fallback reject、close ray parallax/reprojection/scale 收紧。
 - `SearchLocalPoints()` 保留保守 history gate。
 - `XFeatMatcher::SearchByProjection()` 保留 `local_mapping_triangulation && 0 < depth <= 10m && proj_norm > 1.0` outside gate。
+- Rover-style backend contract 默认关闭：默认应看到 `rover_backend=0`、`level_gate=1`；只有显式 `XFEAT_ENABLE_ROVER_BACKEND=1` 时才跑 Rover A/B。
+- `LocalMapping.cc` 中 mapping probation、pending tracklet、mapping feature budget/repeatability 等真实行为默认关闭；相关字段只作为诊断或历史记录，不应继续影响 `CreateNewMapPoints()`。
 - 保留结构诊断和 shadow diagnostics，但不要默认启用已经证明不稳定的真实行为。
 
+## 当前新增诊断：close/mid triangulation input failure
+
+本轮目标是固定安全基线后，回答 `CreateNewMapPoints()` 中 close/mid `local_mapping_triangulation` 为什么 descriptor/tracklet 可匹配但过不了几何三角化。
+
+代码状态：
+
+- Rover-style broad behavior 改为显式 opt-in：`XFEAT_ENABLE_ROVER_BACKEND=1`。
+- 默认恢复 ORB-like XFeat projection contract：level gate 开启，projection radius 不做 Rover clamp，Optimizer 使用 octave-aware XFeat sigma。
+- 新增 deep 诊断 `[LocalMapping][TriangInputFailure]`，仅在 `XFEAT_DEBUG=1 && XFEAT_DIAG_FEATURE_DISTRIBUTION=1 && XFEAT_DIAG_DEEP=1` 时输出。
+- 当前版本在原有失败原因基础上扩展 pair/KF2 上下文桶，仍然只读，不改变 `CreateNewMapPoints()` 行为。
+
+诊断内容：
+
+- 只统计 XFeat close/mid ray triangulation / stereo fallback candidate，不改变任何创建或拒绝行为。
+- 按 `backend_bin / depth_bin / octave_pair_bin / current_octave_bin / response_bin / grid_bin / edge_distance_bin` 聚合。
+- 额外按 pair/KF2 上下文聚合：`neighbor_rank_bin / kf_id_delta_bin / covis_weight_bin / baseline_bin / baseline_depth_ratio_bin / kf2_octave_bin / kf2_response_bin / kf2_edge_distance_bin`。
+- 输出 terminal event：`stereo_fallback_reject / parallax_reject / cheirality_reject / reproj_reject / scale_reject / created`。
+- reprojection reject 拆成 `reproj_kf1_only / reproj_kf2_only / reproj_both`，用于判断失败是否集中在某一侧 keypoint measurement。
+
+验收边界：
+
+- 不加 `XFEAT_DIAG_DEEP=1` 时行为应与安全基线一致。
+- 加 deep 后 `[TriangInputFailure]` 的 reject/create 总量应能和 `[TriangCreate]` close 计数对账。
+- 若 `parallax_reject` 集中在低 `baseline_depth_ratio`、低 `covis_weight`、靠后的 `neighbor_rank` 或较大的 `kf_id_delta`，下一轮优先考虑 `CreateNewMapPoints()` 的 neighbor KF pair selection，而不是后端 gate。
+- 若 `reproj_kf2_only` 集中在 KF2 的低 response、off2p、near-edge 等桶，再考虑 KF2 侧 keypoint quality/refine shadow。
+
+### 最新日志结论：`run_SePT01_stereo_anchor_shadow.log`
+
+本轮 deep 诊断回答了两个问题：
+
+1. `5_10m` close/mid LMT 的创建瓶颈仍然是 two-view 几何视差。
+2. 用 stereo anchor 替代 ray triangulation 暂时没有可行覆盖面。
+
+关键统计：
+
+- 系统行为仍在安全基线附近：`mnMatchesInliers≈231.2`、`assoc_added_by_local≈131.0`、`local_mps≈5875.7`，无 `LOST / RECENTLY_LOST`。
+- `local_proj + local_mapping_triangulation` 仍是残留脏源：`outlier_ratio≈0.210`。
+- `motion_lg + local_mapping_triangulation` 很干净：`outlier_ratio≈0.0022`，说明 LMT MapPoint 并非整体不可用，问题主要出现在 current-frame local projection / close-mid 几何支撑。
+- close/mid ray candidates `3910`，创建 `2664`。
+- `5_10m` 创建率仍低：`created=480/1025≈0.468`，`parallax_reject=476/1025≈0.464`。
+- `baseline_depth_ratio` 仍解释 parallax：`low≈0.451`、`mid≈0.341`、`strong≈0.169`。
+
+Stereo-anchor shadow 结果：
+
+- stereo anchor 覆盖率极低：`anchor_valid=169/3910≈0.043`。
+- 可用 anchor 全部来自 `neighbor_only`，当前 KF 侧没有可用 anchor：`current_only=0`、`both=0`。
+- `anchor_pass=66/3910≈0.017`，覆盖不足。
+- `anchor_strong_better + anchor_better = 5/3910≈0.0013`，没有形成可用替代信号。
+- `anchor_pass_ray_fail=0`，没有任何样本能证明“ray fail 但 stereo anchor 可以救回来”。
+- `ray_pass_anchor_fail=36`，反而存在 ray 通过但 anchor 失败的样本。
+- 在最关心的 `parallax_reject` 桶中，`anchor_valid=10/995≈0.010`、`anchor_pass_ray_fail=0`。
+
+当前结论：
+
+- `selective stereo-anchor creation` 不应进入真实行为；当前数据明确显示覆盖率低、质量差、没有救援样本。
+- `KF2 patch/refine` 也不应作为主线：`reproj_reject` 总体约 `4%`，即使完全解决也不能解释主要创建失败。
+- `CreateNewMapPoints()` 的 neighbor KF pair selection 可以作为小范围 hygiene，但不应预期它根治 RMSE，因为会在 weak parallax 与更远 KF reprojection 风险之间做 trade-off。
+- 当前 close/mid LMT 问题更准确地表述为：two-view LMT 在 `5_10m` 的几何创建上先天受限，但系统又依赖这些点提供一部分 inlier 支撑；局部 gate / culling / anchor 替换都只能移动约束结构，不能稳定改变轨迹上限。
+
+后续边界：
+
+- 不再继续投入 `stereo-anchor replacement`。
+- 不再围绕 `KF2-only reproj reject` 做 patch refine 主线。
+- 不再继续 local-proj gate / cooldown / weight 线。
+- 若继续以最低 RMSE 为目标，下一步应转向 segment-level pose error attribution：定位 RMSE 高的帧段中 inlier 空间/深度/source 结构、KF 插入节奏、reference reuse 与 ORB 对照的差异，而不是继续改单个 MapPoint 创建局部规则。
+
+## 当前实验：ORB-shaped XFeat input A/B
+
+前一版 `backend profile` 的结论：
+
+- `mvXFeatMappingEligible` 只影响 `CreateNewMapPoints()` close/mid，且 `tracking_stereo_backend_ineligible_reject=0`，没有真正改变 ORB-SLAM 后端看到的输入形态。
+- 它减少了 close/mid triangulation 创建和 local map 规模，但没有改善 `local_proj + local_mapping_triangulation` 误差或 close/mid reuse，反而削弱了 `mnMatchesInliers`。
+
+当前代码状态：
+
+- 默认恢复安全基线：`CreateNewMapPoints()` 不再按 `mvXFeatMappingEligible` 做真实 close/mid profile 过滤，`CreateNewKeyFrame()` 也不再因 backend profile ineligible 拒绝 close/mid `tracking_stereo` birth。
+- `Frame` 仍生成 `mvXFeatMappingEligible / mvXFeatMappingProfileScore`，作为诊断和 A/B 输入。
+- 新增显式 A/B 开关：`XFEAT_ORB_SHAPED_INPUT=1`。
+- 开启该开关后，`Frame::BuildXFeatMappingProfile()` 会把当前帧 XFeat keypoint / descriptor / stereo depth / right coordinate / birth quality 数组 compact 到 ORB-like backend subset。
+- 这样 tracking、mapping、KeyFrame、local projection 后端共同消费同一套被压缩后的 XFeat feature set，区别于之前的 mapping-only mask。
+
+新增诊断字段：
+
+- `[Frame][XFeatMappingProfile] compact_enabled`
+- `[Frame][XFeatMappingProfile] compact_kpts`
+- `[Frame][XFeatMappingProfile] compact_ratio`
+
+验收边界：
+
+- 不开 `XFEAT_ORB_SHAPED_INPUT` 时，行为应回到安全基线。
+- 开启后，`compact_ratio` 应明显小于 1，且 `mnMatchesInliers` 不应低于安全基线 90%。
+- 如果 compact 输入改善 RMSE 或结构指标，说明问题主要是 XFeat 输入形态与 ORB-SLAM 后端契约不匹配。
+- 如果 compact 输入仍无收益或明显伤 tracking，说明仅靠 ORB-like feature shaping 不足，需要转向误差模型、尺度/噪声建模或更深的 learned frontend/backend 适配。
+
+## 已移除实验：XFeat local-proj patch refinement shadow
+
+背景结论：
+
+- 多轮 local-proj hard gate / cooldown / soft weight / residual gate 都只能改善局部 outlier 指标，不能稳定降低 RMSE。
+- `[XFeatMeasurementCalib]` 和 `[PoseOpt][ResidualCalib]` 指向一个更底层问题：一部分 XFeat `local_proj` 约束即使保留下来，像素 residual 仍偏大。
+- 因此本轮不再删边或降权，而是验证“当前帧 local-proj 匹配的 2D 坐标是否能通过 patch alignment 修准”。
+
+实验曾包含的代码变化：
+
+- `KeyFrame` 运行时缓存 XFeat 左目 zero-mean anchor patch，不序列化。
+- `MapPoint` 运行时保存一个 XFeat anchor patch，不序列化。
+- `tracking_stereo` 和 `local_mapping_triangulation` 新建 MapPoint 时写入 anchor patch。
+- `XFeatMatcher::SearchByProjection()` 成功 assignment 后，对 `local_proj + tracking_stereo/local_mapping_triangulation + 0_10m` 左目匹配做小窗口 patch refinement shadow。
+- 本轮不改变 matcher assignment、不改变 keypoint 坐标、不改变 PoseOptimization edge measurement。
+
+实验曾新增日志：
+
+- `[TrackLocalMap][LocalProjPatchRefineError]`
+  - `success_bin=success/failed/no_patch`
+  - `shift_bin=small/mid/large`
+  - `margin_bin=weak/mid/strong`
+  - `source=tracking_stereo/local_mapping_triangulation`
+  - `depth_bin=0_5/5_10/...`
+  - 输出 `old_residual_px_avg / refined_residual_px_avg / residual_gain_avg`
+
+验收重点：
+
+- 如果 `success` 桶中 `residual_gain_avg > 0` 且 `refined_residual_px_avg` 明显低于 `old_residual_px_avg`，说明 local-proj 的主要问题包含 2D measurement localization，可进入下一轮真实 refined measurement。
+- 如果 `success` 桶不降 residual，说明问题更可能在错误关联、MapPoint 3D 位置或 stereo/triangulation 深度，不应继续做 subpixel/patch refinement。
+- 如果大量样本落在 `no_patch`，说明 anchor patch 覆盖不足，需要先分析 MapPoint 创建来源与 patch 缓存覆盖率。
+
+结果与处理：
+
+- `run_SePT01_localproj_patch_refine_shadow.log` 中 patch refine 覆盖正常，但整体不降残差：`success` 桶 old residual 约 `3.05px`，refined 后约 `3.28px`。
+- `local_mapping_triangulation` 基本持平，`tracking_stereo` 明显变差；大 shift 样本更容易是脏匹配。
+- 该方向没有证明“通过 patch alignment 修正当前 2D measurement”可以改善 local-proj 约束。
+- 由于该实现还会在 KeyFrame / MapPoint 中缓存 patch，并在 projection assignment 后做局部 patch search，带来明显内存和实时性负担。
+- 结论：该实验代码已移除，不应保留在安全基线中；后续继续依赖 `[XFeatMeasurementCalib]` / `[PoseOpt][ResidualCalib]` 分析 XFeat 测量模型，而不是 patch refinement。
+
+### PoseOptimization residual calibration 诊断
+
+背景结论：
+
+- 现有 `[TrackLocalMap][SourceDepthError]` / `[SourceMPJointError]` 能定位脏源，但不能回答 XFeat edge 在 `PoseOptimization` 里的实际 chi2 / pixel residual 是否系统性偏大。
+- `[LocalBA][SourceDepthError]` 说明部分 MapPoint 在 KeyFrame BA 中并不脏，但当前帧 pose optimization 仍可能因为 XFeat measurement noise / scale model / source mixture 不匹配而产生较大残差。
+
+本轮修改：
+
+- 仅在 `Optimizer::PoseOptimization()` 增加 shadow 诊断，不改变优化、权重、outlier 判定或 MapPoint 生命周期。
+- 新增日志 `[PoseOpt][ResidualCalib]`，按 descriptor、match source、MapPoint source、depth bin、octave bin、obs type 聚合最终 edge residual。
+- 输出 chi2 分布、像素残差分布和实际 `inv_sigma2`，用于判断 XFeat 是否需要单独 residual calibration / sigma model，而不是继续调 local-proj gate。
+
+验收重点：
+
+- 比较 `descriptor=XFeat` 与 ORB 或不同 `match_source/mp_source/depth_bin` 的 `chi2_p90 / residual_px_p90 / outlier_ratio`。
+- 如果 XFeat close/mid 的 residual 明显高于 ORB-like expectation，但 `outlier_ratio` 不高，下一步应考虑 XFeat-specific measurement sigma / robust kernel，而不是继续筛点。
+- 如果 residual 分布本身正常但 RMSE 仍差，说明问题更偏向约束空间结构或关键帧/地图组织，而不是单边残差模型。
+
+### PoseOptimization close/mid local-proj residual_px 护栏（已回退为 shadow）
+
+`XFEAT_PIXEL_SIGMA=1.5/2.0` A/B 的关键结果：
+
+- 放大 sigma 会显著降低 `chi2/outlier_ratio`，但真实 `residual_px_p90` 和 `inlier_err_avg` 反而上升。
+- `sigma=2.0` 让更多大像素残差 edge 变成 inlier，RMSE 偏到 `0.423857`，说明全局放松 measurement noise 不是正确方向。
+- 问题不是“后端太严格”，而是部分 `local_proj` close/mid edge 真实像素残差过大，但会因为 octave/inv_sigma2 被过度容忍。
+
+实验修改：
+
+- 恢复默认 `XFEAT_PIXEL_SIGMA=1.0` 思路，不再全局放松权重。
+- 曾在 `Optimizer::PoseOptimization()` 的 outlier 分类中加入一个窄范围 residual_px 护栏：
+  - 只作用于 XFeat；
+  - 只作用于 `match_source=local_proj`；
+  - 只作用于 `mp_source=local_mapping_triangulation / tracking_stereo`；
+  - 只作用于当前深度 `0 < depth <= 10m`；
+  - 当 `sqrt(chi2 / inv_sigma2) > 4.0px` 时，即使 chi2 未超过原阈值，也作为 outlier。
+- 不改 `Frame.cc` stereo、建图、local map、optimizer 权重或 MapPoint 生命周期。
+
+实验结果：
+
+- `residual_px_gate_candidate=2270`，`residual_px_gate_reject=191`，主要来自 `local_mapping_triangulation=167`。
+- 保留下来的 `local_proj` inlier residual 变干净：
+  - `local_proj + local_mapping_triangulation inlier_err_avg`: `1.933 -> 1.620`
+  - `local_proj + tracking_stereo inlier_err_avg`: `1.606 -> 1.455`
+- 但系统支撑变差：
+  - `mnMatchesInliers`: `235.7 -> 229.3`
+  - `outlier_after_opt`: `27.9 -> 36.0`
+  - KF 数量: `562 -> 581`
+  - `local_mps`: `5819 -> 6047`
+- 该模式与前面 hard gate / cooldown / 0.8 gate 一致：局部 source 指标改善，但系统结构更紧张，不能作为最低 RMSE 的稳定方向。
+
+当前代码状态：
+
+- 真实 residual_px outlier 行为已回退。
+- `residual_px_gate_*` 字段保留为 shadow 计数，只表示“如果启用该规则会命中多少”，不再改变 `mvbOutlier` 或 edge level。
+
+当前诊断字段已改为 shadow 命名：
+
+- `[PoseOptimization][Weight] residual_px_gate_shadow_threshold`
+- `[PoseOptimization][Weight] residual_px_gate_shadow_candidate`
+- `[PoseOptimization][Weight] residual_px_gate_shadow_high`
+- `[PoseOptimization][Weight] residual_px_gate_shadow_reject`
+- `[PoseOptimization][Weight] residual_px_gate_shadow_reject_lmt`
+- `[PoseOptimization][Weight] residual_px_gate_shadow_reject_tracking_stereo`
+
+如果未来重新评估，验收重点：
+
+- `residual_px_gate_shadow_reject > 0`，但不能导致 `mnMatchesInliers` 下降超过约 10%。
+- `[PoseOpt][ResidualCalib] local_proj close/mid residual_px_p90` 应下降。
+- `[TrackLocalMap][SourceMPJointError] local_proj + local_mapping_triangulation/tracking_stereo` 的 `inlier_err_avg` 不应像 sigma A/B 那样升高。
+- 若 RMSE 仍无收益，说明单帧 residual 护栏也不是突破口，应停止在 PoseOptimization 单边规则上继续叠加。
+
 评估口径应统一为 SE3/evo 风格对齐。不要只看单次 RMSE；至少同时看 source metrics、segment structure、`mnMatchesInliers`、`local_mps / track_in_view`、`LOST / RECENTLY_LOST`。
+
+## 最近结论与回退：停止 tracking/mapping tracklet 分流线
+
+这几轮尝试过完整 tracking/mapping feature 分流的前两阶段：
+
+- Stage 1：tracking-side XFeat close/mid tracklet shadow 诊断。
+- Stage 2：confirmed tracklet -> `Frame/KeyFrame` mapping eligibility -> same-tracklet triangulation pair。
+- ownership split：在 `CreateNewKeyFrame()` 中 reserve 一部分 confirmed mapping-tracklet keypoint，避免它们先被即时 `tracking_stereo` MapPoint 占用。
+- tracklet-guided pair 失败归因：统计 same-tracklet pair 从加入候选到创建 MapPoint 的流失点。
+
+关键日志结论：
+
+- Stage 1 成立但不是解法：`confirmed_alive≈153/frame`、`confirmed_cells≈127/frame`，说明 XFeat close/mid 中确实存在跨帧 repeatable candidates。
+- Stage 2 技术上打通：reservation 生效，same-tracklet pair 能被加入 `CreateNewMapPoints()` 候选。
+- 但 same-tracklet pair 不能稳定通过几何建图：`run_SePT01_21.log` 中 `mapping_tracklet_pair_added=116`，只有 `geometry_pass=6`、`created=5`。
+- 主要失败原因是几何重投影，而不是 budget：`mapping_tracklet_pair_reproj_reject=75`、`stereo_fallback_reject=28`、`budget_reject=0`。
+- SE3/evo 口径下该轮 `RMSE≈0.421807`，没有优于安全基线，也没有改善 `local_proj + local_mapping_triangulation` 残留污染。
+
+经验总结：
+
+- `tracklet identity` 只能说明 descriptor/局部观测有 repeatability，不能等价于可三角化、可建图的几何约束。
+- 如果 repeatable pair 大量死在 reprojection，继续做 delayed promotion / covis influence control 没有意义，因为可 promotion 的高质量 MapPoint 数量太少。
+- reservation 会牺牲即时 `tracking_stereo` 支撑，但没有换来足够长期稳定 MapPoint，性价比差。
+- 因此这条线不再作为主线推进：Stage 1/Stage 2 相关代码和日志已从当前代码中回退，当前只保留本文档中的历史结论。
+
+后续边界：
+
+- 不再以 confirmed tracklet 作为独立建图准入条件。
+- 如果未来重新使用跨帧 repeatability，只能作为辅助特征，并且必须叠加明确的 KeyFrame-pair 几何预验证，例如 reprojection/parallax/scale 预检。
+- 当前下一步不应进入 Stage 3 delayed promotion 或 Stage 4 covis/local-map influence control。
 
 ## 已验证方向
 
@@ -851,3 +1089,404 @@ Deep shadow 诊断，默认不再输出，需要额外开启 `XFEAT_DIAG_DEEP=1`
 - 该实验说明“延迟创建 MapPoint”本身不足以解决 XFeat 额外特征无法稳定复用的问题。
 - 代码已回到安全行为基线：`kEnableXFeatCloseMidPendingTracklet=false`。pending tracklet 相关代码和日志字段保留，便于后续若要做完整 tracklet 分流时复用。
 - 同步关闭其它未稳定证明有效的真实行为护栏：KF guard 行为关闭，local-proj core/expansion 分池行为关闭；保留 shadow 诊断。
+
+## 代码调整：tracking-side XFeat mapping tracklet shadow 诊断
+
+目标：
+
+- 开始完整 tracking/mapping feature 分流的第一阶段，但不改变 SLAM 行为。
+- 在 `Tracking` 侧为 close/mid XFeat stereo features 建立运行时短期 tracklet，验证普通帧中是否存在足够多可跨帧重复观测的 mapping candidates。
+- 这些 tracklet 不进入 Atlas、不创建 MapPoint、不参与 covis/local map/BA，也不影响 KF 插入。
+
+实现要点：
+
+- 仅作用于 XFeat stereo/RGBD close/mid，且要求 `StereoBirthQuality == close_high_conf`。
+- 已经关联稳定 inlier MapPoint 的 feature 不进入 tracklet candidate，避免统计已解决约束。
+- 使用当前优化后 pose，把旧 tracklet 的 world point 投到当前帧；再用投影距离、descriptor 距离、depth consistency 更新 tracklet。
+- confirmed 条件为至少 `3` 次 observation 且 depth relative range 不超过固定阈值。
+- 低频日志：
+  - `[Tracking][XFeatMappingTracklet]`
+  - 关键字段：`candidates / created / updated / expired / alive / confirmed_alive / confirmed_cells / match_desc_avg / match_proj_px_avg`。
+
+验收重点：
+
+- 如果 `confirmed_alive` 和 `confirmed_cells` 足够多，说明存在可用于后续真正 mapping eligibility 的稳定 XFeat close/mid tracklet。
+- 如果 `created` 很多但 `updated / confirmed_alive` 很少，说明 XFeat close/mid feature 的跨帧 repeatability 不足，继续做 MapPoint 前分流也缺少基础。
+- 本轮不看 RMSE 改善，因为行为不变；只确认 `mnMatchesInliers`、KF 数量、source metrics 与安全基线同级。
+
+## 代码调整：confirmed tracklet -> mapping eligibility 阶段 2
+
+目标：
+
+- 将 tracking-side confirmed close/mid XFeat tracklet 转成 `Frame/KeyFrame` 运行时 mapping eligibility。
+- `CreateNewMapPoints()` 不做 hard-only，只在 close/mid true ray triangulation 的候选排序中优先使用 eligible keypoint。
+- 验证“可跨帧重复的 XFeat close/mid 观测”是否能更稳定地进入 local mapping triangulation，而不是继续让 fallback 候选主导。
+
+实现要点：
+
+- `Frame` 新增运行时字段：
+  - `mvXFeatMappingEligible`
+  - `mvXFeatMappingTrackletId`
+  - `mvXFeatMappingQuality`
+- `KeyFrame` 构造时从 `Frame` 拷贝上述字段；不序列化，避免改变地图文件兼容性。
+- `Tracking::UpdateXFeatMappingTracklets()` 在 tracklet confirmed 后标记当前 keypoint eligibility，并写入 tracklet id / quality。
+- 每个 tracklet 记录后续创建出的 KeyFrame observation；即使当时尚未 confirmed，也保存 `KeyFrame* / keypoint idx / quality`。
+- tracklet 一旦 confirmed，会回填所有已记录 KeyFrame observation，补齐历史 KF 上的 `mvXFeatMappingEligible / TrackletId / Quality`。
+- `CreateNewKeyFrame()` 在 KeyFrame 入队 LocalMapping 前登记当前帧 tracklet observations，避免 LocalMapping 看到的 KeyFrame 仍是纯 fallback。
+- `LocalMapping::CreateNewMapPoints()` 对 close/mid mapping candidates 计算 eligibility tier：
+  - same confirmed tracklet on both KFs
+  - both KFs eligible
+  - one KF eligible
+  - fallback
+- 现有 mapping feature budget/repeatability 结构保留；排序优先级改为 eligibility tier / eligibility quality 优先，然后才是 repeatability / quality score。
+- fallback 不在本轮直接禁止，避免再次进入“砍点导致 RMSE 随机或退化”的 gate 路线。
+
+新增诊断：
+
+- `[LocalMapping][TriangCreate]`
+  - `mapping_eligible_close_candidates`
+  - `mapping_eligible_both_candidates`
+  - `mapping_eligible_same_tracklet_candidates`
+  - `mapping_eligible_one_candidates`
+  - `mapping_eligible_fallback_candidates`
+  - `mapping_eligible_created`
+  - `mapping_eligible_both_created`
+  - `mapping_eligible_same_tracklet_created`
+  - `mapping_eligible_fallback_created`
+  - `mapping_eligible_created_0_5`
+  - `mapping_eligible_created_5_10`
+- `[Tracking][XFeatMappingTracklet]`
+  - `current_tracklet_tagged`
+  - `current_eligible_marked`
+  - `kf_observations`
+  - `kf_eligible_observations`
+  - `backfilled_from_confirmation`
+- `[Tracking][XFeatMappingTrackletKF]`
+  - `registered`
+  - `marked_current_eligible`
+  - `backfilled`
+
+验收重点：
+
+- `mapping_eligible_close_candidates > 0`，且 `mapping_eligible_created > 0`。
+- `mapping_eligible_both_candidates` 和 `mapping_eligible_same_tracklet_candidates` 应从上一轮的 `0` 变为非零，否则说明跨 KeyFrame 回填仍未打通。
+- `mapping_eligible_fallback_created` 允许存在，但不应长期主导 close/mid created。
+- `close_created` 不能断崖；`mnMatchesInliers` 不应低于安全基线 90%。
+- 后续重点看 `CloseFeatureReuseBridge stable_feature_share`、`ReferenceReuseBridge current_inlier_share`、`local_mps / track_in_view` 是否改善。
+
+### 阶段 2 补全：confirmed tracklet 直接生成 triangulation pair
+
+前两版阶段 2 的问题：
+
+- 第一版只把 confirmed tracklet 写成 `Frame/KeyFrame` eligibility mask，并在 `CreateNewMapPoints()` 的候选排序中提高优先级。
+- 第二版补了 KeyFrame observation 注册和历史 backfill，`kf_observations / kf_eligible_observations / backfilled` 已经有值。
+- 但 `CreateNewMapPoints()` 的候选 pair 仍完全由 `SearchForTriangulation()` 的 BF/LightGlue matcher 生成；tracklet id 只作为“已有候选的排序属性”，没有参与“候选生成”。
+- 因此日志里会出现 `mapping_eligible_one_candidates > 0`，但 `mapping_eligible_both_candidates=0`、`mapping_eligible_same_tracklet_candidates=0`，说明 confirmed tracklet 没有真正进入 KF-KF triangulation pair。
+
+本轮补全内容：
+
+- 在 `CreateNewMapPoints()` 内，对当前 KF 和每个 neighbor KF 收集 `mvXFeatMappingEligible && mvXFeatMappingTrackletId != 0` 的 left-image keypoint。
+- 当前 KF 侧要求 keypoint 有 close/mid stereo depth，确保这条通路只服务 close/mid mapping split。
+- 若两个 KF 上存在同一 confirmed tracklet id，直接把 `(idx_current, idx_neighbor)` 追加到 `vMatchedIndices`。
+- 若该 pair 已由 BF/LightGlue 生成，则只计入 duplicate skip，不重复加入。
+- tracklet-generated pair 不绕过任何后续检查：仍走 parallax、cheirality、reprojection、scale、close stereo fallback reject、mapping budget、repeatability 和 slot-free duplicate 检查。
+- 新增诊断：
+  - `mapping_tracklet_pair_current_eligible`
+  - `mapping_tracklet_pair_neighbor_eligible`
+  - `mapping_tracklet_pair_candidate`
+  - `mapping_tracklet_pair_added`
+  - `mapping_tracklet_pair_duplicate_skip`
+  - `mapping_tracklet_pair_occupied_skip`
+  - `mapping_tracklet_pair_created`
+
+验收重点：
+
+- `mapping_tracklet_pair_added > 0` 表示阶段 2 终于从“标注/重排”进入“候选生成”。
+- `mapping_eligible_same_tracklet_candidates > 0` 表示 same-tracklet pair 通过了几何验证并进入 close/mid candidate。
+- `mapping_eligible_same_tracklet_created > 0` 或 `mapping_tracklet_pair_created > 0` 表示 confirmed tracklet 实际创建了 MapPoint。
+- 如果 `mapping_tracklet_pair_added > 0` 但 `same_tracklet_candidates/created` 仍为 0，则问题已经从“tracklet 没接入候选生成”转移到“confirmed tracklet pair 几何质量不足”。
+
+### 阶段 2 补全：reservation / ownership split
+
+`run_SePT01_mapping_tracklet_pair_stage2.log` 的关键结果：
+
+- `mapping_tracklet_pair_current_eligible=0`
+- `mapping_tracklet_pair_candidate=0`
+- `mapping_tracklet_pair_added=0`
+- `mapping_eligible_same_tracklet_candidates=0`
+- `mapping_eligible_same_tracklet_created=0`
+
+同时 tracking 侧仍然有大量 confirmed tracklet：
+
+- `confirmed_alive avg≈153/frame`
+- `confirmed_cells avg≈126/frame`
+- `current_eligible_marked avg≈24.6/frame`
+- `kf_eligible_observations avg≈515/frame`
+
+结论：
+
+- 阶段 2 不是缺 confirmed tracklet，而是 current KF 里的 confirmed close/mid tracklet keypoint 在进入 `LocalMapping::CreateNewMapPoints()` 前已经被 `CreateNewKeyFrame()` 创建/复用成 `tracking_stereo` MapPoint。
+- `CreateNewMapPoints()` 只能使用 free keypoint slot；slot 被 `tracking_stereo` 抢占后，same-tracklet pair generator 没有 current side 输入。
+
+本轮补充：
+
+- 在 `Tracking::CreateNewKeyFrame()` 中新增 confirmed mapping-tracklet reservation。
+- 仅作用于 XFeat stereo close/mid、`StereoBirthQuality == close_high_conf`、当前 keypoint 尚无 MapPoint、且 `mvXFeatMappingEligible && mvXFeatMappingTrackletId != 0` 的点。
+- 每个 KF 最多 reserve `40` 个，每个 coarse grid cell 最多 reserve `1` 个，按 mapping quality 优先。
+- 被 reserve 的 keypoint 不创建即时 `tracking_stereo` MapPoint，保留 KeyFrame slot 给 LocalMapping 的 same-tracklet triangulation pair。
+- 不删除点、不改 LocalMapping 几何 gate、不影响 ORB/far/普通 tracking。
+
+新增诊断：
+
+- `[DepthDiag][CreateKF]`
+  - `tracking_stereo_mapping_tracklet_reserve_candidate`
+  - `tracking_stereo_mapping_tracklet_reserved`
+  - `tracking_stereo_mapping_tracklet_reserve_cap_reject`
+  - `tracking_stereo_mapping_tracklet_reserve_cell_reject`
+  - `tracking_stereo_mapping_tracklet_reserve_invalid_cell_reject`
+
+验收重点：
+
+- `tracking_stereo_mapping_tracklet_reserved > 0`，说明 ownership split 生效。
+- `mapping_tracklet_pair_current_eligible > 0`，说明 LocalMapping 终于看到了 free current-side confirmed tracklet keypoint。
+- `mapping_tracklet_pair_added > 0`，说明 same-tracklet pair 进入候选生成。
+- `mapping_eligible_same_tracklet_candidates/created > 0`，说明 pair 通过几何验证并创建 MapPoint。
+- 如果 reserve 生效但 same-tracklet created 仍为 0，下一步才分析 confirmed tracklet pair 的 parallax/reprojection/scale 质量，而不是继续改标注/backfill。
+
+### ORB-shaped XFeat 输入形态 A/B
+
+背景结论：
+
+- SuperPoint_SLAM / Rover-SLAM 更接近“深度特征先被压成 ORB-SLAM 后端能稳定消费的一套 ORB-like feature set”，而不是“tracking 全量点、mapping 局部 mask”。
+- 前一版 `mvXFeatMappingEligible` 只影响 `CreateNewMapPoints()` close/mid，且 `CreateKF` 侧 `tracking_stereo_backend_ineligible_reject=0`，说明它主要是在后端局部少建点，没有真正改变 ORB-SLAM 后端看到的输入形态。
+- 该版本减少了 close/mid triangulation 创建和 local map 规模，但没有改善 `local_proj + local_mapping_triangulation` 误差或 close/mid reuse，反而削弱了 `mnMatchesInliers`。
+
+本轮修改：
+
+- 默认恢复安全基线：
+  - `CreateNewMapPoints()` 不再按 `mvXFeatMappingEligible` 做真实 close/mid profile 过滤。
+  - `CreateNewKeyFrame()` 不再因 backend profile ineligible 拒绝 close/mid `tracking_stereo` birth。
+  - 保留 `CreateNewMapPoints()` close/mid 入口控质、history gate、`proj_norm > 1.0` outside gate。
+- 新增显式 A/B 开关：
+  - `XFEAT_ORB_SHAPED_INPUT=1`
+  - 开启后，`Frame::BuildXFeatMappingProfile()` 会把当前帧 XFeat keypoint / descriptor / stereo depth / right coordinate / birth quality 数组 compact 到 ORB-like backend subset。
+  - 这样 tracking、mapping、KeyFrame、local projection 后端共同消费同一套被压缩后的 XFeat feature set，区别于之前的 mapping-only mask。
+- 新增日志字段：
+  - `[Frame][XFeatMappingProfile] compact_enabled`
+  - `[Frame][XFeatMappingProfile] compact_kpts`
+  - `[Frame][XFeatMappingProfile] compact_ratio`
+
+验收重点：
+
+- 不开 `XFEAT_ORB_SHAPED_INPUT` 时，行为应回到安全基线。
+- 开启后，`compact_ratio` 应明显小于 1，且 `mnMatchesInliers` 不应低于安全基线 90%。
+- 如果 compact 输入改善 RMSE 或结构指标，说明问题主要是 XFeat 输入形态与 ORB-SLAM 后端契约不匹配。
+- 如果 compact 输入仍无收益或明显伤 tracking，说明仅靠 ORB-like feature shaping 不足，需要转向误差模型、尺度/噪声建模或更深的 learned frontend/backend 适配。
+
+### XFeat 后端契约校准诊断
+
+本轮修改目的：
+
+- 不再新增 local-proj gate、mapping feature 分流、probation、KF 剪枝或 ORB-shaped profile 行为。
+- 保持安全基线不动，只补 XFeat descriptor / ratio / projection residual / PoseOptimization chi2 的校准诊断。
+- 用日志回答：XFeat 的测量质量是否和 ORB-SLAM3 后端误差模型匹配，后续是否应做 source/depth-aware sigma 或小范围 matcher 阈值校准。
+
+代码变化：
+
+- 新增 `[TrackLocalMap][XFeatMeasurementCalib]`，仅在 `XFEAT_DEBUG=1 && XFEAT_DIAG_FEATURE_DISTRIBUTION=1` 输出。
+- 统计维度包括 `match_source / mp_source / depth_bin / descriptor_dist_bin / ratio_bin / proj_norm_bin / level_diff_bin / obs_type`。
+- 每个桶输出 `total / inlier / outlier / outlier_ratio / residual_px_avg / residual_px_p50 / residual_px_p90 / chi2_avg / chi2_p90 / depth_avg`。
+- 扩展 `[PoseOpt][ResidualCalib]`，增加 `descriptor_dist_avg/p90`、`ratio_avg/p90`、`proj_norm_avg/p90`。
+- 将 `[PoseOptimization][Weight]` 中 residual gate 相关字段改名为 `residual_px_gate_shadow_*`，明确这些字段只是 shadow 统计，不是实际 reject。
+- 新增 `tools/analyze_xfeat_measurement_calib.py`，用于聚合日志并输出 source/depth 残差概览和保守候选过滤桶。
+
+运行与分析：
+
+```bash
+python3 tools/analyze_xfeat_measurement_calib.py \
+  experiment_logs/Stereo/SePT/SePT01/run_SePT01_xfeat_measurement_calib.log
+```
+
+验收重点：
+
+- 本轮行为应与安全基线同级，RMSE 不作为主要验收。
+- `[XFeatMeasurementCalib]` 核心维度应有非零桶。
+- 如果某些 descriptor / ratio / proj_norm 桶同时满足高 outlier ratio 且低 inlier 覆盖，下一轮才考虑转成真实规则。
+- 如果各测量桶仍不能解释 RMSE 差距，应停止 matcher/gate 线，转向 XFeat keypoint localization uncertainty 或 stereo depth uncertainty 建模。
+
+### XFeat `local_proj` 上下文感知测量权重
+
+背景结论：
+
+- `[TrackLocalMap][XFeatMeasurementCalib]` 显示 `local_proj` 明显比 `motion_lg` 脏，但 descriptor / ratio 不能稳定区分污染。
+- `proj_norm=edge/outside` 和 `level_diff=off2p` 是最强信号；其中 `outside` 已作为安全 hard gate 保留，`edge` 是混合桶，不能整桶拒绝。
+- 前面 `0.8 gate / cooldown / residual gate / global sigma` 都证明：硬删或全局放松会改善局部 outlier，但不稳定改善 RMSE。
+
+本轮修改：
+
+- 不新增 hard reject，不改 matcher、建图、stereo、local map 或关键帧策略。
+- 在 `Optimizer::PoseOptimization()` 中对 XFeat `match_source=local_proj` 的高风险观测降低信息矩阵权重：
+  - `0.5 < proj_norm <= 1.0` 使用 `0.70`。
+  - `level_diff >= 2` 使用 `0.70`。
+  - 两者同时满足使用 `0.55`。
+  - 只作用于 `local_mapping_triangulation` 和 `tracking_stereo` 来源。
+- 旧的 far triangulation pose weight 继续保留；若同时命中 far weight 和 context weight，取更小权重。
+
+新增诊断：
+
+- `[PoseOptimization][Weight]`
+  - `weighted_local_proj_context`
+  - `weighted_local_proj_context_edge`
+  - `weighted_local_proj_context_level`
+  - `weighted_local_proj_context_both`
+  - `weighted_local_proj_context_lmt`
+  - `weighted_local_proj_context_tracking_stereo`
+
+验收重点：
+
+- `weighted_local_proj_context > 0`，说明新权重实际命中。
+- `mnMatchesInliers` 不应低于安全基线 90%。
+- `local_proj + local_mapping_triangulation` 和 `local_proj + tracking_stereo` 的 `inlier_err_avg` 不应上升。
+- 至少跑两次；若 RMSE 持续高于 `0.42` 或 inlier 支撑下降，应回退该权重行为。
+
+结果与处理：
+
+- 两次运行中，该权重确实命中目标边，且 source-level outlier ratio 明显下降。
+- 但 `local_proj + local_mapping_triangulation` / `tracking_stereo` 的 inlier residual 没有同步下降，部分运行反而上升。
+- `chi2_avg` 的下降主要来自信息矩阵变小，不代表像素测量更准。
+- RMSE 仍不稳定，并出现 `0.426757` 级别退化。
+- 因此该真实权重行为已回退，只保留 `[XFeatMeasurementCalib]` / `[PoseOpt][ResidualCalib]` 等校准诊断。
+
+### Rover-style XFeat backend contract A/B
+
+背景结论：
+
+- SuperPoint_SLAM 走的是“把 learned feature 包装成 ORB-like pyramid/octalve/sigma”的路线。
+- Rover-SLAM 更接近“learned feature 单尺度/弱尺度语义接入 ORB 后端”的路线。
+- 当前 XFeat extractor 已经是真多尺度，但日志长期显示 `level_diff/off2p`、projection-edge 和 local-proj residual 是强污染信号；继续做 local-proj gate、cooldown、mapping budget 没有稳定降低 RMSE。
+
+本轮修改目的：
+
+- 不再改 extractor、stereo、CreateNewMapPoints、LocalMapping 或 KeyFrame 策略。
+- 只验证一个更底层假设：XFeat 的 octave/scale 不应被 ORB-SLAM 后端当成 ORB octave hard contract。
+
+代码变化：
+
+- `XFeatMatcher::SearchByProjection()` 默认启用 Rover-style contract：
+  - XFeat projection 默认关闭 octave hard level gate。
+  - `predictedLevel` 仍记录到诊断与 `level_diff`，但不再限制候选层级。
+  - projection radius 增加 `6px` 下限，避免 predicted scale 过小时搜索窗口过窄。
+  - 可用 `XFEAT_DISABLE_ROVER_BACKEND=1` 回到旧 ORB-like XFeat 后端消费方式。
+- `Optimizer` 的 XFeat visual edge sigma 改为固定像素 sigma：
+  - Rover-style 默认 `XFEAT_PIXEL_SIGMA=1.5`。
+  - 不再乘以 `mvScaleFactors[kp.octave]`。
+  - ORB/binary descriptor 仍走原始 `mvInvLevelSigma2[kp.octave]`。
+- 保留现有 `[TrackLocalMap][XFeatMeasurementCalib]`、`[PoseOpt][ResidualCalib]`、`level_diff/proj_norm` 诊断，用来判断该 backend contract 是否更匹配 XFeat。
+
+验收重点：
+
+- `[XFeatMatcher::SearchByProjection(MapPoints)] level_gate=0 rover_backend=1`。
+- `ref_target_empty_area / ref_target_no_valid_candidate` 不应继续主导 reference stable close/mid 点复用失败。
+- `level_diff=off2p` 的 outlier/residual 应下降，或至少不再明显主导污染。
+- `local_proj + local_mapping_triangulation` 的 `inlier_err_avg` 应下降，而不只是 outlier ratio 下降。
+- 若 RMSE 两次均高于 `0.42`，可用 `XFEAT_DISABLE_ROVER_BACKEND=1` 验证是否应回退该 backend contract。
+
+### Close/Mid LMT Pair-Level Selection
+
+背景结论：
+
+- `[LocalMapping][TriangInputFailure]` 显示 close/mid `local_mapping_triangulation` 的主要创建前损失来自 parallax，不是单纯 descriptor 或 local-proj gate。
+- Pair context 诊断显示：最高共视 neighbor KF 不一定提供最好的 close/mid triangulation 几何；`top1` 往往视差不足，`top3/top10` 可能有更好的 baseline/depth，但旧逻辑会按 neighbor 遍历顺序先创建 MapPoint，导致同一 current keypoint 的弱 pair 先占槽。
+- 这轮不是再加 hard gate，也不是 mapping feature budget / tracklet / probation；它只改变 close/mid XFeat ray triangulation 的创建顺序：先收集通过现有几何检查的候选，再对同一 current KF keypoint 选择几何更好的 pair 创建。
+
+代码变化：
+
+- `LocalMapping::CreateNewMapPoints()` 新增 `kEnableXFeatCloseMidPairSelectionBehavior=true`。
+- 仅作用于 `!bUseORB && bCloseRayCandidate`：
+  - ORB 分支不变。
+  - far triangulation 不变。
+  - close/mid stereo fallback reject、parallax/reproj/scale 阈值不变。
+  - `Frame.cc` stereo、`Optimizer`、`SearchLocalPoints()` 不变。
+- close/mid XFeat ray candidate 通过现有几何检查后进入延迟候选池。
+- 在 neighbor KF 遍历完成后，按 pair score 排序并对 current KF keypoint 去重：
+  - score 偏向更强 baseline/depth、强 parallax、低 reproj chi2、scale margin、response 和低 octave。
+  - 每个 current KF keypoint 最多创建一个 MapPoint。
+  - 如果最高分 pair 的槽位已被占用，允许同 keypoint 的次优 pair 继续尝试。
+
+新增诊断：
+
+- `[LocalMapping][TriangCreate]`
+  - `close_pair_select_active`
+  - `close_pair_select_candidate`
+  - `close_pair_select_unique_current`
+  - `close_pair_select_created`
+  - `close_pair_select_duplicate_reject`
+  - `close_pair_select_best_top1`
+  - `close_pair_select_best_top3`
+  - `close_pair_select_best_top10`
+  - `close_pair_select_best_late`
+  - `close_pair_select_5_10_candidate`
+  - `close_pair_select_5_10_created`
+
+验收重点：
+
+- `close_pair_select_candidate > 0` 且 `close_pair_select_created > 0`。
+- `close_pair_select_created` 不应导致 `close_created` 断崖。
+- `close_pair_select_best_top3/top10/late` 若明显非零，说明这轮确实绕开了“top1 covis 先占槽”的旧行为。
+- `[TriangInputFailure]` 的 created 分布应更多落到较强 `baseline_depth_ratio` 桶，而不是只看 raw reject 总数。
+- `local_proj + local_mapping_triangulation` 的 `inlier_err_avg / outlier_ratio` 不应恶化；`mnMatchesInliers` 不应低于安全基线 90%。
+- 如果 RMSE 仍随机但 created pair 几何质量改善，保留该版本继续观察；如果 `mnMatchesInliers` 下降或 RMSE 持续高于 `0.42`，回退该行为。
+
+运行结果：`run_SePT01_close_pair_selection.log`
+
+生效确认：
+
+- `close_pair_select_active=1`，本轮行为实际启用。
+- 平均 `close_pair_select_candidate≈156/KF`、`close_pair_select_unique_current≈125/KF`、`close_pair_select_created≈124/KF`。
+- 平均 `close_pair_select_duplicate_reject≈32/KF`，说明同一 current KF keypoint 确实存在多个 neighbor pair 候选，被择优去重。
+- 最终创建来源不再主要是最高共视 `top1`：
+  - `close_pair_select_best_top1=399`
+  - `close_pair_select_best_top3=812`
+  - `close_pair_select_best_top10=1145`
+  - `close_pair_select_best_late=0`
+- 这证明该修改确实绕开了“top1 covis 先占槽”的旧行为。
+
+系统层统计：
+
+- `mnMatchesInliers≈237.1`
+- `assoc_added_by_local≈131.5`
+- `local_mps≈5727`
+- 全部 TrackLocalMap 诊断帧均为 `state=2 / ok_visual`，没有 `LOST / RECENTLY_LOST`。
+- 与 pair-context 基线相比，支撑没有塌，inlier 数略高。
+
+source-level 结果：
+
+- `local_proj + local_mapping_triangulation`：
+  - total `2706`
+  - `outlier_ratio≈0.199`
+  - `inlier_err_avg≈1.913`
+- 对比：
+  - `run_SePT01_triang_input_pair_context.log`: `outlier_ratio≈0.203`，`inlier_err_avg≈1.948`
+  - `run_SePT01_stereo_anchor_shadow.log`: `outlier_ratio≈0.210`，`inlier_err_avg≈1.923`
+- 因此本轮有轻微 source 指标改善，但量级很小，不足以单独解释稳定 RMSE 突破。
+
+depth-level 结果：
+
+- `local_proj 0_5m`: `outlier_ratio≈0.215`，`inlier_err_avg≈1.935`
+- `local_proj 5_10m`: `outlier_ratio≈0.178`，`inlier_err_avg≈1.826`
+- close/mid 的 local projection residual 仍偏高。
+
+TriangInput 结论：
+
+- `0_5m`: created rate `≈0.724`，parallax reject `≈0.174`
+- `5_10m`: created rate `≈0.478`，parallax reject `≈0.433`
+- `baseline_depth_ratio` 仍是强信号：
+  - `low`: created rate `≈0.450`，parallax reject `≈0.517`
+  - `mid`: created rate `≈0.552`，parallax reject `≈0.358`
+  - `strong`: created rate `≈0.745`，parallax reject `≈0.145`
+
+结论：
+
+- 这轮修改是有效的 hygiene：它修正了 weak `top1` pair 先占槽的问题，且没有伤 tracking。
+- 但它没有解决根因：`5_10m` close/mid LMT 的 two-view triangulation 仍受 parallax / baseline-depth trade-off 限制；后续 `local_proj + LMT` 仍有约 `20%` outlier 和接近 `2px` 的 inlier residual。
+- 不建议继续围绕 pair score 微调。若保留该版本，应把它视为安全小修，而不是主线突破。

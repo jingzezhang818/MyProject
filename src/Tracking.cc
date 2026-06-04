@@ -3986,6 +3986,329 @@ namespace
         std::cout.precision(oldPrecision);
     }
 
+    struct XFeatMeasurementCalibStats
+    {
+        int total = 0;
+        int inlier = 0;
+        int outlier = 0;
+        double residualPxSum = 0.0;
+        double chi2Sum = 0.0;
+        double depthSum = 0.0;
+        std::vector<float> residualPxSamples;
+        std::vector<float> chi2Samples;
+        std::vector<float> depthSamples;
+    };
+
+    int XFeatMeasurementDescriptorBin(const float bestDist)
+    {
+        if(!std::isfinite(bestDist))
+            return 0;
+        if(bestDist <= 0.70f)
+            return 1;
+        if(bestDist <= 1.00f)
+            return 2;
+        if(bestDist <= 1.20f)
+            return 3;
+        return 4;
+    }
+
+    const char* XFeatMeasurementDescriptorBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "very_good";
+            case 2: return "good";
+            case 3: return "weak";
+            case 4: return "near_threshold";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int XFeatMeasurementRatioBin(const float bestDist, const float ratio, const float secondDist)
+    {
+        if(!std::isfinite(bestDist))
+            return 0;
+        if(!std::isfinite(ratio) || ratio < 0.0f)
+        {
+            if(!std::isfinite(secondDist) || secondDist <= 0.0f)
+                return 1;
+            return 0;
+        }
+        if(ratio <= 0.70f)
+            return 2;
+        if(ratio <= 0.85f)
+            return 3;
+        return 4;
+    }
+
+    const char* XFeatMeasurementRatioBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "no_second";
+            case 2: return "strong";
+            case 3: return "mid";
+            case 4: return "weak";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int XFeatMeasurementProjNormBin(const float projNorm)
+    {
+        if(!std::isfinite(projNorm))
+            return 0;
+        if(projNorm <= 0.25f)
+            return 1;
+        if(projNorm <= 0.50f)
+            return 2;
+        if(projNorm <= 1.00f)
+            return 3;
+        return 4;
+    }
+
+    const char* XFeatMeasurementProjNormBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "small";
+            case 2: return "mid";
+            case 3: return "edge";
+            case 4: return "outside";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int XFeatMeasurementLevelDiffBin(const int levelDiff)
+    {
+        if(levelDiff < 0)
+            return 0;
+        if(levelDiff == 0)
+            return 1;
+        if(levelDiff == 1)
+            return 2;
+        return 3;
+    }
+
+    const char* XFeatMeasurementLevelDiffBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "exact";
+            case 2: return "off1";
+            case 3: return "off2p";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    int XFeatMeasurementObsTypeBin(const Frame& F, const size_t idx)
+    {
+        if(idx >= F.mvpMapPoints.size() || !F.mvpMapPoints[idx])
+            return 0;
+        if(idx < F.mvuRight.size() && std::isfinite(F.mvuRight[idx]) && F.mvuRight[idx] >= 0.0f)
+            return 2;
+        return 1;
+    }
+
+    const char* XFeatMeasurementObsTypeBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case 1: return "mono";
+            case 2: return "stereo";
+            case 0:
+            default:
+                return "missing";
+        }
+    }
+
+    float XFeatMeasurementApproxChi2(const Frame& F, const size_t idx, const float residualPx)
+    {
+        if(!std::isfinite(residualPx) || idx >= F.mvKeysUn.size())
+            return std::numeric_limits<float>::quiet_NaN();
+
+        const int octave = F.mvKeysUn[idx].octave;
+        if(octave < 0 || octave >= static_cast<int>(F.mvLevelSigma2.size()))
+            return std::numeric_limits<float>::quiet_NaN();
+
+        const float sigma2 = F.mvLevelSigma2[static_cast<size_t>(octave)];
+        if(!std::isfinite(sigma2) || sigma2 <= 1e-9f)
+            return std::numeric_limits<float>::quiet_NaN();
+
+        return residualPx * residualPx / sigma2;
+    }
+
+    void AccumulateXFeatMeasurementCalibStats(XFeatMeasurementCalibStats& stats,
+                                              const bool isInlier,
+                                              const float residualPx,
+                                              const float chi2,
+                                              const float depth)
+    {
+        stats.total++;
+        if(isInlier)
+            stats.inlier++;
+        else
+            stats.outlier++;
+
+        if(std::isfinite(residualPx))
+        {
+            stats.residualPxSum += residualPx;
+            stats.residualPxSamples.push_back(residualPx);
+        }
+        if(std::isfinite(chi2))
+        {
+            stats.chi2Sum += chi2;
+            stats.chi2Samples.push_back(chi2);
+        }
+        if(std::isfinite(depth) && depth > 0.0f)
+        {
+            stats.depthSum += depth;
+            stats.depthSamples.push_back(depth);
+        }
+    }
+
+    void PrintXFeatMeasurementCalibStats(const Frame& F,
+                                         const char* dimension,
+                                         const char* bin,
+                                         const XFeatMeasurementCalibStats& stats)
+    {
+        if(stats.total <= 0)
+            return;
+
+        std::vector<float> residualSamples = stats.residualPxSamples;
+        std::vector<float> chi2Samples = stats.chi2Samples;
+        const double outlierRatio = static_cast<double>(stats.outlier) /
+                                    static_cast<double>(std::max(1, stats.total));
+        const double residualAvg = !stats.residualPxSamples.empty()
+            ? stats.residualPxSum / static_cast<double>(stats.residualPxSamples.size())
+            : 0.0;
+        const double chi2Avg = !stats.chi2Samples.empty()
+            ? stats.chi2Sum / static_cast<double>(stats.chi2Samples.size())
+            : 0.0;
+        const double depthAvg = !stats.depthSamples.empty()
+            ? stats.depthSum / static_cast<double>(stats.depthSamples.size())
+            : 0.0;
+
+        std::cout << "[TrackLocalMap][XFeatMeasurementCalib]"
+                  << " frame_id=" << F.mnId
+                  << " dimension=" << dimension
+                  << " bin=" << bin
+                  << " total=" << stats.total
+                  << " inlier=" << stats.inlier
+                  << " outlier=" << stats.outlier
+                  << " outlier_ratio=" << outlierRatio
+                  << " residual_px_avg=" << residualAvg
+                  << " residual_px_p50=" << (residualSamples.empty() ? 0.0f : DepthPercentile(residualSamples, 0.50f))
+                  << " residual_px_p90=" << (residualSamples.empty() ? 0.0f : DepthPercentile(residualSamples, 0.90f))
+                  << " chi2_avg=" << chi2Avg
+                  << " chi2_p90=" << (chi2Samples.empty() ? 0.0f : DepthPercentile(chi2Samples, 0.90f))
+                  << " depth_avg=" << depthAvg
+                  << std::endl;
+    }
+
+    void LogTrackLocalMapXFeatMeasurementCalibDiagnostics(const Frame& F)
+    {
+        if(!IsXFeatFeatureDiagEnabled())
+            return;
+        if(F.mDescriptors.empty() || F.mDescriptors.type() != CV_32F)
+            return;
+
+        static constexpr int kNumMatchSourceBins = 8;
+        static constexpr int kNumMpSourceBins = static_cast<int>(kMapPointCreationSourceCount);
+        static constexpr int kNumDepthBins = 6;
+        static constexpr int kNumDescriptorBins = 5;
+        static constexpr int kNumRatioBins = 5;
+        static constexpr int kNumProjNormBins = 5;
+        static constexpr int kNumLevelDiffBins = 4;
+        static constexpr int kNumObsTypeBins = 3;
+
+        XFeatMeasurementCalibStats matchSourceStats[kNumMatchSourceBins];
+        XFeatMeasurementCalibStats mpSourceStats[kNumMpSourceBins];
+        XFeatMeasurementCalibStats depthStats[kNumDepthBins];
+        XFeatMeasurementCalibStats descriptorStats[kNumDescriptorBins];
+        XFeatMeasurementCalibStats ratioStats[kNumRatioBins];
+        XFeatMeasurementCalibStats projNormStats[kNumProjNormBins];
+        XFeatMeasurementCalibStats levelDiffStats[kNumLevelDiffBins];
+        XFeatMeasurementCalibStats obsTypeStats[kNumObsTypeBins];
+
+        const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
+        for(size_t i = 0; i < n; ++i)
+        {
+            MapPoint* pMP = F.mvpMapPoints[i];
+            if(!pMP)
+                continue;
+
+            float residualPx = std::numeric_limits<float>::quiet_NaN();
+            float depth = std::numeric_limits<float>::quiet_NaN();
+            ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, residualPx, depth);
+            const float chi2 = XFeatMeasurementApproxChi2(F, i, residualPx);
+            const bool isInlier = !F.mvbOutlier[i];
+
+            const unsigned char rawMatchSource = i < F.mvXFeatMatchSource.size()
+                ? F.mvXFeatMatchSource[i]
+                : static_cast<unsigned char>(kXFeatMatchUnknown);
+            const int matchSourceBin = rawMatchSource < kNumMatchSourceBins
+                ? static_cast<int>(rawMatchSource)
+                : static_cast<int>(kXFeatMatchUnknown);
+            const int mpSourceBin = static_cast<int>(MapPointCreationSourceIndex(pMP->GetCreationSource()));
+            const int depthBin = DepthBinIndex(depth);
+            const float bestDist = i < F.mvLocalProjBestDist.size()
+                ? F.mvLocalProjBestDist[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const float secondDist = i < F.mvLocalProjSecondDist.size()
+                ? F.mvLocalProjSecondDist[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const float ratio = i < F.mvLocalProjRatio.size()
+                ? F.mvLocalProjRatio[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const float projNorm = i < F.mvLocalProjProjErrNorm.size()
+                ? F.mvLocalProjProjErrNorm[i]
+                : std::numeric_limits<float>::quiet_NaN();
+            const int levelDiff = i < F.mvLocalProjLevelDiff.size()
+                ? F.mvLocalProjLevelDiff[i]
+                : -1;
+            const int obsTypeBin = XFeatMeasurementObsTypeBin(F, i);
+
+            AccumulateXFeatMeasurementCalibStats(matchSourceStats[matchSourceBin], isInlier, residualPx, chi2, depth);
+            AccumulateXFeatMeasurementCalibStats(mpSourceStats[mpSourceBin], isInlier, residualPx, chi2, depth);
+            AccumulateXFeatMeasurementCalibStats(depthStats[depthBin], isInlier, residualPx, chi2, depth);
+            AccumulateXFeatMeasurementCalibStats(descriptorStats[XFeatMeasurementDescriptorBin(bestDist)], isInlier, residualPx, chi2, depth);
+            AccumulateXFeatMeasurementCalibStats(ratioStats[XFeatMeasurementRatioBin(bestDist, ratio, secondDist)], isInlier, residualPx, chi2, depth);
+            AccumulateXFeatMeasurementCalibStats(projNormStats[XFeatMeasurementProjNormBin(projNorm)], isInlier, residualPx, chi2, depth);
+            AccumulateXFeatMeasurementCalibStats(levelDiffStats[XFeatMeasurementLevelDiffBin(levelDiff)], isInlier, residualPx, chi2, depth);
+            AccumulateXFeatMeasurementCalibStats(obsTypeStats[obsTypeBin], isInlier, residualPx, chi2, depth);
+        }
+
+        const std::ios::fmtflags oldFlags = std::cout.flags();
+        const std::streamsize oldPrecision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(6);
+        for(int bin = 0; bin < kNumMatchSourceBins; ++bin)
+            PrintXFeatMeasurementCalibStats(F, "match_source", XFeatMatchSourceName(static_cast<unsigned char>(bin)), matchSourceStats[bin]);
+        for(int bin = 0; bin < kNumMpSourceBins; ++bin)
+            PrintXFeatMeasurementCalibStats(F, "mp_source", MapPointCreationSourceName(static_cast<MapPoint::CreationSource>(bin)), mpSourceStats[bin]);
+        for(int bin = 0; bin < kNumDepthBins; ++bin)
+            PrintXFeatMeasurementCalibStats(F, "depth_bin", DepthBinName(bin), depthStats[bin]);
+        for(int bin = 0; bin < kNumDescriptorBins; ++bin)
+            PrintXFeatMeasurementCalibStats(F, "descriptor_dist_bin", XFeatMeasurementDescriptorBinName(bin), descriptorStats[bin]);
+        for(int bin = 0; bin < kNumRatioBins; ++bin)
+            PrintXFeatMeasurementCalibStats(F, "ratio_bin", XFeatMeasurementRatioBinName(bin), ratioStats[bin]);
+        for(int bin = 0; bin < kNumProjNormBins; ++bin)
+            PrintXFeatMeasurementCalibStats(F, "proj_norm_bin", XFeatMeasurementProjNormBinName(bin), projNormStats[bin]);
+        for(int bin = 0; bin < kNumLevelDiffBins; ++bin)
+            PrintXFeatMeasurementCalibStats(F, "level_diff_bin", XFeatMeasurementLevelDiffBinName(bin), levelDiffStats[bin]);
+        for(int bin = 0; bin < kNumObsTypeBins; ++bin)
+            PrintXFeatMeasurementCalibStats(F, "obs_type", XFeatMeasurementObsTypeBinName(bin), obsTypeStats[bin]);
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+    }
+
     int LocalProjMapUpdateBin(const bool bMapUpdated)
     {
         return bMapUpdated ? 1 : 0;
@@ -8669,7 +8992,6 @@ void Tracking::Track()
                     }
                     else
                     {
-                        // Relocalization
                         bOK = Relocalization();
                         //std::cout << "mCurrentFrame.mTimeStamp:" << to_string(mCurrentFrame.mTimeStamp) << std::endl;
                         //std::cout << "mTimeStampLost:" << to_string(mTimeStampLost) << std::endl;
@@ -9259,13 +9581,50 @@ void Tracking::MonocularInitialization()
             mvIniMatches.swap(vIniMatchesForReconstruct);
             nmatches = CountValidInitMatches(mvIniMatches);
 
+            int invalidInitMatches = 0;
             for(size_t i=0, iend=mvIniMatches.size(); i<iend;i++)
             {
-                if(mvIniMatches[i]>=0 && !vbTriangulated[i])
+                const int idx2 = mvIniMatches[i];
+                if(idx2 < 0)
+                    continue;
+
+                const bool bInvalidInitIndex =
+                    i >= vbTriangulated.size() ||
+                    i >= mvIniP3D.size() ||
+                    i >= mInitialFrame.mvKeysUn.size() ||
+                    idx2 >= static_cast<int>(mCurrentFrame.mvKeysUn.size());
+                if(bInvalidInitIndex || !vbTriangulated[i])
                 {
                     mvIniMatches[i]=-1;
                     nmatches--;
+                    if(bInvalidInitIndex)
+                        ++invalidInitMatches;
                 }
+            }
+
+            if(invalidInitMatches > 0 && ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+            {
+                std::cout << "[InitMono] INVALID_RECONSTRUCT_MATCHES "
+                          << "invalid=" << invalidInitMatches
+                          << " matches_size=" << mvIniMatches.size()
+                          << " p3d_size=" << mvIniP3D.size()
+                          << " triangulated_size=" << vbTriangulated.size()
+                          << " init_keys=" << mInitialFrame.mvKeysUn.size()
+                          << " current_keys=" << mCurrentFrame.mvKeysUn.size()
+                          << std::endl;
+            }
+
+            if(nmatches < 50)
+            {
+                if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+                {
+                    std::cout << "[InitMono] REANCHOR "
+                              << "reason=too_few_triangulated_matches"
+                              << " retained=" << nmatches
+                              << std::endl;
+                }
+                mbReadyToInitializate = false;
+                return;
             }
 
             // Set Frame Poses
@@ -9325,32 +9684,65 @@ void Tracking::CreateInitialMapMonocular()
     mpAtlas->AddKeyFrame(pKFini);
     mpAtlas->AddKeyFrame(pKFcur);
 
+    int skippedInitMapPoints = 0;
     for(size_t i=0; i<mvIniMatches.size();i++)
     {
-        if(mvIniMatches[i]<0)
+        const int idx2 = mvIniMatches[i];
+        if(idx2<0)
             continue;
+
+        const bool bInvalidMapPointIndex =
+            i >= mvIniP3D.size() ||
+            i >= static_cast<size_t>(pKFini->N) ||
+            idx2 >= pKFcur->N ||
+            idx2 >= static_cast<int>(mCurrentFrame.mvpMapPoints.size()) ||
+            idx2 >= static_cast<int>(mCurrentFrame.mvbOutlier.size());
+        if(bInvalidMapPointIndex)
+        {
+            ++skippedInitMapPoints;
+            continue;
+        }
+
+        const cv::Point3f& p3d = mvIniP3D[i];
+        if(!std::isfinite(p3d.x) || !std::isfinite(p3d.y) || !std::isfinite(p3d.z))
+        {
+            ++skippedInitMapPoints;
+            continue;
+        }
 
         //Create MapPoint.
         Eigen::Vector3f worldPos;
-        worldPos << mvIniP3D[i].x, mvIniP3D[i].y, mvIniP3D[i].z;
+        worldPos << p3d.x, p3d.y, p3d.z;
         MapPoint* pMP = new MapPoint(worldPos,pKFcur,mpAtlas->GetCurrentMap());
         pMP->SetCreationSource(MapPoint::kCreationSourceMonoInit);
 
         pKFini->AddMapPoint(pMP,i);
-        pKFcur->AddMapPoint(pMP,mvIniMatches[i]);
+        pKFcur->AddMapPoint(pMP,static_cast<size_t>(idx2));
 
         pMP->AddObservation(pKFini,i);
-        pMP->AddObservation(pKFcur,mvIniMatches[i]);
+        pMP->AddObservation(pKFcur,static_cast<size_t>(idx2));
 
         pMP->ComputeDistinctiveDescriptors();
         pMP->UpdateNormalAndDepth();
 
         //Fill Current Frame structure
-        mCurrentFrame.mvpMapPoints[mvIniMatches[i]] = pMP;
-        mCurrentFrame.mvbOutlier[mvIniMatches[i]] = false;
+        mCurrentFrame.mvpMapPoints[static_cast<size_t>(idx2)] = pMP;
+        mCurrentFrame.mvbOutlier[static_cast<size_t>(idx2)] = false;
 
         //Add to Map
         mpAtlas->AddMapPoint(pMP);
+    }
+
+    if(skippedInitMapPoints > 0 && ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+    {
+        std::cout << "[InitMono] SKIP_INVALID_MAPPOINTS "
+                  << "skipped=" << skippedInitMapPoints
+                  << " matches_size=" << mvIniMatches.size()
+                  << " p3d_size=" << mvIniP3D.size()
+                  << " kf_ini_points=" << pKFini->N
+                  << " kf_cur_points=" << pKFcur->N
+                  << " current_frame_points=" << mCurrentFrame.mvpMapPoints.size()
+                  << std::endl;
     }
 
 
@@ -10128,7 +10520,10 @@ bool Tracking::TrackWithMotionModel()
     StereoDepthConstraintStats motionStereoAfterOpt;
     AccumulateStereoDepthConstraintStats(mCurrentFrame, mThDepth, true, motionStereoAfterOpt);
 
-    if(bUsedLightGlueMotion && ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+    const bool bLowMotionSupportDiag =
+        IsXFeatFeatureDiagEnabled() && inlier_cnt < 80;
+    if(bUsedLightGlueMotion &&
+       (ShouldPrintXFeatDebug(mCurrentFrame.mnId) || bLowMotionSupportDiag))
     {
         const std::ios::fmtflags oldFlags = std::cout.flags();
         const std::streamsize oldPrecision = std::cout.precision();
@@ -10365,6 +10760,7 @@ bool Tracking::TrackLocalMap()
             LogTrackLocalMapTriangulationQualityDiagnostics(mCurrentFrame);
             LogTrackLocalMapTriangulationMultiViewDiagnostics(mCurrentFrame);
             LogTrackLocalMapTriangulationLocalProjHistoryDiagnostics(mCurrentFrame);
+            LogTrackLocalMapXFeatMeasurementCalibDiagnostics(mCurrentFrame);
             LogTrackLocalMapLocalProjMatcherQualityDiagnostics(mCurrentFrame);
             LogTrackLocalMapLocalProjPoseContextDiagnostics(mCurrentFrame,
                                                             assoc_before_search,
@@ -10425,7 +10821,8 @@ bool Tracking::TrackLocalMap()
     const bool bRecentRelocWindow = mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames;
     auto LogTrackLocalMapSummary = [&](const bool bReturnValue, const int successThreshold, const char* decision)
     {
-        if(!ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+        const bool bFailureDiag = !bReturnValue && IsXFeatFeatureDiagEnabled();
+        if(!ShouldPrintXFeatDebug(mCurrentFrame.mnId) && !bFailureDiag)
             return;
 
         const std::ios::fmtflags oldFlags = std::cout.flags();
@@ -10535,14 +10932,15 @@ bool Tracking::TrackLocalMap()
     }
     else
     {
-        if(mnMatchesInliers<30)
+        const int successThreshold = 30;
+        if(mnMatchesInliers<successThreshold)
         {
-            LogTrackLocalMapSummary(false, 30, "fail_visual");
+            LogTrackLocalMapSummary(false, successThreshold, "fail_visual");
             return false;
         }
         else
         {
-            LogTrackLocalMapSummary(true, 30, "ok_visual");
+            LogTrackLocalMapSummary(true, successThreshold, "ok_visual");
             return true;
         }
     }
@@ -11412,9 +11810,26 @@ void Tracking::CreateNewKeyFrame()
             int nTrackingStereoCreatedTotal = 0;
             int nTrackingStereoCreatedCloseHighConf = 0;
             int nTrackingStereoSkippedCloseLowConf = 0;
+            int nTrackingStereoBackendEligibleCandidate = 0;
+            int nTrackingStereoBackendEligibleCreated = 0;
+            int nTrackingStereoBackendIneligibleReject = 0;
             DepthDistributionStats createKFSelectedDepthStats;
             DepthDistributionStats createKFUsedDepthStats;
             DepthDistributionStats createKFCreatedDepthStats;
+            const bool bUseXFeatBackendProfile =
+                !mCurrentFrame.mDescriptors.empty() &&
+                mCurrentFrame.mDescriptors.type() == CV_32F;
+            auto isXFeatBackendEligible = [&](const int idx) -> bool
+            {
+                if(!bUseXFeatBackendProfile)
+                    return true;
+                if(idx < 0 ||
+                   idx >= static_cast<int>(mCurrentFrame.mvXFeatMappingEligible.size()))
+                {
+                    return false;
+                }
+                return mCurrentFrame.mvXFeatMappingEligible[static_cast<size_t>(idx)] != 0;
+            };
             for(size_t j=0; j<vDepthIdx.size();j++)
             {
                 int i = vDepthIdx[j].second;
@@ -11445,6 +11860,9 @@ void Tracking::CreateNewKeyFrame()
                         ++nTrackingStereoSkippedCloseLowConf;
                         continue;
                     }
+                    const bool bBackendEligible = isXFeatBackendEligible(i);
+                    if(bUseXFeatBackendProfile && bCloseDepth && bBackendEligible)
+                        ++nTrackingStereoBackendEligibleCandidate;
 
                     AccumulateDepthDistribution(createKFCreatedDepthStats, vDepthIdx[j].first);
                     Eigen::Vector3f x3D;
@@ -11486,6 +11904,10 @@ void Tracking::CreateNewKeyFrame()
                     {
                         ++nTrackingStereoCreatedCloseHighConf;
                     }
+                    if(bUseXFeatBackendProfile && bCloseDepth && bBackendEligible)
+                    {
+                        ++nTrackingStereoBackendEligibleCreated;
+                    }
                 }
                 else
                 {
@@ -11516,6 +11938,9 @@ void Tracking::CreateNewKeyFrame()
                           << " tracking_stereo_created_total=" << nTrackingStereoCreatedTotal
                           << " tracking_stereo_created_close_high_conf=" << nTrackingStereoCreatedCloseHighConf
                           << " tracking_stereo_skipped_close_low_conf=" << nTrackingStereoSkippedCloseLowConf
+                          << " tracking_stereo_backend_eligible_candidate=" << nTrackingStereoBackendEligibleCandidate
+                          << " tracking_stereo_backend_eligible_created=" << nTrackingStereoBackendEligibleCreated
+                          << " tracking_stereo_backend_ineligible_reject=" << nTrackingStereoBackendIneligibleReject
                           << " stereo_birth_quality_enabled=" << (bUseStereoBirthQuality ? 1 : 0);
                 AppendDepthDistributionStats(std::cout, "frame", createKFFrameDepthStats);
                 AppendDepthDistributionStats(std::cout, "selected_depth", createKFSelectedDepthStats);
@@ -11544,6 +11969,9 @@ void Tracking::CreateNewKeyFrame()
                       << " tracking_stereo_created_total=0"
                       << " tracking_stereo_created_close_high_conf=0"
                       << " tracking_stereo_skipped_close_low_conf=0"
+                      << " tracking_stereo_backend_eligible_candidate=0"
+                      << " tracking_stereo_backend_eligible_created=0"
+                      << " tracking_stereo_backend_ineligible_reject=0"
                       << " stereo_birth_quality_enabled=" << (bUseStereoBirthQuality ? 1 : 0);
             AppendDepthDistributionStats(std::cout, "frame", createKFFrameDepthStats);
             std::cout << std::endl;
@@ -12846,7 +13274,8 @@ void Tracking::SearchLocalPoints()
                                                const float thFarPointsValue,
                                                const bool bNearOnlyAppliedValue)
     {
-        if(!ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+        const bool bLowSupportDiag = IsXFeatFeatureDiagEnabled() && matchesValue < 80;
+        if(!ShouldPrintXFeatDebug(mCurrentFrame.mnId) && !bLowSupportDiag)
             return;
 
         std::cout << "[SearchLocalPoints] frame=" << mCurrentFrame.mnId

@@ -4,7 +4,7 @@
 #    python convert_euroc_to_tum.py \
 #      --est-traj CameraTrajectory.txt \
 #      --out-est camera_traj_tum.txt \
-#      --timestamp-unit ns
+#      --timestamp-unit auto
 #
 # 2) Convert EuRoC GT CSV to TUM:
 #    python convert_euroc_to_tum.py \
@@ -15,7 +15,7 @@
 #    python convert_euroc_to_tum.py \
 #      --est-traj CameraTrajectory.txt \
 #      --out-est camera_traj_tum_corr.txt \
-#      --timestamp-unit ns \
+#      --timestamp-unit auto \
 #      --estimate-right-rot \
 #      --gt Moon_1_gt_tum.txt
 
@@ -47,6 +47,26 @@ def unit_to_scale(unit: str) -> float:
         "ms": 1e-3,
         "s": 1.0,
     }[unit]
+
+
+def infer_timestamp_unit(input_traj: Path) -> str:
+    with input_traj.open("r") as f_in:
+        for line in f_in:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 8:
+                continue
+            ts_abs = abs(float(parts[0]))
+            if ts_abs >= 1e17:
+                return "ns"
+            if ts_abs >= 1e14:
+                return "us"
+            if ts_abs >= 1e11:
+                return "ms"
+            return "s"
+    raise ValueError(f"Cannot infer timestamp unit from empty trajectory: {input_traj}")
 
 
 def quat_norm_wxyz(q: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
@@ -444,9 +464,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timestamp-unit",
-        choices=("ns", "us", "ms", "s"),
-        default="ns",
-        help="Unit of EST timestamps for --est-traj (default: ns).",
+        choices=("auto", "ns", "us", "ms", "s"),
+        default="auto",
+        help=(
+            "Unit of EST timestamps for --est-traj. "
+            "auto infers from timestamp magnitude (default: auto)."
+        ),
     )
     parser.add_argument(
         "--estimate-right-rot",
@@ -498,8 +521,12 @@ def main() -> None:
             gt_input_tum = True
 
     if est_traj is not None:
+        timestamp_unit = args.timestamp_unit
+        if timestamp_unit == "auto":
+            timestamp_unit = infer_timestamp_unit(est_traj)
+            print(f"EST timestamp unit auto-detected: {timestamp_unit}")
         est_count, est_skipped = convert_est_traj_to_tum(
-            est_traj, out_est, timestamp_scale=unit_to_scale(args.timestamp_unit)
+            est_traj, out_est, timestamp_scale=unit_to_scale(timestamp_unit)
         )
         est_converted = True
 

@@ -33,8 +33,10 @@ Camera1.p2: 1.76187114e-05
 Camera.width: 752
 Camera.height: 480
 
-Camera.newWidth: 600
-Camera.newHeight: 350
+# Camera.newWidth: 600
+# Camera.newHeight: 350
+Camera.newWidth: 480 #320
+Camera.newHeight: 360 #240
 
 # Camera frames per second 
 Camera.fps: 20
@@ -47,7 +49,7 @@ Camera.RGB: 1
 #--------------------------------------------------------------------------------------------
 
 # ORB Extractor: Number of features per image
-ORBextractor.nFeatures: 2000
+ORBextractor.nFeatures: 1000
 
 # ORB Extractor: Scale factor between levels in the scale pyramid 	
 ORBextractor.scaleFactor: 1.2

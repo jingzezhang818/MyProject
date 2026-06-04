@@ -43,9 +43,12 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <map>
 #include<mutex>
 #include <set>
 #include <string>
+#include <tuple>
+#include <vector>
 
 #include "OptimizableTypes.h"
 
@@ -91,11 +94,17 @@ bool IsXFeatDescriptorMat(const cv::Mat& descriptors)
     return !descriptors.empty() && descriptors.type() == CV_32F;
 }
 
+bool UseXFeatRoverBackendContract()
+{
+    static const bool enabled = IsEnvFlagEnabled("XFEAT_ENABLE_ROVER_BACKEND");
+    return enabled;
+}
+
 float GetXFeatPixelSigma()
 {
     static const float xfeatPixelSigma = []() -> float
     {
-        float sigma = 1.0f;
+        float sigma = UseXFeatRoverBackendContract() ? 1.5f : 1.0f;
         const char* env = std::getenv("XFEAT_PIXEL_SIGMA");
         if(env && env[0] != '\0')
         {
@@ -116,7 +125,9 @@ float GetXFeatPixelSigma()
         // 调试: 这是无 frame/kf 上下文的一次性配置日志，仅在最密集诊断模式下打印，
         // 避免 XFEAT_DIAG_INTERVAL>1 时仍然冒出不受控的 XFEAT_DEBUG 输出。
         if(IsEnvFlagEnabled("XFEAT_DEBUG") && GetXFeatDiagInterval() == 1)
-            std::cout << "[XFEAT_DEBUG] XFEAT_PIXEL_SIGMA=" << xfeatPixelSigma << std::endl;
+            std::cout << "[XFEAT_DEBUG] XFEAT_PIXEL_SIGMA=" << xfeatPixelSigma
+                      << " rover_backend=" << (UseXFeatRoverBackendContract() ? 1 : 0)
+                      << std::endl;
         return true;
     }();
     (void)printedOnce;
@@ -132,7 +143,9 @@ float GetVisualInvSigma2ForKeyPoint(const std::vector<float>& invLevelSigma2,
     if(!IsXFeatDescriptorMat(descriptors))
         return invLevelSigma2[kp.octave];
 
-    const float sigma = GetXFeatPixelSigma() * scaleFactors[kp.octave];
+    const float sigma = UseXFeatRoverBackendContract()
+        ? GetXFeatPixelSigma()
+        : GetXFeatPixelSigma() * scaleFactors[kp.octave];
     return 1.0f / (sigma * sigma);
 }
 
@@ -149,6 +162,13 @@ float GetVisualInvSigma2ForKeyPoint(const Frame* pFrame, const cv::KeyPoint& kp)
 bool ShouldPrintXFeatDebug(const long unsigned int frameId)
 {
     return IsEnvFlagEnabled("XFEAT_DEBUG") &&
+           (frameId == 0 || (frameId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0);
+}
+
+bool ShouldPrintPoseOptResidualCalib(const long unsigned int frameId)
+{
+    return IsEnvFlagEnabled("XFEAT_DEBUG") &&
+           IsEnvFlagEnabled("XFEAT_DIAG_FEATURE_DISTRIBUTION") &&
            (frameId == 0 || (frameId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0);
 }
 
@@ -373,26 +393,35 @@ enum class PoseOptimizationVisualWeightKind
     LocalProjTriangFar
 };
 
+constexpr unsigned char kPoseOptXFeatMatchLocalProjection = 5;
+constexpr float kPoseOptLocalProjCloseDepthMax = 10.0f;
+constexpr float kPoseOptLocalProjCloseResidualPxMax = 4.0f;
+
 struct PoseOptimizationVisualWeightInfo
 {
     float weight = 1.0f;
     float resolvedDepth = std::numeric_limits<float>::quiet_NaN();
     PoseOptimizationVisualWeightKind kind = PoseOptimizationVisualWeightKind::None;
+    bool localProjTriangFar = false;
+};
+
+struct PoseOptimizationVisualWeightCounters
+{
+    int weightedObs = 0;
+    int weightedLocalProjTriangFar = 0;
 };
 
 PoseOptimizationVisualWeightInfo GetPoseOptimizationVisualWeight(const Frame* pFrame,
                                                                  const int idx,
                                                                  MapPoint* pMP)
 {
-    constexpr unsigned char kXFeatMatchLocalProjection = 5;
-
     PoseOptimizationVisualWeightInfo info;
 
     if(!pFrame || !pMP || idx < 0)
         return info;
 
     if(idx >= static_cast<int>(pFrame->mvXFeatMatchSource.size()) ||
-       pFrame->mvXFeatMatchSource[static_cast<size_t>(idx)] != kXFeatMatchLocalProjection)
+       pFrame->mvXFeatMatchSource[static_cast<size_t>(idx)] != kPoseOptXFeatMatchLocalProjection)
         return info;
 
     if(pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation)
@@ -417,7 +446,394 @@ PoseOptimizationVisualWeightInfo GetPoseOptimizationVisualWeight(const Frame* pF
 
     info.weight = weight;
     info.kind = PoseOptimizationVisualWeightKind::LocalProjTriangFar;
+    info.localProjTriangFar = true;
     return info;
+}
+
+void AccumulatePoseOptimizationVisualWeightCounters(const PoseOptimizationVisualWeightInfo& info,
+                                                    PoseOptimizationVisualWeightCounters& counters)
+{
+    if(info.weight >= 0.9999f)
+        return;
+
+    counters.weightedObs++;
+    if(info.localProjTriangFar)
+        counters.weightedLocalProjTriangFar++;
+}
+
+float PoseOptResidualPxFromChi2(const float chi2, const float invSigma2)
+{
+    if(!std::isfinite(chi2) || chi2 < 0.0f || !std::isfinite(invSigma2) || invSigma2 <= 1e-9f)
+        return std::numeric_limits<float>::quiet_NaN();
+    return std::sqrt(chi2 / invSigma2);
+}
+
+bool IsPoseOptLocalProjCloseResidualGateCandidate(const Frame* pFrame,
+                                                  const size_t idx,
+                                                  MapPoint* pMP,
+                                                  float* resolvedDepth = nullptr)
+{
+    if(resolvedDepth)
+        *resolvedDepth = std::numeric_limits<float>::quiet_NaN();
+
+    if(!pFrame || !pMP || !IsXFeatDescriptorMat(pFrame->mDescriptors))
+        return false;
+
+    if(idx >= pFrame->mvXFeatMatchSource.size() ||
+       pFrame->mvXFeatMatchSource[idx] != kPoseOptXFeatMatchLocalProjection)
+        return false;
+
+    const MapPoint::CreationSource source = pMP->GetCreationSource();
+    if(source != MapPoint::kCreationSourceLocalMappingTriangulation &&
+       source != MapPoint::kCreationSourceTrackingStereo)
+        return false;
+
+    const float depth = ResolveFrameMapPointDepth(pFrame, pMP);
+    if(resolvedDepth)
+        *resolvedDepth = depth;
+    return std::isfinite(depth) && depth > 0.0f && depth <= kPoseOptLocalProjCloseDepthMax;
+}
+
+bool ShouldRejectPoseOptLocalProjCloseResidualPx(const Frame* pFrame,
+                                                 const size_t idx,
+                                                 MapPoint* pMP,
+                                                 const float chi2,
+                                                 const float invSigma2,
+                                                 float* residualPx = nullptr)
+{
+    if(residualPx)
+        *residualPx = std::numeric_limits<float>::quiet_NaN();
+
+    if(!IsPoseOptLocalProjCloseResidualGateCandidate(pFrame, idx, pMP))
+        return false;
+
+    const float px = PoseOptResidualPxFromChi2(chi2, invSigma2);
+    if(residualPx)
+        *residualPx = px;
+    return std::isfinite(px) && px > kPoseOptLocalProjCloseResidualPxMax;
+}
+
+struct PoseOptResidualPxGateStats
+{
+    int candidate = 0;
+    int highResidual = 0;
+    int reject = 0;
+    int rejectLocalMappingTriangulation = 0;
+    int rejectTrackingStereo = 0;
+};
+
+void AccumulatePoseOptResidualPxGateStats(PoseOptResidualPxGateStats& stats,
+                                          MapPoint* pMP,
+                                          const bool bCandidate,
+                                          const bool bHighResidual,
+                                          const bool bAdditionalReject)
+{
+    if(!bCandidate)
+        return;
+
+    stats.candidate++;
+    if(bHighResidual)
+        stats.highResidual++;
+    if(!bAdditionalReject)
+        return;
+
+    stats.reject++;
+    if(!pMP)
+        return;
+
+    const MapPoint::CreationSource source = pMP->GetCreationSource();
+    if(source == MapPoint::kCreationSourceLocalMappingTriangulation)
+        stats.rejectLocalMappingTriangulation++;
+    else if(source == MapPoint::kCreationSourceTrackingStereo)
+        stats.rejectTrackingStereo++;
+}
+
+enum class PoseOptObsType
+{
+    Mono = 0,
+    Stereo = 1,
+    BodyMono = 2
+};
+
+const char* PoseOptObsTypeName(const PoseOptObsType type)
+{
+    switch(type)
+    {
+        case PoseOptObsType::Mono: return "mono";
+        case PoseOptObsType::Stereo: return "stereo";
+        case PoseOptObsType::BodyMono: return "body_mono";
+        default: return "unknown";
+    }
+}
+
+const char* PoseOptDescriptorName(const int descriptorIdx)
+{
+    return descriptorIdx == 1 ? "XFeat" : "ORB";
+}
+
+const char* PoseOptMatchSourceName(const unsigned char source)
+{
+    switch(source)
+    {
+        case 1: return "motion_proj";
+        case 2: return "motion_lg";
+        case 3: return "ref";
+        case 4: return "ref_lg";
+        case 5: return "local_proj";
+        case 6: return "local_proj_lg_verified";
+        case 7: return "relocalization";
+        default: return "unknown";
+    }
+}
+
+int PoseOptOctaveBinIndex(const int octave)
+{
+    if(octave < 0)
+        return 0;
+    if(octave == 0)
+        return 1;
+    if(octave == 1)
+        return 2;
+    return 3;
+}
+
+const char* PoseOptOctaveBinName(const int bin)
+{
+    switch(bin)
+    {
+        case 1: return "0";
+        case 2: return "1";
+        case 3: return "2p";
+        case 0:
+        default:
+            return "invalid";
+    }
+}
+
+int PoseOptFrameKeyPointOctave(const Frame* pFrame,
+                               const size_t idx,
+                               const PoseOptObsType obsType)
+{
+    if(!pFrame)
+        return -1;
+
+    if(obsType == PoseOptObsType::BodyMono && pFrame->mpCamera2)
+    {
+        if(idx >= static_cast<size_t>(pFrame->Nleft))
+        {
+            const size_t rightIdx = idx - static_cast<size_t>(pFrame->Nleft);
+            if(rightIdx < pFrame->mvKeysRight.size())
+                return pFrame->mvKeysRight[rightIdx].octave;
+        }
+        else if(idx < pFrame->mvKeys.size())
+        {
+            return pFrame->mvKeys[idx].octave;
+        }
+    }
+
+    if(idx < pFrame->mvKeysUn.size())
+        return pFrame->mvKeysUn[idx].octave;
+    if(idx < pFrame->mvKeys.size())
+        return pFrame->mvKeys[idx].octave;
+    return -1;
+}
+
+struct PoseOptResidualCalibKey
+{
+    int descriptorIdx = 0;
+    unsigned char matchSource = 0;
+    int mpSourceIdx = 0;
+    int depthBin = 0;
+    int octaveBin = 0;
+    int obsType = 0;
+
+    bool operator<(const PoseOptResidualCalibKey& other) const
+    {
+        return std::tie(descriptorIdx, matchSource, mpSourceIdx, depthBin, octaveBin, obsType) <
+               std::tie(other.descriptorIdx, other.matchSource, other.mpSourceIdx,
+                        other.depthBin, other.octaveBin, other.obsType);
+    }
+};
+
+struct PoseOptResidualCalibStats
+{
+    int edges = 0;
+    int inlierEdges = 0;
+    int outlierEdges = 0;
+    double chi2Sum = 0.0;
+    double residualPxSum = 0.0;
+    double invSigma2Sum = 0.0;
+    double descriptorDistSum = 0.0;
+    double ratioSum = 0.0;
+    double projNormSum = 0.0;
+    std::vector<float> chi2Values;
+    std::vector<float> residualPxValues;
+    std::vector<float> descriptorDistValues;
+    std::vector<float> ratioValues;
+    std::vector<float> projNormValues;
+};
+
+using PoseOptResidualCalibStatsMap =
+    std::map<PoseOptResidualCalibKey, PoseOptResidualCalibStats>;
+
+float PoseOptPercentile(std::vector<float> values, const double q)
+{
+    if(values.empty())
+        return -1.0f;
+
+    std::sort(values.begin(), values.end());
+    const double clampedQ = std::max(0.0, std::min(1.0, q));
+    const size_t idx = std::min(values.size() - 1,
+                                static_cast<size_t>(std::round(clampedQ *
+                                                               static_cast<double>(values.size() - 1))));
+    return values[idx];
+}
+
+void AccumulatePoseOptResidualCalibStats(PoseOptResidualCalibStatsMap& stats,
+                                         const Frame* pFrame,
+                                         const size_t idx,
+                                         MapPoint* pMP,
+                                         const float chi2,
+                                         const float threshold,
+                                         const bool bDepthPositive,
+                                         const PoseOptObsType obsType,
+                                         const float invSigma2)
+{
+    PoseOptResidualCalibKey key;
+    key.descriptorIdx = (pFrame && IsXFeatDescriptorMat(pFrame->mDescriptors)) ? 1 : 0;
+    key.matchSource = (pFrame && idx < pFrame->mvXFeatMatchSource.size())
+                          ? pFrame->mvXFeatMatchSource[idx]
+                          : static_cast<unsigned char>(0);
+    const MapPoint::CreationSource mpSource = pMP ? pMP->GetCreationSource()
+                                                  : MapPoint::kCreationSourceUnknown;
+    key.mpSourceIdx = static_cast<int>(MapPointCreationSourceIndex(mpSource));
+    key.depthBin = LocalBADepthBinIndex(ResolveFrameMapPointDepth(pFrame, pMP));
+    key.octaveBin = PoseOptOctaveBinIndex(PoseOptFrameKeyPointOctave(pFrame, idx, obsType));
+    key.obsType = static_cast<int>(obsType);
+
+    PoseOptResidualCalibStats& cell = stats[key];
+    cell.edges++;
+    const bool bOutlier = chi2 > threshold || !bDepthPositive;
+    if(bOutlier)
+        cell.outlierEdges++;
+    else
+        cell.inlierEdges++;
+
+    if(std::isfinite(chi2))
+    {
+        cell.chi2Sum += static_cast<double>(chi2);
+        cell.chi2Values.push_back(chi2);
+    }
+
+    if(std::isfinite(invSigma2) && invSigma2 > 1e-9f && std::isfinite(chi2) && chi2 >= 0.0f)
+    {
+        const float residualPx = std::sqrt(chi2 / invSigma2);
+        if(std::isfinite(residualPx))
+        {
+            cell.residualPxSum += static_cast<double>(residualPx);
+            cell.residualPxValues.push_back(residualPx);
+        }
+        cell.invSigma2Sum += static_cast<double>(invSigma2);
+    }
+
+    if(pFrame)
+    {
+        if(idx < pFrame->mvLocalProjBestDist.size())
+        {
+            const float descriptorDist = pFrame->mvLocalProjBestDist[idx];
+            if(std::isfinite(descriptorDist))
+            {
+                cell.descriptorDistSum += static_cast<double>(descriptorDist);
+                cell.descriptorDistValues.push_back(descriptorDist);
+            }
+        }
+        if(idx < pFrame->mvLocalProjRatio.size())
+        {
+            const float ratio = pFrame->mvLocalProjRatio[idx];
+            if(std::isfinite(ratio) && ratio >= 0.0f)
+            {
+                cell.ratioSum += static_cast<double>(ratio);
+                cell.ratioValues.push_back(ratio);
+            }
+        }
+        if(idx < pFrame->mvLocalProjProjErrNorm.size())
+        {
+            const float projNorm = pFrame->mvLocalProjProjErrNorm[idx];
+            if(std::isfinite(projNorm))
+            {
+                cell.projNormSum += static_cast<double>(projNorm);
+                cell.projNormValues.push_back(projNorm);
+            }
+        }
+    }
+}
+
+void PrintPoseOptResidualCalibStats(const long unsigned int frameId,
+                                    const PoseOptResidualCalibStatsMap& stats)
+{
+    for(const auto& kv : stats)
+    {
+        const PoseOptResidualCalibKey& key = kv.first;
+        const PoseOptResidualCalibStats& cell = kv.second;
+        if(cell.edges == 0)
+            continue;
+
+        const MapPoint::CreationSource mpSource =
+            static_cast<MapPoint::CreationSource>(key.mpSourceIdx);
+        const float outlierRatio = static_cast<float>(cell.outlierEdges) /
+                                   static_cast<float>(std::max(1, cell.edges));
+        const float chi2Avg = cell.chi2Values.empty()
+                                  ? -1.0f
+                                  : static_cast<float>(cell.chi2Sum /
+                                                       static_cast<double>(cell.chi2Values.size()));
+        const float residualPxAvg = cell.residualPxValues.empty()
+                                        ? -1.0f
+                                        : static_cast<float>(cell.residualPxSum /
+                                                             static_cast<double>(cell.residualPxValues.size()));
+        const float invSigma2Avg = cell.residualPxValues.empty()
+                                       ? -1.0f
+                                       : static_cast<float>(cell.invSigma2Sum /
+                                                            static_cast<double>(cell.residualPxValues.size()));
+        const float descriptorDistAvg = cell.descriptorDistValues.empty()
+                                            ? -1.0f
+                                            : static_cast<float>(cell.descriptorDistSum /
+                                                                 static_cast<double>(cell.descriptorDistValues.size()));
+        const float ratioAvg = cell.ratioValues.empty()
+                                   ? -1.0f
+                                   : static_cast<float>(cell.ratioSum /
+                                                        static_cast<double>(cell.ratioValues.size()));
+        const float projNormAvg = cell.projNormValues.empty()
+                                      ? -1.0f
+                                      : static_cast<float>(cell.projNormSum /
+                                                           static_cast<double>(cell.projNormValues.size()));
+
+        std::cout << "[PoseOpt][ResidualCalib]"
+                  << " frame_id=" << frameId
+                  << " descriptor=" << PoseOptDescriptorName(key.descriptorIdx)
+                  << " match_source=" << PoseOptMatchSourceName(key.matchSource)
+                  << " mp_source=" << MapPointCreationSourceName(mpSource)
+                  << " depth_bin=" << LocalBADepthBinName(static_cast<size_t>(key.depthBin))
+                  << " octave_bin=" << PoseOptOctaveBinName(key.octaveBin)
+                  << " obs_type=" << PoseOptObsTypeName(static_cast<PoseOptObsType>(key.obsType))
+                  << " edges=" << cell.edges
+                  << " inlier_edges=" << cell.inlierEdges
+                  << " outlier_edges=" << cell.outlierEdges
+                  << " outlier_ratio=" << outlierRatio
+                  << " chi2_avg=" << chi2Avg
+                  << " chi2_p50=" << PoseOptPercentile(cell.chi2Values, 0.50)
+                  << " chi2_p90=" << PoseOptPercentile(cell.chi2Values, 0.90)
+                  << " chi2_p95=" << PoseOptPercentile(cell.chi2Values, 0.95)
+                  << " residual_px_avg=" << residualPxAvg
+                  << " residual_px_p90=" << PoseOptPercentile(cell.residualPxValues, 0.90)
+                  << " inv_sigma2_avg=" << invSigma2Avg
+                  << " descriptor_dist_avg=" << descriptorDistAvg
+                  << " descriptor_dist_p90=" << PoseOptPercentile(cell.descriptorDistValues, 0.90)
+                  << " ratio_avg=" << ratioAvg
+                  << " ratio_p90=" << PoseOptPercentile(cell.ratioValues, 0.90)
+                  << " proj_norm_avg=" << projNormAvg
+                  << " proj_norm_p90=" << PoseOptPercentile(cell.projNormValues, 0.90)
+                  << std::endl;
+    }
 }
 } // namespace
 
@@ -1228,8 +1644,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
     const float deltaMono = sqrt(5.991);
     const float deltaStereo = sqrt(7.815);
-    int nWeightedObs = 0;
-    int nWeightedLocalProjTriangFar = 0;
+    PoseOptimizationVisualWeightCounters weightCounters;
 
     {
     unique_lock<mutex> lock(MapPoint::mGlobalMutex);
@@ -1259,12 +1674,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
                         GetPoseOptimizationVisualWeight(pFrame, i, pMP);
                     const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * weightInfo.weight;
                     e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
-                    if(weightInfo.kind != PoseOptimizationVisualWeightKind::None)
-                    {
-                        nWeightedObs++;
-                        if(weightInfo.kind == PoseOptimizationVisualWeightKind::LocalProjTriangFar)
-                            nWeightedLocalProjTriangFar++;
-                    }
+                    AccumulatePoseOptimizationVisualWeightCounters(weightInfo, weightCounters);
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
@@ -1297,12 +1707,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
                     const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * weightInfo.weight;
                     Eigen::Matrix3d Info = Eigen::Matrix3d::Identity()*invSigma2;
                     e->setInformation(Info);
-                    if(weightInfo.kind != PoseOptimizationVisualWeightKind::None)
-                    {
-                        nWeightedObs++;
-                        if(weightInfo.kind == PoseOptimizationVisualWeightKind::LocalProjTriangFar)
-                            nWeightedLocalProjTriangFar++;
-                    }
+                    AccumulatePoseOptimizationVisualWeightCounters(weightInfo, weightCounters);
 
                     g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
@@ -1343,12 +1748,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
                         GetPoseOptimizationVisualWeight(pFrame, i, pMP);
                     const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * weightInfo.weight;
                     e->setInformation(Eigen::Matrix2d::Identity() * invSigma2);
-                    if(weightInfo.kind != PoseOptimizationVisualWeightKind::None)
-                    {
-                        nWeightedObs++;
-                        if(weightInfo.kind == PoseOptimizationVisualWeightKind::LocalProjTriangFar)
-                            nWeightedLocalProjTriangFar++;
-                    }
+                    AccumulatePoseOptimizationVisualWeightCounters(weightInfo, weightCounters);
 
                     g2o::RobustKernelHuber *rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
@@ -1378,12 +1778,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
                         GetPoseOptimizationVisualWeight(pFrame, i, pMP);
                     const float invSigma2 = GetVisualInvSigma2ForKeyPoint(pFrame,kpUn) * weightInfo.weight;
                     e->setInformation(Eigen::Matrix2d::Identity() * invSigma2);
-                    if(weightInfo.kind != PoseOptimizationVisualWeightKind::None)
-                    {
-                        nWeightedObs++;
-                        if(weightInfo.kind == PoseOptimizationVisualWeightKind::LocalProjTriangFar)
-                            nWeightedLocalProjTriangFar++;
-                    }
+                    AccumulatePoseOptimizationVisualWeightCounters(weightInfo, weightCounters);
 
                     g2o::RobustKernelHuber *rk = new g2o::RobustKernelHuber;
                     e->setRobustKernel(rk);
@@ -1414,6 +1809,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     const int its[4]={10,10,10,10};    
 
     int nBad=0;
+    PoseOptResidualPxGateStats residualPxGateStats;
     for(size_t it=0; it<4; it++)
     {
         Tcw = pFrame->GetPose();
@@ -1435,8 +1831,20 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             }
 
             const float chi2 = e->chi2();
+            MapPoint* pMP = idx < pFrame->mvpMapPoints.size() ? pFrame->mvpMapPoints[idx] : nullptr;
+            const float invSigma2 = static_cast<float>(e->information()(0, 0));
+            const bool bResidualPxGateCandidate =
+                IsPoseOptLocalProjCloseResidualGateCandidate(pFrame, idx, pMP);
+            const bool bResidualPxGateReject =
+                ShouldRejectPoseOptLocalProjCloseResidualPx(pFrame, idx, pMP, chi2, invSigma2);
+            const bool bChi2Reject = chi2 > chi2Mono[it];
+            if(it == 3)
+                AccumulatePoseOptResidualPxGateStats(residualPxGateStats, pMP,
+                                                     bResidualPxGateCandidate,
+                                                     bResidualPxGateReject,
+                                                     bResidualPxGateReject && !bChi2Reject);
 
-            if(chi2>chi2Mono[it])
+            if(bChi2Reject)
             {                
                 pFrame->mvbOutlier[idx]=true;
                 e->setLevel(1);
@@ -1464,8 +1872,20 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             }
 
             const float chi2 = e->chi2();
+            MapPoint* pMP = idx < pFrame->mvpMapPoints.size() ? pFrame->mvpMapPoints[idx] : nullptr;
+            const float invSigma2 = static_cast<float>(e->information()(0, 0));
+            const bool bResidualPxGateCandidate =
+                IsPoseOptLocalProjCloseResidualGateCandidate(pFrame, idx, pMP);
+            const bool bResidualPxGateReject =
+                ShouldRejectPoseOptLocalProjCloseResidualPx(pFrame, idx, pMP, chi2, invSigma2);
+            const bool bChi2Reject = chi2 > chi2Mono[it];
+            if(it == 3)
+                AccumulatePoseOptResidualPxGateStats(residualPxGateStats, pMP,
+                                                     bResidualPxGateCandidate,
+                                                     bResidualPxGateReject,
+                                                     bResidualPxGateReject && !bChi2Reject);
 
-            if(chi2>chi2Mono[it])
+            if(bChi2Reject)
             {
                 pFrame->mvbOutlier[idx]=true;
                 e->setLevel(1);
@@ -1493,8 +1913,20 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             }
 
             const float chi2 = e->chi2();
+            MapPoint* pMP = idx < pFrame->mvpMapPoints.size() ? pFrame->mvpMapPoints[idx] : nullptr;
+            const float invSigma2 = static_cast<float>(e->information()(0, 0));
+            const bool bResidualPxGateCandidate =
+                IsPoseOptLocalProjCloseResidualGateCandidate(pFrame, idx, pMP);
+            const bool bResidualPxGateReject =
+                ShouldRejectPoseOptLocalProjCloseResidualPx(pFrame, idx, pMP, chi2, invSigma2);
+            const bool bChi2Reject = chi2 > chi2Stereo[it];
+            if(it == 3)
+                AccumulatePoseOptResidualPxGateStats(residualPxGateStats, pMP,
+                                                     bResidualPxGateCandidate,
+                                                     bResidualPxGateReject,
+                                                     bResidualPxGateReject && !bChi2Reject);
 
-            if(chi2>chi2Stereo[it])
+            if(bChi2Reject)
             {
                 pFrame->mvbOutlier[idx]=true;
                 e->setLevel(1);
@@ -1521,6 +1953,50 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             SE3quat_recov.translation().cast<float>());
     pFrame->SetPose(pose);
 
+    if(ShouldPrintPoseOptResidualCalib(pFrame->mnId))
+    {
+        PoseOptResidualCalibStatsMap residualCalibStats;
+
+        for(size_t i = 0, iend = vpEdgesMono.size(); i < iend; ++i)
+        {
+            ORB_SLAM3::EdgeSE3ProjectXYZOnlyPose* e = vpEdgesMono[i];
+            const size_t idx = vnIndexEdgeMono[i];
+            e->computeError();
+            MapPoint* pMP = idx < pFrame->mvpMapPoints.size() ? pFrame->mvpMapPoints[idx] : nullptr;
+            AccumulatePoseOptResidualCalibStats(residualCalibStats, pFrame, idx, pMP,
+                                                e->chi2(), 5.991f, e->isDepthPositive(),
+                                                pFrame->mpCamera2 ? PoseOptObsType::BodyMono
+                                                                  : PoseOptObsType::Mono,
+                                                static_cast<float>(e->information()(0, 0)));
+        }
+
+        for(size_t i = 0, iend = vpEdgesMono_FHR.size(); i < iend; ++i)
+        {
+            ORB_SLAM3::EdgeSE3ProjectXYZOnlyPoseToBody* e = vpEdgesMono_FHR[i];
+            const size_t idx = vnIndexEdgeRight[i];
+            e->computeError();
+            MapPoint* pMP = idx < pFrame->mvpMapPoints.size() ? pFrame->mvpMapPoints[idx] : nullptr;
+            AccumulatePoseOptResidualCalibStats(residualCalibStats, pFrame, idx, pMP,
+                                                e->chi2(), 5.991f, e->isDepthPositive(),
+                                                PoseOptObsType::BodyMono,
+                                                static_cast<float>(e->information()(0, 0)));
+        }
+
+        for(size_t i = 0, iend = vpEdgesStereo.size(); i < iend; ++i)
+        {
+            g2o::EdgeStereoSE3ProjectXYZOnlyPose* e = vpEdgesStereo[i];
+            const size_t idx = vnIndexEdgeStereo[i];
+            e->computeError();
+            MapPoint* pMP = idx < pFrame->mvpMapPoints.size() ? pFrame->mvpMapPoints[idx] : nullptr;
+            AccumulatePoseOptResidualCalibStats(residualCalibStats, pFrame, idx, pMP,
+                                                e->chi2(), 7.815f, e->isDepthPositive(),
+                                                PoseOptObsType::Stereo,
+                                                static_cast<float>(e->information()(0, 0)));
+        }
+
+        PrintPoseOptResidualCalibStats(pFrame->mnId, residualCalibStats);
+    }
+
     if(ShouldPrintXFeatDebug(pFrame->mnId))
     {
         const float configuredMinDepth = GetLocalMapTriangPoseMinDepth();
@@ -1529,8 +2005,14 @@ int Optimizer::PoseOptimization(Frame *pFrame)
                   << " frame_id=" << pFrame->mnId
                   << " weight=" << GetLocalMapTriangPoseWeight()
                   << " min_depth=" << minDepth
-                  << " weighted_obs=" << nWeightedObs
-                  << " weighted_local_proj_triang_far=" << nWeightedLocalProjTriangFar
+                  << " weighted_obs=" << weightCounters.weightedObs
+                  << " weighted_local_proj_triang_far=" << weightCounters.weightedLocalProjTriangFar
+                  << " residual_px_gate_shadow_threshold=" << kPoseOptLocalProjCloseResidualPxMax
+                  << " residual_px_gate_shadow_candidate=" << residualPxGateStats.candidate
+                  << " residual_px_gate_shadow_high=" << residualPxGateStats.highResidual
+                  << " residual_px_gate_shadow_reject=" << residualPxGateStats.reject
+                  << " residual_px_gate_shadow_reject_lmt=" << residualPxGateStats.rejectLocalMappingTriangulation
+                  << " residual_px_gate_shadow_reject_tracking_stereo=" << residualPxGateStats.rejectTrackingStereo
                   << std::endl;
     }
 

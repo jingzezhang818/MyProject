@@ -13,15 +13,38 @@
 
 ### 1.2 EuRoC
 
-已生成的真值文件位于 `examples/GroundTruth/EuRoC/`：
+已生成的真值文件位于 `examples/GroundTruth/EuRoC/`。当前本机目录没有发现 `V1_02_medium` / `V1_03_difficult` 的可用数据和真值，因此这里只列出可直接支持的 9 个序列。
 
-| 序列 | 数据集路径 | 单目时间戳 | 双目时间戳 | 真值 |
-|---|---|---|---|---|
-| `MH_01_easy` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_01_easy` | `examples/Monocular/EuRoC_TimeStamps/MH01.txt` | `examples/Stereo/EuRoC_TimeStamps/MH01.txt` | `examples/GroundTruth/EuRoC/MH_01_easy.tum` |
-| `MH_04_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_04_difficult` | `examples/Monocular/EuRoC_TimeStamps/MH04.txt` | `examples/Stereo/EuRoC_TimeStamps/MH04.txt` | `examples/GroundTruth/EuRoC/MH_04_difficult.tum` |
-| `V2_03_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_03_difficult` | `examples/Monocular/EuRoC_TimeStamps/V203.txt` | `examples/Stereo/EuRoC_TimeStamps/V203.txt` | `examples/GroundTruth/EuRoC/V2_03_difficult.tum` |
+| 场景 | 序列编号 | 序列目录 | 数据集路径 | 单目时间戳 | 双目时间戳 | 真值 |
+|---|---|---|---|---|---|---|
+| Machine Hall | `MH01` | `MH_01_easy` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_01_easy` | `examples/Monocular/EuRoC_TimeStamps/MH01.txt` | `examples/Stereo/EuRoC_TimeStamps/MH01.txt` | `examples/GroundTruth/EuRoC/MH_01_easy.tum` |
+| Machine Hall | `MH02` | `MH_02_easy` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_02_easy` | `examples/Monocular/EuRoC_TimeStamps/MH02.txt` | `examples/Stereo/EuRoC_TimeStamps/MH02.txt` | `examples/GroundTruth/EuRoC/MH_02_easy.tum` |
+| Machine Hall | `MH03` | `MH_03_medium` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_03_medium` | `examples/Monocular/EuRoC_TimeStamps/MH03.txt` | `examples/Stereo/EuRoC_TimeStamps/MH03.txt` | `examples/GroundTruth/EuRoC/MH_03_medium.tum` |
+| Machine Hall | `MH04` | `MH_04_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_04_difficult` | `examples/Monocular/EuRoC_TimeStamps/MH04.txt` | `examples/Stereo/EuRoC_TimeStamps/MH04.txt` | `examples/GroundTruth/EuRoC/MH_04_difficult.tum` |
+| Machine Hall | `MH05` | `MH_05_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_05_difficult` | `examples/Monocular/EuRoC_TimeStamps/MH05.txt` | `examples/Stereo/EuRoC_TimeStamps/MH05.txt` | `examples/GroundTruth/EuRoC/MH_05_difficult.tum` |
+| Vicon Room 1 | `V101` | `V1_01_easy` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_01_easy` | `examples/Monocular/EuRoC_TimeStamps/V101.txt` | `examples/Stereo/EuRoC_TimeStamps/V101.txt` | `examples/GroundTruth/EuRoC/V1_01_easy.tum` |
+| Vicon Room 2 | `V201` | `V2_01_easy` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_01_easy` | `examples/Monocular/EuRoC_TimeStamps/V201.txt` | `examples/Stereo/EuRoC_TimeStamps/V201.txt` | `examples/GroundTruth/EuRoC/V2_01_easy.tum` |
+| Vicon Room 2 | `V202` | `V2_02_medium` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_02_medium` | `examples/Monocular/EuRoC_TimeStamps/V202.txt` | `examples/Stereo/EuRoC_TimeStamps/V202.txt` | `examples/GroundTruth/EuRoC/V2_02_medium.tum` |
+| Vicon Room 2 | `V203` | `V2_03_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_03_difficult` | `examples/Monocular/EuRoC_TimeStamps/V203.txt` | `examples/Stereo/EuRoC_TimeStamps/V203.txt` | `examples/GroundTruth/EuRoC/V2_03_difficult.tum` |
 
-#### MH_01_easy 单目
+#### 数据准备
+
+`MH_02_easy`、`MH_03_medium`、`MH_05_difficult` 当前可能只有 zip/bag。第一次跑这些序列前，先执行：
+
+```bash
+for seq in MH_02_easy MH_03_medium MH_05_difficult; do
+  root="/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/${seq}"
+  if [ ! -d "${root}/mav0" ] && [ -f "${root}/${seq}.zip" ]; then
+    unzip -n "${root}/${seq}.zip" -d "${root}"
+  fi
+done
+```
+
+#### Machine Hall
+
+##### MH01 / MH_01_easy
+
+###### 单目
 
 运行命令：
 
@@ -39,24 +62,24 @@ XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
   2>&1 | tee experiment_logs/Monocular/EuRoC/MH_01_easy/run_EuRoC_MH_01_easy_mono.log
 ```
 
-格式转化命令：
+格式转换命令：
 
 ```bash
 python convert_euroc_to_tum.py \
   --gt examples/GroundTruth/EuRoC/MH_01_easy.tum \
   --est-traj f_EuRoC_MH_01_easy_mono.txt \
   --out-est experiment_logs/Monocular/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_mono.tum \
-  --timestamp-unit ns
+  --timestamp-unit auto
 ```
 
-轨迹评估命令：
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
 
 ```bash
 evo_ape tum examples/GroundTruth/EuRoC/MH_01_easy.tum experiment_logs/Monocular/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_mono.tum -r trans_part -as -p
 evo_traj tum experiment_logs/Monocular/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_mono.tum --ref=examples/GroundTruth/EuRoC/MH_01_easy.tum -as -p
 ```
 
-#### MH_01_easy 双目
+###### 双目
 
 运行命令：
 
@@ -75,24 +98,172 @@ XFEAT_USE_LIGHTGLUE_MOTION=1 \
   2>&1 | tee experiment_logs/Stereo/EuRoC/MH_01_easy/run_EuRoC_MH_01_easy_stereo.log
 ```
 
-格式转化命令：
+格式转换命令：
 
 ```bash
 python convert_euroc_to_tum.py \
   --gt examples/GroundTruth/EuRoC/MH_01_easy.tum \
   --est-traj f_EuRoC_MH_01_easy_stereo.txt \
   --out-est experiment_logs/Stereo/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_stereo.tum \
-  --timestamp-unit ns
+  --timestamp-unit auto
 ```
 
-轨迹评估命令：
+评估命令（双目使用 `-a` 做 SE3 对齐）：
 
 ```bash
 evo_ape tum examples/GroundTruth/EuRoC/MH_01_easy.tum experiment_logs/Stereo/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_stereo.tum -r trans_part -a -p
 evo_traj tum experiment_logs/Stereo/EuRoC/MH_01_easy/CameraTrajectory_EuRoC_MH_01_easy_stereo.tum --ref=examples/GroundTruth/EuRoC/MH_01_easy.tum -a -p
 ```
 
-#### MH_04_difficult 单目
+##### MH02 / MH_02_easy
+
+###### 单目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Monocular/EuRoC/MH_02_easy
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_02_easy" \
+  examples/Monocular/EuRoC_TimeStamps/MH02.txt \
+  EuRoC_MH_02_easy_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/MH_02_easy/run_EuRoC_MH_02_easy_mono.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/MH_02_easy.tum \
+  --est-traj f_EuRoC_MH_02_easy_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/MH_02_easy/CameraTrajectory_EuRoC_MH_02_easy_mono.tum \
+  --timestamp-unit auto
+```
+
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/MH_02_easy.tum experiment_logs/Monocular/EuRoC/MH_02_easy/CameraTrajectory_EuRoC_MH_02_easy_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/MH_02_easy/CameraTrajectory_EuRoC_MH_02_easy_mono.tum --ref=examples/GroundTruth/EuRoC/MH_02_easy.tum -as -p
+```
+
+###### 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/MH_02_easy
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_02_easy/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/MH02.txt \
+  EuRoC_MH_02_easy_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/MH_02_easy/run_EuRoC_MH_02_easy_stereo.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/MH_02_easy.tum \
+  --est-traj f_EuRoC_MH_02_easy_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/MH_02_easy/CameraTrajectory_EuRoC_MH_02_easy_stereo.tum \
+  --timestamp-unit auto
+```
+
+评估命令（双目使用 `-a` 做 SE3 对齐）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/MH_02_easy.tum experiment_logs/Stereo/EuRoC/MH_02_easy/CameraTrajectory_EuRoC_MH_02_easy_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/MH_02_easy/CameraTrajectory_EuRoC_MH_02_easy_stereo.tum --ref=examples/GroundTruth/EuRoC/MH_02_easy.tum -a -p
+```
+
+##### MH03 / MH_03_medium
+
+###### 单目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Monocular/EuRoC/MH_03_medium
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_03_medium" \
+  examples/Monocular/EuRoC_TimeStamps/MH03.txt \
+  EuRoC_MH_03_medium_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/MH_03_medium/run_EuRoC_MH_03_medium_mono.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/MH_03_medium.tum \
+  --est-traj f_EuRoC_MH_03_medium_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/MH_03_medium/CameraTrajectory_EuRoC_MH_03_medium_mono.tum \
+  --timestamp-unit auto
+```
+
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/MH_03_medium.tum experiment_logs/Monocular/EuRoC/MH_03_medium/CameraTrajectory_EuRoC_MH_03_medium_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/MH_03_medium/CameraTrajectory_EuRoC_MH_03_medium_mono.tum --ref=examples/GroundTruth/EuRoC/MH_03_medium.tum -as -p
+```
+
+###### 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/MH_03_medium
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_03_medium/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/MH03.txt \
+  EuRoC_MH_03_medium_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/MH_03_medium/run_EuRoC_MH_03_medium_stereo.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/MH_03_medium.tum \
+  --est-traj f_EuRoC_MH_03_medium_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/MH_03_medium/CameraTrajectory_EuRoC_MH_03_medium_stereo.tum \
+  --timestamp-unit auto
+```
+
+评估命令（双目使用 `-a` 做 SE3 对齐）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/MH_03_medium.tum experiment_logs/Stereo/EuRoC/MH_03_medium/CameraTrajectory_EuRoC_MH_03_medium_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/MH_03_medium/CameraTrajectory_EuRoC_MH_03_medium_stereo.tum --ref=examples/GroundTruth/EuRoC/MH_03_medium.tum -a -p
+```
+
+##### MH04 / MH_04_difficult
+
+###### 单目
 
 运行命令：
 
@@ -110,24 +281,24 @@ XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
   2>&1 | tee experiment_logs/Monocular/EuRoC/MH_04_difficult/run_EuRoC_MH_04_difficult_mono.log
 ```
 
-格式转化命令：
+格式转换命令：
 
 ```bash
 python convert_euroc_to_tum.py \
   --gt examples/GroundTruth/EuRoC/MH_04_difficult.tum \
   --est-traj f_EuRoC_MH_04_difficult_mono.txt \
   --out-est experiment_logs/Monocular/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_mono.tum \
-  --timestamp-unit ns
+  --timestamp-unit auto
 ```
 
-轨迹评估命令：
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
 
 ```bash
 evo_ape tum examples/GroundTruth/EuRoC/MH_04_difficult.tum experiment_logs/Monocular/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_mono.tum -r trans_part -as -p
 evo_traj tum experiment_logs/Monocular/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_mono.tum --ref=examples/GroundTruth/EuRoC/MH_04_difficult.tum -as -p
 ```
 
-#### MH_04_difficult 双目
+###### 双目
 
 运行命令：
 
@@ -146,24 +317,323 @@ XFEAT_USE_LIGHTGLUE_MOTION=1 \
   2>&1 | tee experiment_logs/Stereo/EuRoC/MH_04_difficult/run_EuRoC_MH_04_difficult_stereo.log
 ```
 
-格式转化命令：
+格式转换命令：
 
 ```bash
 python convert_euroc_to_tum.py \
   --gt examples/GroundTruth/EuRoC/MH_04_difficult.tum \
   --est-traj f_EuRoC_MH_04_difficult_stereo.txt \
   --out-est experiment_logs/Stereo/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_stereo.tum \
-  --timestamp-unit ns
+  --timestamp-unit auto
 ```
 
-轨迹评估命令：
+评估命令（双目使用 `-a` 做 SE3 对齐）：
 
 ```bash
 evo_ape tum examples/GroundTruth/EuRoC/MH_04_difficult.tum experiment_logs/Stereo/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_stereo.tum -r trans_part -a -p
 evo_traj tum experiment_logs/Stereo/EuRoC/MH_04_difficult/CameraTrajectory_EuRoC_MH_04_difficult_stereo.tum --ref=examples/GroundTruth/EuRoC/MH_04_difficult.tum -a -p
 ```
 
-#### V2_03_difficult 单目
+##### MH05 / MH_05_difficult
+
+###### 单目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Monocular/EuRoC/MH_05_difficult
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_05_difficult" \
+  examples/Monocular/EuRoC_TimeStamps/MH05.txt \
+  EuRoC_MH_05_difficult_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/MH_05_difficult/run_EuRoC_MH_05_difficult_mono.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/MH_05_difficult.tum \
+  --est-traj f_EuRoC_MH_05_difficult_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/MH_05_difficult/CameraTrajectory_EuRoC_MH_05_difficult_mono.tum \
+  --timestamp-unit auto
+```
+
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/MH_05_difficult.tum experiment_logs/Monocular/EuRoC/MH_05_difficult/CameraTrajectory_EuRoC_MH_05_difficult_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/MH_05_difficult/CameraTrajectory_EuRoC_MH_05_difficult_mono.tum --ref=examples/GroundTruth/EuRoC/MH_05_difficult.tum -as -p
+```
+
+###### 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/MH_05_difficult
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_05_difficult/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/MH05.txt \
+  EuRoC_MH_05_difficult_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/MH_05_difficult/run_EuRoC_MH_05_difficult_stereo.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/MH_05_difficult.tum \
+  --est-traj f_EuRoC_MH_05_difficult_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/MH_05_difficult/CameraTrajectory_EuRoC_MH_05_difficult_stereo.tum \
+  --timestamp-unit auto
+```
+
+评估命令（双目使用 `-a` 做 SE3 对齐）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/MH_05_difficult.tum experiment_logs/Stereo/EuRoC/MH_05_difficult/CameraTrajectory_EuRoC_MH_05_difficult_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/MH_05_difficult/CameraTrajectory_EuRoC_MH_05_difficult_stereo.tum --ref=examples/GroundTruth/EuRoC/MH_05_difficult.tum -a -p
+```
+
+#### Vicon Room 1
+
+##### V101 / V1_01_easy
+
+###### 单目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Monocular/EuRoC/V1_01_easy
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_01_easy" \
+  examples/Monocular/EuRoC_TimeStamps/V101.txt \
+  EuRoC_V1_01_easy_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/V1_01_easy/run_EuRoC_V1_01_easy_mono.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V1_01_easy.tum \
+  --est-traj f_EuRoC_V1_01_easy_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/V1_01_easy/CameraTrajectory_EuRoC_V1_01_easy_mono.tum \
+  --timestamp-unit auto
+```
+
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V1_01_easy.tum experiment_logs/Monocular/EuRoC/V1_01_easy/CameraTrajectory_EuRoC_V1_01_easy_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/V1_01_easy/CameraTrajectory_EuRoC_V1_01_easy_mono.tum --ref=examples/GroundTruth/EuRoC/V1_01_easy.tum -as -p
+```
+
+###### 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/V1_01_easy
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_01_easy/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/V101.txt \
+  EuRoC_V1_01_easy_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/V1_01_easy/run_EuRoC_V1_01_easy_stereo.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V1_01_easy.tum \
+  --est-traj f_EuRoC_V1_01_easy_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/V1_01_easy/CameraTrajectory_EuRoC_V1_01_easy_stereo.tum \
+  --timestamp-unit auto
+```
+
+评估命令（双目使用 `-a` 做 SE3 对齐）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V1_01_easy.tum experiment_logs/Stereo/EuRoC/V1_01_easy/CameraTrajectory_EuRoC_V1_01_easy_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/V1_01_easy/CameraTrajectory_EuRoC_V1_01_easy_stereo.tum --ref=examples/GroundTruth/EuRoC/V1_01_easy.tum -a -p
+```
+
+#### Vicon Room 2
+
+##### V201 / V2_01_easy
+
+###### 单目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Monocular/EuRoC/V2_01_easy
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_01_easy" \
+  examples/Monocular/EuRoC_TimeStamps/V201.txt \
+  EuRoC_V2_01_easy_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/V2_01_easy/run_EuRoC_V2_01_easy_mono.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V2_01_easy.tum \
+  --est-traj f_EuRoC_V2_01_easy_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/V2_01_easy/CameraTrajectory_EuRoC_V2_01_easy_mono.tum \
+  --timestamp-unit auto
+```
+
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V2_01_easy.tum experiment_logs/Monocular/EuRoC/V2_01_easy/CameraTrajectory_EuRoC_V2_01_easy_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/V2_01_easy/CameraTrajectory_EuRoC_V2_01_easy_mono.tum --ref=examples/GroundTruth/EuRoC/V2_01_easy.tum -as -p
+```
+
+###### 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/V2_01_easy
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_01_easy/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/V201.txt \
+  EuRoC_V2_01_easy_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/V2_01_easy/run_EuRoC_V2_01_easy_stereo.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V2_01_easy.tum \
+  --est-traj f_EuRoC_V2_01_easy_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/V2_01_easy/CameraTrajectory_EuRoC_V2_01_easy_stereo.tum \
+  --timestamp-unit auto
+```
+
+评估命令（双目使用 `-a` 做 SE3 对齐）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V2_01_easy.tum experiment_logs/Stereo/EuRoC/V2_01_easy/CameraTrajectory_EuRoC_V2_01_easy_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/V2_01_easy/CameraTrajectory_EuRoC_V2_01_easy_stereo.tum --ref=examples/GroundTruth/EuRoC/V2_01_easy.tum -a -p
+```
+
+##### V202 / V2_02_medium
+
+###### 单目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Monocular/EuRoC/V2_02_medium
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_02_medium" \
+  examples/Monocular/EuRoC_TimeStamps/V202.txt \
+  EuRoC_V2_02_medium_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/V2_02_medium/run_EuRoC_V2_02_medium_mono.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V2_02_medium.tum \
+  --est-traj f_EuRoC_V2_02_medium_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/V2_02_medium/CameraTrajectory_EuRoC_V2_02_medium_mono.tum \
+  --timestamp-unit auto
+```
+
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V2_02_medium.tum experiment_logs/Monocular/EuRoC/V2_02_medium/CameraTrajectory_EuRoC_V2_02_medium_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/V2_02_medium/CameraTrajectory_EuRoC_V2_02_medium_mono.tum --ref=examples/GroundTruth/EuRoC/V2_02_medium.tum -as -p
+```
+
+###### 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/V2_02_medium
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_02_medium/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/V202.txt \
+  EuRoC_V2_02_medium_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/V2_02_medium/run_EuRoC_V2_02_medium_stereo.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V2_02_medium.tum \
+  --est-traj f_EuRoC_V2_02_medium_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/V2_02_medium/CameraTrajectory_EuRoC_V2_02_medium_stereo.tum \
+  --timestamp-unit auto
+```
+
+评估命令（双目使用 `-a` 做 SE3 对齐）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V2_02_medium.tum experiment_logs/Stereo/EuRoC/V2_02_medium/CameraTrajectory_EuRoC_V2_02_medium_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/V2_02_medium/CameraTrajectory_EuRoC_V2_02_medium_stereo.tum --ref=examples/GroundTruth/EuRoC/V2_02_medium.tum -a -p
+```
+
+##### V203 / V2_03_difficult
+
+###### 单目
 
 运行命令：
 
@@ -181,24 +651,24 @@ XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
   2>&1 | tee experiment_logs/Monocular/EuRoC/V2_03_difficult/run_EuRoC_V2_03_difficult_mono.log
 ```
 
-格式转化命令：
+格式转换命令：
 
 ```bash
 python convert_euroc_to_tum.py \
   --gt examples/GroundTruth/EuRoC/V2_03_difficult.tum \
   --est-traj f_EuRoC_V2_03_difficult_mono.txt \
   --out-est experiment_logs/Monocular/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_mono.tum \
-  --timestamp-unit ns
+  --timestamp-unit auto
 ```
 
-轨迹评估命令：
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
 
 ```bash
 evo_ape tum examples/GroundTruth/EuRoC/V2_03_difficult.tum experiment_logs/Monocular/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_mono.tum -r trans_part -as -p
 evo_traj tum experiment_logs/Monocular/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_mono.tum --ref=examples/GroundTruth/EuRoC/V2_03_difficult.tum -as -p
 ```
 
-#### V2_03_difficult 双目
+###### 双目
 
 运行命令：
 
@@ -217,33 +687,39 @@ XFEAT_USE_LIGHTGLUE_MOTION=1 \
   2>&1 | tee experiment_logs/Stereo/EuRoC/V2_03_difficult/run_EuRoC_V2_03_difficult_stereo.log
 ```
 
-格式转化命令：
+格式转换命令：
 
 ```bash
 python convert_euroc_to_tum.py \
   --gt examples/GroundTruth/EuRoC/V2_03_difficult.tum \
   --est-traj f_EuRoC_V2_03_difficult_stereo.txt \
   --out-est experiment_logs/Stereo/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_stereo.tum \
-  --timestamp-unit ns
+  --timestamp-unit auto
 ```
 
-轨迹评估命令：
+评估命令（双目使用 `-a` 做 SE3 对齐）：
 
 ```bash
 evo_ape tum examples/GroundTruth/EuRoC/V2_03_difficult.tum experiment_logs/Stereo/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_stereo.tum -r trans_part -a -p
 evo_traj tum experiment_logs/Stereo/EuRoC/V2_03_difficult/CameraTrajectory_EuRoC_V2_03_difficult_stereo.tum --ref=examples/GroundTruth/EuRoC/V2_03_difficult.tum -a -p
 ```
 
-### 1.3 SePT01
+### 1.3 SePT
 
 已生成的真值文件位于 `examples/GroundTruth/SePT01/SePT01.tum`。
 
-#### 单目
+| 场景 | 序列 | 数据集路径 | 单目时间戳 | 双目时间戳 | 真值 |
+|---|---|---|---|---|---|
+| 01 | `SePT01` | `/mnt/d/data_set/SePT01` | `examples/Monocular/SePT01_cam0.txt` | `examples/Stereo/SePT01_TimeStamps/times.txt` | `examples/GroundTruth/SePT01/SePT01.tum` |
+
+#### 01 / SePT01
+
+##### 单目
 
 运行命令：
 
 ```bash
-mkdir -p experiment_logs/Monocular/SePT01/SePT01
+mkdir -p experiment_logs/Monocular/SePT/SePT01
 XFEAT_DEVICE=auto \
 XFEAT_CUDA_DEVICE=0 \
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
@@ -255,36 +731,32 @@ XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
   /mnt/d/data_set/SePT01 \
   examples/Monocular/SePT01_cam0.txt \
   SePT01_mono \
-  2>&1 | tee experiment_logs/Monocular/SePT01/SePT01/run_SePT01_mono.log
+  2>&1 | tee experiment_logs/Monocular/SePT/SePT01/run_SePT01_mono.log
 ```
 
-格式转化命令：
+格式转换命令：
 
 ```bash
 python convert_euroc_to_tum.py \
   --gt examples/GroundTruth/SePT01/SePT01.tum \
   --est-traj f_SePT01_mono.txt \
-  --out-est experiment_logs/Monocular/SePT01/SePT01/CameraTrajectory_SePT01_mono.tum \
-  --timestamp-unit ns
+  --out-est experiment_logs/Monocular/SePT/SePT01/CameraTrajectory_SePT01_mono.tum \
+  --timestamp-unit auto
 ```
 
-轨迹评估命令：
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
 
 ```bash
-evo_ape tum examples/GroundTruth/SePT01/SePT01.tum experiment_logs/Monocular/SePT01/SePT01/CameraTrajectory_SePT01_mono.tum -r trans_part -as -p
-evo_traj tum experiment_logs/Monocular/SePT01/SePT01/CameraTrajectory_SePT01_mono.tum --ref=examples/GroundTruth/SePT01/SePT01.tum -as -p
+evo_ape tum examples/GroundTruth/SePT01/SePT01.tum experiment_logs/Monocular/SePT/SePT01/CameraTrajectory_SePT01_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/SePT/SePT01/CameraTrajectory_SePT01_mono.tum --ref=examples/GroundTruth/SePT01/SePT01.tum -as -p
 ```
 
-#### 双目
+##### 双目
 
-日志阅读层级：
-
-- 默认摘要：`XFEAT_DEBUG=1` 时重点看 `[SearchLocalPoints]`、`[TrackLocalMap][Diag]`、`[TrackLocalMap][SourceError]`、`[TrackLocalMap][SourceMPJointError]`、`[TrackLocalMap][InlierMix]`、`[LocalMapping][LongWeakMP]`、`[PoseOptimization][Weight]`
-- 扩展细节：需要抽样看深度/质量分桶时，再临时加 `XFEAT_DIAG_FEATURE_DISTRIBUTION=1`，重点看 `[SearchLocalPoints][MPQuality]`、`[TrackLocalMap][MPQuality]`、`[TrackLocalMap][StereoDepth]`、`[TrackLocalMap][SourceDepthError]`、`[TrackLocalMap][MPSourceDepthError]`、`[LocalMapping][LongWeakMPQuality]`、`[LocalMapping][LongWeakMPSource]`
-
-`baseline`：
+运行命令：
 
 ```bash
+mkdir -p experiment_logs/Stereo/SePT/SePT01
 XFEAT_DEBUG_MATCHER_VERBOSE=1 \
 XFEAT_DEBUG=1 \
 XFEAT_DIAG_INTERVAL=30 \
@@ -299,20 +771,35 @@ XFEAT_USE_LIGHTGLUE_MOTION=1 \
   2>&1 | tee experiment_logs/Stereo/SePT/SePT01/run_SePT01_stereo.log
 ```
 
-格式转化命令：
+格式转换命令：
 
 ```bash
 python convert_euroc_to_tum.py \
   --gt examples/GroundTruth/SePT01/SePT01.tum \
   --est-traj f_SePT01_stereo.txt \
   --out-est experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum \
-  --timestamp-unit ns \
+  --timestamp-unit auto \
   --estimate-right-rot
 ```
+
+评估命令（双目使用 `-a` 做 SE3 对齐）：
+
+```bash
+evo_ape tum examples/GroundTruth/SePT01/SePT01.tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum --ref=examples/GroundTruth/SePT01/SePT01.tum -a -p
+```
+
+##### 双目可选调试配置
+
+日志阅读层级：
+
+- 默认摘要：`XFEAT_DEBUG=1` 时重点看 `[SearchLocalPoints]`、`[TrackLocalMap][Diag]`、`[TrackLocalMap][SourceError]`、`[TrackLocalMap][SourceMPJointError]`、`[TrackLocalMap][InlierMix]`、`[LocalMapping][LongWeakMP]`、`[PoseOptimization][Weight]`
+- 扩展细节：需要抽样看深度/质量分桶时，再临时加 `XFEAT_DIAG_FEATURE_DISTRIBUTION=1`，重点看 `[SearchLocalPoints][MPQuality]`、`[TrackLocalMap][MPQuality]`、`[TrackLocalMap][StereoDepth]`、`[TrackLocalMap][SourceDepthError]`、`[TrackLocalMap][MPSourceDepthError]`、`[LocalMapping][LongWeakMPQuality]`、`[LocalMapping][LongWeakMPSource]`
 
 `map_hygiene`：
 
 ```bash
+mkdir -p experiment_logs/Stereo/SePT/SePT01
 XFEAT_DEBUG_MATCHER_VERBOSE=1 \
 XFEAT_DEBUG=1 \
 XFEAT_DIAG_INTERVAL=30 \
@@ -340,6 +827,7 @@ XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL=5 \
 `local_proj_precision`（close tracking-stereo geometry screening + close/mid stereo cost volume / coarse-to-fine refinement / LR-aware sigma modeling，命令不变，无新增环境变量）：
 
 ```bash
+mkdir -p experiment_logs/Stereo/SePT/SePT01
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DEBUG_MATCHER_VERBOSE=1 \
 XFEAT_DEBUG=1 \
@@ -364,25 +852,6 @@ XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL=5 \
   SePT01_stereo \
   2>&1 | tee experiment_logs/Stereo/SePT/SePT01/run_SePT01_stereo_local_proj_precision.log
 ```
-
-格式转化命令：
-
-```bash
-python convert_euroc_to_tum.py \
-  --gt examples/GroundTruth/SePT01/SePT01.tum \
-  --est-traj f_SePT01_stereo.txt \
-  --out-est experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum \
-  --timestamp-unit ns \
-  --estimate-right-rot
-```
-
-轨迹评估命令：
-
-```bash
-evo_ape tum examples/GroundTruth/SePT01/SePT01.tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum -r trans_part -a -p
-evo_traj tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.tum --ref=examples/GroundTruth/SePT01/SePT01.tum -a -p
-```
-
 
 ## 2. 环境变量参考
 

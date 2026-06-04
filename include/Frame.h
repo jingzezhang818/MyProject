@@ -258,6 +258,10 @@ public:
         kStereoBirthCloseLowConf = 3
     };
     std::vector<unsigned char> mvStereoBirthQuality;
+    // XFeat backend profile. By default this is diagnostic metadata; when
+    // XFEAT_ORB_SHAPED_INPUT=1 is set, Frame compacts to this ORB-shaped subset.
+    std::vector<unsigned char> mvXFeatMappingEligible;
+    std::vector<float> mvXFeatMappingProfileScore;
 
     // Bag of Words Vector structures.
     DBoW2::BowVector mBowVec;
@@ -364,6 +368,10 @@ private:
 
     // Assign keypoints to the grid for speed up feature matching (called in the constructor).
     void AssignFeaturesToGrid();
+
+    // Build an ORB-shaped XFeat subset for backend-input diagnostics/compaction.
+    void BuildXFeatMappingProfile(const int imageCols, const int imageRows);
+    void ApplyXFeatOrbShapedInputProfile();
 
     bool mbIsSet;
 
