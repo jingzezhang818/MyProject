@@ -258,11 +258,6 @@ public:
         kStereoBirthCloseLowConf = 3
     };
     std::vector<unsigned char> mvStereoBirthQuality;
-    // XFeat backend profile. By default this is diagnostic metadata; when
-    // XFEAT_ORB_SHAPED_INPUT=1 is set, Frame compacts to this ORB-shaped subset.
-    std::vector<unsigned char> mvXFeatMappingEligible;
-    std::vector<float> mvXFeatMappingProfileScore;
-
     // Bag of Words Vector structures.
     DBoW2::BowVector mBowVec;
     DBoW2::FeatureVector mFeatVec;
@@ -278,9 +273,7 @@ public:
     std::vector<bool> mvbOutlier;
     // XFeat diagnostics only: source tag for each current-frame MapPoint association.
     std::vector<unsigned char> mvXFeatMatchSource;
-    // XFeat diagnostics only: local-projection pool tag for each current-frame association.
-    std::vector<unsigned char> mvXFeatLocalProjPool;
-    // XFeat local projection shadow diagnostics. Runtime-only, one entry per current-frame feature.
+    // XFeat local projection runtime diagnostics. One entry per current-frame feature.
     std::vector<float> mvLocalProjBestDist;
     std::vector<float> mvLocalProjSecondDist;
     std::vector<float> mvLocalProjRatio;
@@ -368,10 +361,6 @@ private:
 
     // Assign keypoints to the grid for speed up feature matching (called in the constructor).
     void AssignFeaturesToGrid();
-
-    // Build an ORB-shaped XFeat subset for backend-input diagnostics/compaction.
-    void BuildXFeatMappingProfile(const int imageCols, const int imageRows);
-    void ApplyXFeatOrbShapedInputProfile();
 
     bool mbIsSet;
 

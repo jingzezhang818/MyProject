@@ -243,7 +243,7 @@ def diagnostic_metric_deltas(rows: Sequence[Dict[str, object]],
     }
     diag_rows = [
         row for row in rows
-        if any(key.startswith(("diag_", "search_", "joint_", "depth_", "geom_", "grid_", "posectx_", "priorerr_", "priorshift_", "localba_", "triangcreate_", "kfcreate_", "recentmp_", "xfeat_", "xfeatstruct_", "xfeatdepth_", "matcher_", "matcherfine_", "priority_", "provenance_", "triangquality_", "triangmv_", "trianghist_", "triangrefit_", "kfstruct_"))
+        if any(key.startswith(("diag_", "search_", "joint_", "depth_", "geom_", "grid_", "posectx_", "priorerr_", "priorshift_", "localba_", "triangcreate_", "kfcreate_", "recentmp_", "xfeat_", "xfeatstruct_", "xfeatdepth_", "matcher_", "matcherfine_", "priority_", "provenance_", "triangquality_", "triangmv_", "trianghist_", "kfstruct_"))
                for key in row)
     ]
     if len(diag_rows) < 4:
@@ -350,10 +350,6 @@ def main() -> int:
         "geom_",
         "grid_",
         "kfstruct_",
-        "stablevote_",
-        "kfcontribshadow_",
-        "kfcontribselect_",
-        "kfcontribretain_",
         "closebridge_",
         "refbridge_",
         "refassoc_",
@@ -365,9 +361,6 @@ def main() -> int:
         "provenance_",
         "search_triang_0_10_priority_",
         "search_localmap_lmt_0_10_",
-        "search_core_pool_",
-        "search_expansion_pool_",
-        "search_probation_pool_",
         "reusefunnel_",
         "reusefrustum_",
         "reusecontrib_",

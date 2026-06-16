@@ -13,7 +13,7 @@
 
 ### 1.2 EuRoC
 
-已生成的真值文件位于 `examples/GroundTruth/EuRoC/`。当前本机目录没有发现 `V1_02_medium` / `V1_03_difficult` 的可用数据和真值，因此这里只列出可直接支持的 9 个序列。
+已生成的真值文件位于 `examples/GroundTruth/EuRoC/`。当前本机 EuRoC 目录下 11 个标准序列均已列出。
 
 | 场景 | 序列编号 | 序列目录 | 数据集路径 | 单目时间戳 | 双目时间戳 | 真值 |
 |---|---|---|---|---|---|---|
@@ -23,13 +23,15 @@
 | Machine Hall | `MH04` | `MH_04_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_04_difficult` | `examples/Monocular/EuRoC_TimeStamps/MH04.txt` | `examples/Stereo/EuRoC_TimeStamps/MH04.txt` | `examples/GroundTruth/EuRoC/MH_04_difficult.tum` |
 | Machine Hall | `MH05` | `MH_05_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_05_difficult` | `examples/Monocular/EuRoC_TimeStamps/MH05.txt` | `examples/Stereo/EuRoC_TimeStamps/MH05.txt` | `examples/GroundTruth/EuRoC/MH_05_difficult.tum` |
 | Vicon Room 1 | `V101` | `V1_01_easy` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_01_easy` | `examples/Monocular/EuRoC_TimeStamps/V101.txt` | `examples/Stereo/EuRoC_TimeStamps/V101.txt` | `examples/GroundTruth/EuRoC/V1_01_easy.tum` |
+| Vicon Room 1 | `V102` | `V1_02_medium` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_02_medium` | `examples/Monocular/EuRoC_TimeStamps/V102.txt` | `examples/Stereo/EuRoC_TimeStamps/V102.txt` | `examples/GroundTruth/EuRoC/V1_02_medium.tum` |
+| Vicon Room 1 | `V103` | `V1_03_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_03_difficult` | `examples/Monocular/EuRoC_TimeStamps/V103.txt` | `examples/Stereo/EuRoC_TimeStamps/V103.txt` | `examples/GroundTruth/EuRoC/V1_03_difficult.tum` |
 | Vicon Room 2 | `V201` | `V2_01_easy` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_01_easy` | `examples/Monocular/EuRoC_TimeStamps/V201.txt` | `examples/Stereo/EuRoC_TimeStamps/V201.txt` | `examples/GroundTruth/EuRoC/V2_01_easy.tum` |
 | Vicon Room 2 | `V202` | `V2_02_medium` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_02_medium` | `examples/Monocular/EuRoC_TimeStamps/V202.txt` | `examples/Stereo/EuRoC_TimeStamps/V202.txt` | `examples/GroundTruth/EuRoC/V2_02_medium.tum` |
 | Vicon Room 2 | `V203` | `V2_03_difficult` | `/mnt/d/data_set/EuRoc Wav Dataset/vicon_room2/V2_03_difficult` | `examples/Monocular/EuRoC_TimeStamps/V203.txt` | `examples/Stereo/EuRoC_TimeStamps/V203.txt` | `examples/GroundTruth/EuRoC/V2_03_difficult.tum` |
 
 #### 数据准备
 
-`MH_02_easy`、`MH_03_medium`、`MH_05_difficult` 当前可能只有 zip/bag。第一次跑这些序列前，先执行：
+`MH_02_easy`、`MH_03_medium`、`MH_05_difficult` 如果只有 zip/bag 而没有 `mav0` 目录，第一次跑这些序列前先执行：
 
 ```bash
 for seq in MH_02_easy MH_03_medium MH_05_difficult; do
@@ -162,6 +164,9 @@ XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 XFEAT_USE_LIGHTGLUE_MOTION=1 \
+XFEAT_USE_LIGHTGLUE_TRIANG=1 \
+XFEAT_USE_LIGHTGLUE_REF=1 \
+XFEAT_USE_LIGHTGLUE_RELOC=1 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/EuRoC.yaml \
@@ -235,6 +240,9 @@ XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 XFEAT_USE_LIGHTGLUE_MOTION=1 \
+XFEAT_USE_LIGHTGLUE_TRIANG=1 \
+XFEAT_USE_LIGHTGLUE_REF=1 \
+XFEAT_USE_LIGHTGLUE_RELOC=1 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/EuRoC.yaml \
@@ -308,6 +316,9 @@ XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 XFEAT_USE_LIGHTGLUE_MOTION=1 \
+XFEAT_USE_LIGHTGLUE_TRIANG=1 \
+XFEAT_USE_LIGHTGLUE_REF=1 \
+XFEAT_USE_LIGHTGLUE_RELOC=1 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/EuRoC.yaml \
@@ -382,7 +393,7 @@ XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 XFEAT_USE_LIGHTGLUE_MOTION=1 \
 ./examples/Stereo/stereo_euroc \
-  Vocabulary/ORBvoc.txt \
+  Vocabulary/ORBvoc.txt \  
   examples/Stereo/EuRoC.yaml \
   "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_05_difficult/mav0" \
   examples/Stereo/EuRoC_TimeStamps/MH05.txt \
@@ -420,7 +431,6 @@ mkdir -p experiment_logs/Monocular/EuRoC/V1_01_easy
 XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
-XFEAT_USE_LIGHTGLUE_MOTION=1 \
 ./examples/Monocular/mono_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Monocular/EuRoC.yaml \
@@ -481,6 +491,152 @@ python convert_euroc_to_tum.py \
 ```bash
 evo_ape tum examples/GroundTruth/EuRoC/V1_01_easy.tum experiment_logs/Stereo/EuRoC/V1_01_easy/CameraTrajectory_EuRoC_V1_01_easy_stereo.tum -r trans_part -a -p
 evo_traj tum experiment_logs/Stereo/EuRoC/V1_01_easy/CameraTrajectory_EuRoC_V1_01_easy_stereo.tum --ref=examples/GroundTruth/EuRoC/V1_01_easy.tum -a -p
+```
+
+##### V102 / V1_02_medium
+
+###### 单目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Monocular/EuRoC/V1_02_medium
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_02_medium" \
+  examples/Monocular/EuRoC_TimeStamps/V102.txt \
+  EuRoC_V1_02_medium_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/V1_02_medium/run_EuRoC_V1_02_medium_mono.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V1_02_medium.tum \
+  --est-traj f_EuRoC_V1_02_medium_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/V1_02_medium/CameraTrajectory_EuRoC_V1_02_medium_mono.tum \
+  --timestamp-unit auto
+```
+
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V1_02_medium.tum experiment_logs/Monocular/EuRoC/V1_02_medium/CameraTrajectory_EuRoC_V1_02_medium_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/V1_02_medium/CameraTrajectory_EuRoC_V1_02_medium_mono.tum --ref=examples/GroundTruth/EuRoC/V1_02_medium.tum -as -p
+```
+
+###### 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/V1_02_medium
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_02_medium/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/V102.txt \
+  EuRoC_V1_02_medium_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/V1_02_medium/run_EuRoC_V1_02_medium_stereo.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V1_02_medium.tum \
+  --est-traj f_EuRoC_V1_02_medium_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/V1_02_medium/CameraTrajectory_EuRoC_V1_02_medium_stereo.tum \
+  --timestamp-unit auto
+```
+
+评估命令（双目使用 `-a` 做 SE3 对齐）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V1_02_medium.tum experiment_logs/Stereo/EuRoC/V1_02_medium/CameraTrajectory_EuRoC_V1_02_medium_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/V1_02_medium/CameraTrajectory_EuRoC_V1_02_medium_stereo.tum --ref=examples/GroundTruth/EuRoC/V1_02_medium.tum -a -p
+```
+
+##### V103 / V1_03_difficult
+
+###### 单目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Monocular/EuRoC/V1_03_difficult
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+./examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Monocular/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_03_difficult" \
+  examples/Monocular/EuRoC_TimeStamps/V103.txt \
+  EuRoC_V1_03_difficult_mono \
+  2>&1 | tee experiment_logs/Monocular/EuRoC/V1_03_difficult/run_EuRoC_V1_03_difficult_mono.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V1_03_difficult.tum \
+  --est-traj f_EuRoC_V1_03_difficult_mono.txt \
+  --out-est experiment_logs/Monocular/EuRoC/V1_03_difficult/CameraTrajectory_EuRoC_V1_03_difficult_mono.tum \
+  --timestamp-unit auto
+```
+
+评估命令（单目使用 `-as` 做 Sim3/尺度矫正）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V1_03_difficult.tum experiment_logs/Monocular/EuRoC/V1_03_difficult/CameraTrajectory_EuRoC_V1_03_difficult_mono.tum -r trans_part -as -p
+evo_traj tum experiment_logs/Monocular/EuRoC/V1_03_difficult/CameraTrajectory_EuRoC_V1_03_difficult_mono.tum --ref=examples/GroundTruth/EuRoC/V1_03_difficult.tum -as -p
+```
+
+###### 双目
+
+运行命令：
+
+```bash
+mkdir -p experiment_logs/Stereo/EuRoC/V1_03_difficult
+XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
+XFEAT_DIAG_INTERVAL=30 \
+XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
+XFEAT_USE_LIGHTGLUE_MOTION=1 \
+./examples/Stereo/stereo_euroc \
+  Vocabulary/ORBvoc.txt \
+  examples/Stereo/EuRoC.yaml \
+  "/mnt/d/data_set/EuRoc Wav Dataset/vicon_room1/V1_03_difficult/mav0" \
+  examples/Stereo/EuRoC_TimeStamps/V103.txt \
+  EuRoC_V1_03_difficult_stereo \
+  2>&1 | tee experiment_logs/Stereo/EuRoC/V1_03_difficult/run_EuRoC_V1_03_difficult_stereo.log
+```
+
+格式转换命令：
+
+```bash
+python convert_euroc_to_tum.py \
+  --gt examples/GroundTruth/EuRoC/V1_03_difficult.tum \
+  --est-traj f_EuRoC_V1_03_difficult_stereo.txt \
+  --out-est experiment_logs/Stereo/EuRoC/V1_03_difficult/CameraTrajectory_EuRoC_V1_03_difficult_stereo.tum \
+  --timestamp-unit auto
+```
+
+评估命令（双目使用 `-a` 做 SE3 对齐）：
+
+```bash
+evo_ape tum examples/GroundTruth/EuRoC/V1_03_difficult.tum experiment_logs/Stereo/EuRoC/V1_03_difficult/CameraTrajectory_EuRoC_V1_03_difficult_stereo.tum -r trans_part -a -p
+evo_traj tum experiment_logs/Stereo/EuRoC/V1_03_difficult/CameraTrajectory_EuRoC_V1_03_difficult_stereo.tum --ref=examples/GroundTruth/EuRoC/V1_03_difficult.tum -a -p
 ```
 
 #### Vicon Room 2

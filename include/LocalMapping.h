@@ -172,52 +172,6 @@ protected:
 
     std::list<MapPoint*> mlpRecentAddedMapPoints;
 
-    struct PendingMappingObservation
-    {
-        KeyFrame* pKF = nullptr;
-        size_t idx = 0;
-    };
-
-    struct PendingMappingTracklet
-    {
-        long unsigned int id = 0;
-        std::vector<PendingMappingObservation> observations;
-        KeyFrame* pBestKF1 = nullptr;
-        KeyFrame* pBestKF2 = nullptr;
-        size_t bestIdx1 = 0;
-        size_t bestIdx2 = 0;
-        Eigen::Vector3f x3D = Eigen::Vector3f::Zero();
-        float triangDepth = -1.0f;
-        float cosParallaxRays = 1.0f;
-        float reprojChi2Max = std::numeric_limits<float>::quiet_NaN();
-        float reprojChi2Mean = std::numeric_limits<float>::quiet_NaN();
-        float scaleLogResidual = std::numeric_limits<float>::quiet_NaN();
-        float scaleLogMargin = std::numeric_limits<float>::quiet_NaN();
-        MapPoint::TriangulationMatchBackend triangBackend = MapPoint::kTriangBackendUnknown;
-        int mappingFeatureGridX = -1;
-        int mappingFeatureGridY = -1;
-        int mappingFeatureGridBin = 0;
-        int mappingFeatureOctaveBin = 0;
-        int mappingFeatureResponseBin = 0;
-        int mappingFeatureStereoQualityBin = 0;
-        int mappingFeatureCombinedBin = 0;
-        int octave = -1;
-        float response = 0.0f;
-        bool bCloseRay0To5 = false;
-        bool bCloseRay5To10 = false;
-        float qualityScore = -std::numeric_limits<float>::infinity();
-        long unsigned int firstKFid = 0;
-        long unsigned int lastKFid = 0;
-        long unsigned int lastUpdateKFid = std::numeric_limits<long unsigned int>::max();
-        int updatePasses = 0;
-        int conflictCount = 0;
-        bool bad = false;
-    };
-
-    std::vector<PendingMappingTracklet> mvPendingMappingTracklets;
-    std::map<std::pair<long unsigned int, size_t>, size_t> mPendingMappingObservationIndex;
-    long unsigned int mnNextPendingMappingTrackletId = 1;
-
     std::mutex mMutexNewKFs;
 
     bool mbAbortBA;

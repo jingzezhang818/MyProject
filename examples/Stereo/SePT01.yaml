@@ -37,7 +37,7 @@ Camera2.k3: 0.0
 Camera.width: 1024
 Camera.height: 1024
 
-Camera.fps: 10
+Camera.fps: 20
 Camera.RGB: 1
 
 # T_c1_c2: transform from camera 2 (cam1/right) to camera 1 (cam0/left).
@@ -57,9 +57,9 @@ Stereo.ThDepth: 60.0
 # ORB/XFeat extractor parameters
 #--------------------------------------------------------------------------------------------
 
-ORBextractor.nFeatures: 1000
+ORBextractor.nFeatures: 1200
 ORBextractor.scaleFactor: 1.2
-ORBextractor.nLevels: 8
+ORBextractor.nLevels: 1
 ORBextractor.iniThFAST: 20
 ORBextractor.minThFAST: 7
 
@@ -79,4 +79,4 @@ Viewer.ViewpointZ: -1.8
 Viewer.ViewpointF: 500.0
 Viewer.imageViewScale: 1.0
 
-System.RandomSeed: 0
+#System.RandomSeed: 0

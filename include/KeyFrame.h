@@ -383,10 +383,6 @@ public:
     const std::vector<float> mvuRight; // negative value for monocular points
     const std::vector<float> mvDepth; // negative value for monocular points
     const cv::Mat mDescriptors;
-    // Runtime-only XFeat mapping profile copied from Frame. Not serialized.
-    const std::vector<unsigned char> mvXFeatMappingEligible;
-    const std::vector<float> mvXFeatMappingProfileScore;
-
     //BoW
     DBoW2::BowVector mBowVec;
     DBoW2::FeatureVector mFeatVec;

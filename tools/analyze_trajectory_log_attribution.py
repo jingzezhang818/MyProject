@@ -374,15 +374,6 @@ def parse_log(path: Path) -> Dict[int, Dict[str, str]]:
                 add_prefixed(out, "xfeat", data, {"frame"})
             elif "[TrackLocalMap][KFStructure]" in line:
                 add_prefixed(out, "kfstruct", data, {"frame_id"})
-            elif "[TrackLocalMap][StableVoteShadow]" in line:
-                add_prefixed(out, "stablevote", data, {"frame_id"})
-            elif "[TrackLocalMap][LocalKFContributionSelection]" in line:
-                add_prefixed(out, "kfcontribselect", data, {"frame_id"})
-            elif "[TrackLocalMap][LocalKFContributionShadowRetention]" in line:
-                group = safe_prefix(data.get("group", "unknown"))
-                add_prefixed(out, f"kfcontribretain_{group}", data, {"frame_id", "group"})
-            elif "[TrackLocalMap][LocalKFContributionShadow]" in line:
-                add_prefixed(out, "kfcontribshadow", data, {"frame_id"})
             elif "[Tracking][CloseFeatureReuseBridge]" in line:
                 source = safe_prefix(data.get("source", "unknown"))
                 depth_bin = safe_prefix(data.get("depth_bin", "unknown"))
@@ -425,10 +416,6 @@ def parse_log(path: Path) -> Dict[int, Dict[str, str]]:
                 dim = safe_prefix(data.get("dimension", "unknown"))
                 bin_name = safe_prefix(data.get("bin", "unknown"))
                 add_prefixed(out, f"trianghist_{dim}_{bin_name}", data, {"frame_id", "dimension", "bin"})
-            elif "[TrackLocalMap][TriangRefitShadowError]" in line:
-                dim = safe_prefix(data.get("dimension", "unknown"))
-                bin_name = safe_prefix(data.get("bin", "unknown"))
-                add_prefixed(out, f"triangrefit_{dim}_{bin_name}", data, {"frame_id", "dimension", "bin"})
             elif "[TrackLocalMap][LocalMapProvenanceError]" in line:
                 dim = safe_prefix(data.get("dimension", "unknown"))
                 bin_name = safe_prefix(data.get("bin", "unknown"))
@@ -437,9 +424,6 @@ def parse_log(path: Path) -> Dict[int, Dict[str, str]]:
                 dim = safe_prefix(data.get("dimension", "unknown"))
                 bin_name = safe_prefix(data.get("bin", "unknown"))
                 add_prefixed(out, f"priority_{dim}_{bin_name}", data, {"frame_id", "dimension", "bin"})
-            elif "[TrackLocalMap][LocalProjPoolError]" in line:
-                pool = safe_prefix(data.get("match_pool", "unknown"))
-                add_prefixed(out, f"pool_{pool}", data, {"frame_id", "match_pool"})
             elif "[TrackLocalMap][MappingFeatureOutcome]" in line:
                 source = safe_prefix(data.get("source", "unknown"))
                 dim = safe_prefix(data.get("dimension", "unknown"))

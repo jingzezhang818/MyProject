@@ -394,8 +394,6 @@ enum class PoseOptimizationVisualWeightKind
 };
 
 constexpr unsigned char kPoseOptXFeatMatchLocalProjection = 5;
-constexpr float kPoseOptLocalProjCloseDepthMax = 10.0f;
-constexpr float kPoseOptLocalProjCloseResidualPxMax = 4.0f;
 
 struct PoseOptimizationVisualWeightInfo
 {
@@ -459,93 +457,6 @@ void AccumulatePoseOptimizationVisualWeightCounters(const PoseOptimizationVisual
     counters.weightedObs++;
     if(info.localProjTriangFar)
         counters.weightedLocalProjTriangFar++;
-}
-
-float PoseOptResidualPxFromChi2(const float chi2, const float invSigma2)
-{
-    if(!std::isfinite(chi2) || chi2 < 0.0f || !std::isfinite(invSigma2) || invSigma2 <= 1e-9f)
-        return std::numeric_limits<float>::quiet_NaN();
-    return std::sqrt(chi2 / invSigma2);
-}
-
-bool IsPoseOptLocalProjCloseResidualGateCandidate(const Frame* pFrame,
-                                                  const size_t idx,
-                                                  MapPoint* pMP,
-                                                  float* resolvedDepth = nullptr)
-{
-    if(resolvedDepth)
-        *resolvedDepth = std::numeric_limits<float>::quiet_NaN();
-
-    if(!pFrame || !pMP || !IsXFeatDescriptorMat(pFrame->mDescriptors))
-        return false;
-
-    if(idx >= pFrame->mvXFeatMatchSource.size() ||
-       pFrame->mvXFeatMatchSource[idx] != kPoseOptXFeatMatchLocalProjection)
-        return false;
-
-    const MapPoint::CreationSource source = pMP->GetCreationSource();
-    if(source != MapPoint::kCreationSourceLocalMappingTriangulation &&
-       source != MapPoint::kCreationSourceTrackingStereo)
-        return false;
-
-    const float depth = ResolveFrameMapPointDepth(pFrame, pMP);
-    if(resolvedDepth)
-        *resolvedDepth = depth;
-    return std::isfinite(depth) && depth > 0.0f && depth <= kPoseOptLocalProjCloseDepthMax;
-}
-
-bool ShouldRejectPoseOptLocalProjCloseResidualPx(const Frame* pFrame,
-                                                 const size_t idx,
-                                                 MapPoint* pMP,
-                                                 const float chi2,
-                                                 const float invSigma2,
-                                                 float* residualPx = nullptr)
-{
-    if(residualPx)
-        *residualPx = std::numeric_limits<float>::quiet_NaN();
-
-    if(!IsPoseOptLocalProjCloseResidualGateCandidate(pFrame, idx, pMP))
-        return false;
-
-    const float px = PoseOptResidualPxFromChi2(chi2, invSigma2);
-    if(residualPx)
-        *residualPx = px;
-    return std::isfinite(px) && px > kPoseOptLocalProjCloseResidualPxMax;
-}
-
-struct PoseOptResidualPxGateStats
-{
-    int candidate = 0;
-    int highResidual = 0;
-    int reject = 0;
-    int rejectLocalMappingTriangulation = 0;
-    int rejectTrackingStereo = 0;
-};
-
-void AccumulatePoseOptResidualPxGateStats(PoseOptResidualPxGateStats& stats,
-                                          MapPoint* pMP,
-                                          const bool bCandidate,
-                                          const bool bHighResidual,
-                                          const bool bAdditionalReject)
-{
-    if(!bCandidate)
-        return;
-
-    stats.candidate++;
-    if(bHighResidual)
-        stats.highResidual++;
-    if(!bAdditionalReject)
-        return;
-
-    stats.reject++;
-    if(!pMP)
-        return;
-
-    const MapPoint::CreationSource source = pMP->GetCreationSource();
-    if(source == MapPoint::kCreationSourceLocalMappingTriangulation)
-        stats.rejectLocalMappingTriangulation++;
-    else if(source == MapPoint::kCreationSourceTrackingStereo)
-        stats.rejectTrackingStereo++;
 }
 
 enum class PoseOptObsType
@@ -1809,7 +1720,6 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     const int its[4]={10,10,10,10};    
 
     int nBad=0;
-    PoseOptResidualPxGateStats residualPxGateStats;
     for(size_t it=0; it<4; it++)
     {
         Tcw = pFrame->GetPose();
@@ -1831,18 +1741,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             }
 
             const float chi2 = e->chi2();
-            MapPoint* pMP = idx < pFrame->mvpMapPoints.size() ? pFrame->mvpMapPoints[idx] : nullptr;
-            const float invSigma2 = static_cast<float>(e->information()(0, 0));
-            const bool bResidualPxGateCandidate =
-                IsPoseOptLocalProjCloseResidualGateCandidate(pFrame, idx, pMP);
-            const bool bResidualPxGateReject =
-                ShouldRejectPoseOptLocalProjCloseResidualPx(pFrame, idx, pMP, chi2, invSigma2);
             const bool bChi2Reject = chi2 > chi2Mono[it];
-            if(it == 3)
-                AccumulatePoseOptResidualPxGateStats(residualPxGateStats, pMP,
-                                                     bResidualPxGateCandidate,
-                                                     bResidualPxGateReject,
-                                                     bResidualPxGateReject && !bChi2Reject);
 
             if(bChi2Reject)
             {                
@@ -1872,18 +1771,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             }
 
             const float chi2 = e->chi2();
-            MapPoint* pMP = idx < pFrame->mvpMapPoints.size() ? pFrame->mvpMapPoints[idx] : nullptr;
-            const float invSigma2 = static_cast<float>(e->information()(0, 0));
-            const bool bResidualPxGateCandidate =
-                IsPoseOptLocalProjCloseResidualGateCandidate(pFrame, idx, pMP);
-            const bool bResidualPxGateReject =
-                ShouldRejectPoseOptLocalProjCloseResidualPx(pFrame, idx, pMP, chi2, invSigma2);
             const bool bChi2Reject = chi2 > chi2Mono[it];
-            if(it == 3)
-                AccumulatePoseOptResidualPxGateStats(residualPxGateStats, pMP,
-                                                     bResidualPxGateCandidate,
-                                                     bResidualPxGateReject,
-                                                     bResidualPxGateReject && !bChi2Reject);
 
             if(bChi2Reject)
             {
@@ -1913,18 +1801,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             }
 
             const float chi2 = e->chi2();
-            MapPoint* pMP = idx < pFrame->mvpMapPoints.size() ? pFrame->mvpMapPoints[idx] : nullptr;
-            const float invSigma2 = static_cast<float>(e->information()(0, 0));
-            const bool bResidualPxGateCandidate =
-                IsPoseOptLocalProjCloseResidualGateCandidate(pFrame, idx, pMP);
-            const bool bResidualPxGateReject =
-                ShouldRejectPoseOptLocalProjCloseResidualPx(pFrame, idx, pMP, chi2, invSigma2);
             const bool bChi2Reject = chi2 > chi2Stereo[it];
-            if(it == 3)
-                AccumulatePoseOptResidualPxGateStats(residualPxGateStats, pMP,
-                                                     bResidualPxGateCandidate,
-                                                     bResidualPxGateReject,
-                                                     bResidualPxGateReject && !bChi2Reject);
 
             if(bChi2Reject)
             {
@@ -2007,12 +1884,6 @@ int Optimizer::PoseOptimization(Frame *pFrame)
                   << " min_depth=" << minDepth
                   << " weighted_obs=" << weightCounters.weightedObs
                   << " weighted_local_proj_triang_far=" << weightCounters.weightedLocalProjTriangFar
-                  << " residual_px_gate_shadow_threshold=" << kPoseOptLocalProjCloseResidualPxMax
-                  << " residual_px_gate_shadow_candidate=" << residualPxGateStats.candidate
-                  << " residual_px_gate_shadow_high=" << residualPxGateStats.highResidual
-                  << " residual_px_gate_shadow_reject=" << residualPxGateStats.reject
-                  << " residual_px_gate_shadow_reject_lmt=" << residualPxGateStats.rejectLocalMappingTriangulation
-                  << " residual_px_gate_shadow_reject_tracking_stereo=" << residualPxGateStats.rejectTrackingStereo
                   << std::endl;
     }
 

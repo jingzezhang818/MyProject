@@ -23,10 +23,6 @@ public:
         int close_tracking_stereo_reject_depth = 0;
         int close_tracking_stereo_accepted = 0;
         int local_proj_triang_0_10_proj_outside_reject = 0;
-        int local_proj_triang_0_10_proj_edge_shadow = 0;
-        int local_proj_triang_0_10_proj_edge_50_65_shadow = 0;
-        int local_proj_triang_0_10_proj_edge_65_80_shadow = 0;
-        int local_proj_triang_0_10_proj_edge_80_100_shadow = 0;
         int local_proj_triang_0_10_companion_outside_reject = 0;
         int ref_target_input = 0;
         int ref_target_skip_not_in_view = 0;
@@ -52,15 +48,6 @@ public:
         int ref_target_assign_reject = 0;
         int ref_target_outside_reject = 0;
         int ref_target_assigned = 0;
-        int ref_target_fallback_shadow_target = 0;
-        int ref_target_fallback_shadow_found_area = 0;
-        int ref_target_fallback_shadow_area_candidates = 0;
-        int ref_target_fallback_shadow_valid_candidate = 0;
-        int ref_target_fallback_shadow_raw_candidate = 0;
-        int ref_target_fallback_shadow_ratio_pass = 0;
-        int ref_target_fallback_shadow_strict_pass = 0;
-        double ref_target_fallback_shadow_best_dist_sum = 0.0;
-        double ref_target_fallback_shadow_proj_norm_sum = 0.0;
     };
 
     XFeatMatcher(float nnratio = 0.8f, bool checkOri = false);

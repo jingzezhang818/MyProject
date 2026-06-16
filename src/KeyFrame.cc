@@ -29,8 +29,6 @@ namespace ORB_SLAM3
 {
 namespace
 {
-constexpr bool kEnableMappingProbationCovisVoteBehavior = false;
-
 int GetEnvIntKeyFrame(const char* name, const int defaultValue)
 {
     const char* value = std::getenv(name);
@@ -106,97 +104,6 @@ int CountConnectedKeyFramesAboveThreshold(const std::map<KeyFrame*, int>& counte
     return connected;
 }
 
-int CountMaskBitsKeyFrame(unsigned int mask)
-{
-    int count = 0;
-    while(mask != 0U)
-    {
-        count += static_cast<int>(mask & 1U);
-        mask >>= 1U;
-    }
-    return count;
-}
-
-bool IsCloseMidLmtAtCreationKeyFrame(MapPoint* pMP)
-{
-    if(!pMP ||
-       pMP->GetCreationSource() != MapPoint::kCreationSourceLocalMappingTriangulation ||
-       !pMP->HasTriangulationQuality())
-    {
-        return false;
-    }
-    const float depth = pMP->mTriangDepthAtCreation;
-    return std::isfinite(depth) && depth > 0.0f && depth <= 10.0f;
-}
-
-bool IsLongLowRelevantLmtKeyFrame(MapPoint* pMP,
-                                  MapPoint::LocalMapVisibilityHistoryStats& stats)
-{
-    if(!IsCloseMidLmtAtCreationKeyFrame(pMP))
-        return false;
-    stats = pMP->GetLocalMapVisibilityHistory();
-    if(stats.evaluationCount < 5)
-        return false;
-    const int irrelevant = stats.negativeDepthCount + stats.outsideImageCount;
-    const float irrelevantRate = static_cast<float>(irrelevant) /
-                                 static_cast<float>(stats.evaluationCount);
-    const int recentCount = std::min(stats.evaluationCount, 8);
-    const float recentIrrelevantRate = recentCount > 0
-        ? static_cast<float>(CountMaskBitsKeyFrame(stats.recentIrrelevantMask)) /
-          static_cast<float>(recentCount)
-        : 0.0f;
-    return irrelevantRate >= 0.70f ||
-           (recentCount >= 4 && recentIrrelevantRate >= 0.75f);
-}
-
-struct CovisRepeatabilityVoteDecision
-{
-    bool target = false;
-    bool weak = false;
-    bool lowObs = false;
-    bool lowFound = false;
-    bool young = false;
-    bool lowRelevance = false;
-};
-
-CovisRepeatabilityVoteDecision ClassifyCovisRepeatabilityVote(KeyFrame* pKF,
-                                                              MapPoint* pMP)
-{
-    CovisRepeatabilityVoteDecision decision;
-    if(!pKF || !IsCloseMidLmtAtCreationKeyFrame(pMP))
-        return decision;
-
-    decision.target = true;
-
-    const int obs = pMP->Observations();
-    const float foundRatio = pMP->GetFoundRatio();
-    const long int firstKfId = pMP->mnFirstKFid;
-    const int ageKf = firstKfId >= 0 && pKF->mnId >= static_cast<unsigned long>(firstKfId)
-        ? static_cast<int>(pKF->mnId - static_cast<unsigned long>(firstKfId))
-        : 0;
-
-    MapPoint::LocalMapVisibilityHistoryStats visibilityHistory{};
-    decision.lowObs = obs <= 3;
-    decision.lowFound = !std::isfinite(foundRatio) || foundRatio < 0.35f;
-    decision.young = ageKf <= 2;
-    decision.lowRelevance = IsLongLowRelevantLmtKeyFrame(pMP, visibilityHistory);
-
-    const bool confirmed =
-        obs >= 5 &&
-        std::isfinite(foundRatio) &&
-        foundRatio >= 0.50f &&
-        ageKf >= 3 &&
-        !decision.lowRelevance;
-
-    decision.weak = !confirmed &&
-                    (decision.lowObs ||
-                     decision.lowFound ||
-                     decision.young ||
-                     decision.lowRelevance);
-
-    return decision;
-}
-
 }
 
 long unsigned int KeyFrame::nNextId=0;
@@ -209,7 +116,7 @@ KeyFrame::KeyFrame():
         fx(0), fy(0), cx(0), cy(0), invfx(0), invfy(0), mnPlaceRecognitionQuery(0), mnPlaceRecognitionWords(0), mPlaceRecognitionScore(0),
         mbf(0), mb(0), mThDepth(0), N(0), mvKeys(static_cast<vector<cv::KeyPoint> >(NULL)), mvKeysUn(static_cast<vector<cv::KeyPoint> >(NULL)),
         mvuRight(static_cast<vector<float> >(NULL)), mvDepth(static_cast<vector<float> >(NULL)),
-        mvXFeatMappingEligible(), mvXFeatMappingProfileScore(), mnScaleLevels(0), mfScaleFactor(0),
+        mnScaleLevels(0), mfScaleFactor(0),
         mfLogScaleFactor(0), mvScaleFactors(0), mvLevelSigma2(0), mvInvLevelSigma2(0), mnMinX(0), mnMinY(0), mnMaxX(0),
         mnMaxY(0), mPrevKF(static_cast<KeyFrame*>(NULL)), mNextKF(static_cast<KeyFrame*>(NULL)), mbFirstConnection(true), mpParent(NULL), mbNotErase(false),
         mbToBeErased(false), mbBad(false), mHalfBaseline(0), mbCurrentPlaceRecognition(false), mnMergeCorrectedForKF(0),
@@ -226,7 +133,6 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     fx(F.fx), fy(F.fy), cx(F.cx), cy(F.cy), invfx(F.invfx), invfy(F.invfy),
     mbf(F.mbf), mb(F.mb), mThDepth(F.mThDepth), N(F.N), mvKeys(F.mvKeys), mvKeysUn(F.mvKeysUn),
     mvuRight(F.mvuRight), mvDepth(F.mvDepth), mDescriptors(F.mDescriptors.clone()),
-    mvXFeatMappingEligible(F.mvXFeatMappingEligible), mvXFeatMappingProfileScore(F.mvXFeatMappingProfileScore),
     mBowVec(F.mBowVec), mFeatVec(F.mFeatVec), mnScaleLevels(F.mnScaleLevels), mfScaleFactor(F.mfScaleFactor),
     mfLogScaleFactor(F.mfLogScaleFactor), mvScaleFactors(F.mvScaleFactors), mvLevelSigma2(F.mvLevelSigma2),
     mvInvLevelSigma2(F.mvInvLevelSigma2), mnMinX(F.mnMinX), mnMinY(F.mnMinY), mnMaxX(F.mnMaxX),
@@ -556,12 +462,7 @@ MapPoint* KeyFrame::GetMapPoint(const size_t &idx)
 void KeyFrame::UpdateConnections(bool upParent)
 {
     map<KeyFrame*,int> KFcounter;
-    map<KeyFrame*,int> shadowKFcounter;
-    map<KeyFrame*,int> longRelevanceShadowKFcounter;
-    map<KeyFrame*,int> covisRepeatabilityWeakKFcounter;
-    map<KeyFrame*,int> mappingProbationKFcounter;
     const bool collectCovisVoteDiag = ShouldPrintCovisVoteDiag(mnFrameId);
-    const bool bUseORB = std::getenv("USE_ORB") != nullptr;
 
     constexpr int kSourceCount = 5;
     std::array<int, kSourceCount> voteSourceCounts{};
@@ -575,29 +476,6 @@ void KeyFrame::UpdateConnections(bool upParent)
     int voteLmt0To10 = 0;
     int voteLmt0To10Weak = 0;
     int voteLmt0To10Confirmed = 0;
-    int shadowSkippedVotes = 0;
-    int mpLmtCreation0To10LongEvaluated = 0;
-    int mpLmtCreation0To10LongLowRelevant = 0;
-    int voteLmtCreation0To10LongLowRelevant = 0;
-    int longRelevanceShadowSkippedVotes = 0;
-    int covisRepeatabilityTargetPoints = 0;
-    int covisRepeatabilityWeakPoints = 0;
-    int covisRepeatabilityWeakLowObsPoints = 0;
-    int covisRepeatabilityWeakLowFoundPoints = 0;
-    int covisRepeatabilityWeakYoungPoints = 0;
-    int covisRepeatabilityWeakLowRelevancePoints = 0;
-    int covisRepeatabilityWeakVoteRaw = 0;
-    int covisRepeatabilityWeakVoteEffective = 0;
-    int covisRepeatabilityWeakVoteSuppressed = 0;
-    int covisRepeatabilityWeakVoteKFs = 0;
-    int mappingProbationTargetPoints = 0;
-    int mappingProbationActivePoints = 0;
-    int mappingProbationPromotedPoints = 0;
-    int mappingProbationPromotedNowPoints = 0;
-    int mappingProbationVoteRaw = 0;
-    int mappingProbationVoteEffective = 0;
-    int mappingProbationVoteSuppressed = 0;
-    int mappingProbationVoteKFs = 0;
 
     vector<MapPoint*> vpMP;
 
@@ -618,53 +496,11 @@ void KeyFrame::UpdateConnections(bool upParent)
         if(pMP->isBad())
             continue;
 
-        const bool closeMidLmtAtCreation =
-            !bUseORB && IsCloseMidLmtAtCreationKeyFrame(pMP);
-        const bool wasMappingProbation =
-            closeMidLmtAtCreation && pMP->WasMappingProbation();
-        bool promotedMappingProbationNow = false;
-        const bool activeMappingProbation =
-            closeMidLmtAtCreation && pMP->IsMappingProbation();
-        const bool promotedMappingProbation =
-            closeMidLmtAtCreation && pMP->IsMappingProbationPromoted();
-
-        if(wasMappingProbation)
-        {
-            mappingProbationTargetPoints++;
-            if(activeMappingProbation)
-                mappingProbationActivePoints++;
-            if(promotedMappingProbation)
-                mappingProbationPromotedPoints++;
-            if(promotedMappingProbationNow)
-                mappingProbationPromotedNowPoints++;
-        }
-
-        const CovisRepeatabilityVoteDecision repeatabilityVote =
-            bUseORB ? CovisRepeatabilityVoteDecision()
-                    : ClassifyCovisRepeatabilityVote(this, pMP);
-        if(repeatabilityVote.target)
-        {
-            covisRepeatabilityTargetPoints++;
-            if(repeatabilityVote.weak)
-            {
-                covisRepeatabilityWeakPoints++;
-                if(repeatabilityVote.lowObs)
-                    covisRepeatabilityWeakLowObsPoints++;
-                if(repeatabilityVote.lowFound)
-                    covisRepeatabilityWeakLowFoundPoints++;
-                if(repeatabilityVote.young)
-                    covisRepeatabilityWeakYoungPoints++;
-                if(repeatabilityVote.lowRelevance)
-                    covisRepeatabilityWeakLowRelevancePoints++;
-            }
-        }
-
         MapPoint::CreationSource source = MapPoint::kCreationSourceUnknown;
         int sourceIdx = MapPointCreationSourceIndexKeyFrame(source);
         bool isLmt0To10 = false;
         bool isWeakLmt0To10 = false;
         bool isConfirmedLmt0To10 = false;
-        bool isLongLowRelevantLmt0To10 = false;
         if(collectCovisVoteDiag)
         {
             mpTotal++;
@@ -692,16 +528,6 @@ void KeyFrame::UpdateConnections(bool upParent)
                 if(isConfirmedLmt0To10)
                     mpLmt0To10Confirmed++;
             }
-            if(IsCloseMidLmtAtCreationKeyFrame(pMP))
-            {
-                MapPoint::LocalMapVisibilityHistoryStats visibilityHistory{};
-                isLongLowRelevantLmt0To10 =
-                    IsLongLowRelevantLmtKeyFrame(pMP, visibilityHistory);
-                if(visibilityHistory.evaluationCount >= 5)
-                    mpLmtCreation0To10LongEvaluated++;
-                if(isLongLowRelevantLmt0To10)
-                    mpLmtCreation0To10LongLowRelevant++;
-            }
         }
 
         map<KeyFrame*,tuple<int,int>> observations = pMP->GetObservations();
@@ -710,20 +536,7 @@ void KeyFrame::UpdateConnections(bool upParent)
         {
             if(mit->first->mnId==mnId || mit->first->isBad() || mit->first->GetMap() != mpMap)
                 continue;
-            if(activeMappingProbation)
-            {
-                mappingProbationKFcounter[mit->first]++;
-                mappingProbationVoteRaw++;
-            }
-            else
-            {
-                KFcounter[mit->first]++;
-            }
-            if(repeatabilityVote.weak)
-            {
-                covisRepeatabilityWeakKFcounter[mit->first]++;
-                covisRepeatabilityWeakVoteRaw++;
-            }
+            KFcounter[mit->first]++;
             if(collectCovisVoteDiag)
             {
                 voteTotal++;
@@ -736,63 +549,9 @@ void KeyFrame::UpdateConnections(bool upParent)
                     if(isConfirmedLmt0To10)
                         voteLmt0To10Confirmed++;
                 }
-                if(isWeakLmt0To10)
-                {
-                    shadowSkippedVotes++;
-                }
-                else
-                {
-                    shadowKFcounter[mit->first]++;
-                }
-                if(isLongLowRelevantLmt0To10)
-                {
-                    voteLmtCreation0To10LongLowRelevant++;
-                    longRelevanceShadowSkippedVotes++;
-                }
-                else
-                {
-                    longRelevanceShadowKFcounter[mit->first]++;
-                }
             }
 
         }
-    }
-
-    covisRepeatabilityWeakVoteKFs =
-        static_cast<int>(covisRepeatabilityWeakKFcounter.size());
-
-    if(kEnableMappingProbationCovisVoteBehavior &&
-       !bUseORB &&
-       !mappingProbationKFcounter.empty())
-    {
-        static constexpr int kMappingProbationVoteDownweight = 4;
-        KeyFrame* pBestProbationKF = nullptr;
-        int bestProbationVotes = 0;
-        for(const auto& entry : mappingProbationKFcounter)
-        {
-            KeyFrame* pKF = entry.first;
-            if(!pKF || pKF->isBad())
-                continue;
-            if(entry.second > bestProbationVotes)
-            {
-                bestProbationVotes = entry.second;
-                pBestProbationKF = pKF;
-            }
-            const int effectiveVotes = entry.second / kMappingProbationVoteDownweight;
-            if(effectiveVotes <= 0)
-                continue;
-            KFcounter[pKF] += effectiveVotes;
-            mappingProbationVoteEffective += effectiveVotes;
-            mappingProbationVoteKFs++;
-        }
-        if(KFcounter.empty() && pBestProbationKF)
-        {
-            KFcounter[pBestProbationKF] = 1;
-            mappingProbationVoteEffective = 1;
-            mappingProbationVoteKFs = 1;
-        }
-        mappingProbationVoteSuppressed =
-            std::max(0, mappingProbationVoteRaw - mappingProbationVoteEffective);
     }
 
     // This should not happen
@@ -834,30 +593,7 @@ void KeyFrame::UpdateConnections(bool upParent)
     if(collectCovisVoteDiag)
     {
         int actualTopWeight = 0;
-        int shadowTopWeight = 0;
-        int longRelevanceShadowTopWeight = 0;
         const int actualConnected = CountConnectedKeyFramesAboveThreshold(KFcounter, th, actualTopWeight);
-        const int shadowConnected = CountConnectedKeyFramesAboveThreshold(shadowKFcounter, th, shadowTopWeight);
-        const int longRelevanceShadowConnected =
-            CountConnectedKeyFramesAboveThreshold(longRelevanceShadowKFcounter,
-                                                  th,
-                                                  longRelevanceShadowTopWeight);
-        int shadowDroppedConnected = 0;
-        int longRelevanceShadowDroppedConnected = 0;
-        for(const auto& item : KFcounter)
-        {
-            if(item.second < th)
-                continue;
-            const auto itShadow = shadowKFcounter.find(item.first);
-            const int shadowWeight = itShadow != shadowKFcounter.end() ? itShadow->second : 0;
-            if(shadowWeight < th)
-                shadowDroppedConnected++;
-            const auto itLongShadow = longRelevanceShadowKFcounter.find(item.first);
-            const int longShadowWeight = itLongShadow != longRelevanceShadowKFcounter.end()
-                ? itLongShadow->second : 0;
-            if(longShadowWeight < th)
-                longRelevanceShadowDroppedConnected++;
-        }
 
         std::cout << "[KeyFrame][CovisVoteSource]"
                   << " frame_id=" << mnFrameId
@@ -880,50 +616,9 @@ void KeyFrame::UpdateConnections(bool upParent)
                   << " vote_lmt_0_10=" << voteLmt0To10
                   << " vote_lmt_0_10_weak=" << voteLmt0To10Weak
                   << " vote_lmt_0_10_confirmed=" << voteLmt0To10Confirmed
-                  << " shadow_skipped_votes=" << shadowSkippedVotes
-                  << " mp_lmt_creation_0_10_long_evaluated=" << mpLmtCreation0To10LongEvaluated
-                  << " mp_lmt_creation_0_10_long_low_relevant=" << mpLmtCreation0To10LongLowRelevant
-                  << " vote_lmt_creation_0_10_long_low_relevant=" << voteLmtCreation0To10LongLowRelevant
-                  << " long_relevance_shadow_skipped_votes=" << longRelevanceShadowSkippedVotes
-                  << " repeatability_vote_target_points=" << covisRepeatabilityTargetPoints
-                  << " repeatability_vote_weak_points=" << covisRepeatabilityWeakPoints
-                  << " repeatability_vote_weak_lowobs_points=" << covisRepeatabilityWeakLowObsPoints
-                  << " repeatability_vote_weak_lowfound_points=" << covisRepeatabilityWeakLowFoundPoints
-                  << " repeatability_vote_weak_young_points=" << covisRepeatabilityWeakYoungPoints
-                  << " repeatability_vote_weak_low_relevance_points=" << covisRepeatabilityWeakLowRelevancePoints
-                  << " repeatability_vote_weak_raw=" << covisRepeatabilityWeakVoteRaw
-                  << " repeatability_vote_weak_effective=" << covisRepeatabilityWeakVoteEffective
-                  << " repeatability_vote_weak_suppressed=" << covisRepeatabilityWeakVoteSuppressed
-                  << " repeatability_vote_weak_kfs=" << covisRepeatabilityWeakVoteKFs
-                  << " repeatability_vote_behavior_active=0"
-                  << " mapping_probation_target_points=" << mappingProbationTargetPoints
-                  << " mapping_probation_active_points=" << mappingProbationActivePoints
-                  << " mapping_probation_promoted_points=" << mappingProbationPromotedPoints
-                  << " mapping_probation_promoted_now_points=" << mappingProbationPromotedNowPoints
-                  << " mapping_probation_vote_raw=" << mappingProbationVoteRaw
-                  << " mapping_probation_vote_effective=" << mappingProbationVoteEffective
-                  << " mapping_probation_vote_suppressed=" << mappingProbationVoteSuppressed
-                  << " mapping_probation_vote_kfs=" << mappingProbationVoteKFs
-                  << " mapping_probation_behavior_active="
-                  << (kEnableMappingProbationCovisVoteBehavior ? 1 : 0)
                   << " actual_kfs=" << KFcounter.size()
                   << " actual_connected=" << actualConnected
                   << " actual_top_weight=" << actualTopWeight
-                  << " shadow_kfs=" << shadowKFcounter.size()
-                  << " shadow_connected=" << shadowConnected
-                  << " shadow_top_weight=" << shadowTopWeight
-                  << " shadow_connected_delta=" << (shadowConnected - actualConnected)
-                  << " shadow_top_weight_delta=" << (shadowTopWeight - actualTopWeight)
-                  << " shadow_dropped_connected=" << shadowDroppedConnected
-                  << " long_relevance_shadow_kfs=" << longRelevanceShadowKFcounter.size()
-                  << " long_relevance_shadow_connected=" << longRelevanceShadowConnected
-                  << " long_relevance_shadow_top_weight=" << longRelevanceShadowTopWeight
-                  << " long_relevance_shadow_connected_delta="
-                  << (longRelevanceShadowConnected - actualConnected)
-                  << " long_relevance_shadow_top_weight_delta="
-                  << (longRelevanceShadowTopWeight - actualTopWeight)
-                  << " long_relevance_shadow_dropped_connected="
-                  << longRelevanceShadowDroppedConnected
                   << std::endl;
     }
 

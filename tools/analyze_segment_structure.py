@@ -258,9 +258,7 @@ AVG_KEYS = [
     "kfstruct_local_kfs",
     "kfstruct_local_kfs_voted_candidates",
     "kfstruct_local_kfs_voted_kept",
-    "kfstruct_local_kfs_voted_skipped_by_budget",
     "kfstruct_local_kfs_voted_visibility_kept",
-    "kfstruct_local_kfs_voted_visibility_skipped",
     "kfstruct_local_kf_vote_avg",
     "kfstruct_local_kf_vote_max",
     "kfstruct_local_mps",
@@ -282,143 +280,6 @@ AVG_KEYS = [
     "kfstruct_local_mps_depth_5_10",
     "kfstruct_local_mps_depth_10_30",
     "kfstruct_local_mps_depth_avg",
-    "stablevote_full_vote_kfs",
-    "stablevote_stable_vote_kfs",
-    "stablevote_full_votes",
-    "stablevote_stable_votes",
-    "stablevote_lmt_votes",
-    "stablevote_lmt_stable_votes",
-    "stablevote_lmt_weak_votes",
-    "stablevote_lmt_0_10_votes",
-    "stablevote_lmt_0_10_stable_votes",
-    "stablevote_lmt_0_10_weak_votes",
-    "stablevote_lmt_0_10_long_relevance_evaluated_points",
-    "stablevote_lmt_0_10_long_low_relevant_points",
-    "stablevote_lmt_0_10_long_low_relevant_votes",
-    "stablevote_repeatability_vote_target_points",
-    "stablevote_repeatability_vote_weak_points",
-    "stablevote_repeatability_vote_weak_lowobs_points",
-    "stablevote_repeatability_vote_weak_lowfound_points",
-    "stablevote_repeatability_vote_weak_opt_unstable_points",
-    "stablevote_repeatability_vote_weak_low_relevance_points",
-    "stablevote_repeatability_vote_weak_raw",
-    "stablevote_repeatability_vote_weak_effective",
-    "stablevote_repeatability_vote_weak_suppressed",
-    "stablevote_repeatability_vote_weak_kfs",
-    "stablevote_repeatability_vote_behavior_active",
-    "stablevote_mapping_probation_vote_target_points",
-    "stablevote_mapping_probation_vote_active_points",
-    "stablevote_mapping_probation_vote_promoted_points",
-    "stablevote_mapping_probation_vote_raw",
-    "stablevote_mapping_probation_vote_effective",
-    "stablevote_mapping_probation_vote_suppressed",
-    "stablevote_mapping_probation_vote_kfs",
-    "stablevote_mapping_probation_vote_behavior_active",
-    "stablevote_lmt_10p_votes",
-    "stablevote_lmt_10p_stable_votes",
-    "stablevote_lmt_10p_weak_votes",
-    "stablevote_actual_local_kfs",
-    "stablevote_shadow_direct_kfs",
-    "stablevote_shadow_local_kfs",
-    "stablevote_selected_kf_overlap",
-    "stablevote_selected_kf_overlap_share",
-    "stablevote_actual_local_mps",
-    "stablevote_shadow_local_mps",
-    "stablevote_actual_lmt_0_10",
-    "stablevote_shadow_lmt_0_10",
-    "stablevote_actual_pred_visible",
-    "stablevote_shadow_pred_visible",
-    "stablevote_actual_trackable_share",
-    "stablevote_shadow_trackable_share",
-    "stablevote_long_relevance_shadow_vote_kfs",
-    "stablevote_long_relevance_shadow_top_vote",
-    "stablevote_long_relevance_shadow_direct_kfs",
-    "stablevote_long_relevance_shadow_direct_overlap",
-    "stablevote_long_relevance_shadow_direct_overlap_share",
-    "stablevote_long_relevance_shadow_direct_mps",
-    "stablevote_long_relevance_shadow_direct_lmt_0_10",
-    "stablevote_long_relevance_shadow_direct_pred_visible",
-    "stablevote_long_relevance_shadow_direct_trackable_share",
-    "kfcontribshadow_actual_kfs",
-    "kfcontribshadow_shadow_kfs",
-    "kfcontribshadow_shadow_core_kfs",
-    "kfcontribshadow_selected_kf_overlap_share",
-    "kfcontribshadow_target_visible_close",
-    "kfcontribshadow_target_met",
-    "kfcontribshadow_actual_mps",
-    "kfcontribshadow_shadow_mps",
-    "kfcontribshadow_shadow_mps_ratio",
-    "kfcontribshadow_actual_close_mps",
-    "kfcontribshadow_shadow_close_mps",
-    "kfcontribshadow_actual_visible_total",
-    "kfcontribshadow_shadow_visible_total",
-    "kfcontribshadow_actual_visible_close",
-    "kfcontribshadow_shadow_visible_close",
-    "kfcontribshadow_shadow_visible_close_ratio",
-    "kfcontribshadow_actual_visible_lmt_close",
-    "kfcontribshadow_shadow_visible_lmt_close",
-    "kfcontribshadow_actual_visible_tracking_stereo_close",
-    "kfcontribshadow_shadow_visible_tracking_stereo_close",
-    "kfcontribshadow_actual_negative_close",
-    "kfcontribshadow_shadow_negative_close",
-    "kfcontribshadow_actual_outside_close",
-    "kfcontribshadow_shadow_outside_close",
-    "kfcontribshadow_actual_scale_close",
-    "kfcontribshadow_shadow_scale_close",
-    "kfcontribshadow_actual_view_angle_close",
-    "kfcontribshadow_shadow_view_angle_close",
-    "kfcontribselect_active",
-    "kfcontribselect_baseline_direct_kfs",
-    "kfcontribselect_selected_direct_kfs",
-    "kfcontribselect_core_kfs",
-    "kfcontribselect_fallback_kfs",
-    "kfcontribselect_baseline_direct_mps",
-    "kfcontribselect_selected_direct_mps",
-    "kfcontribselect_target_visible_total",
-    "kfcontribselect_selected_visible_total",
-    "kfcontribselect_target_visible_close",
-    "kfcontribselect_selected_visible_close",
-    "kfcontribselect_target_met",
-    "kfcontribretain_all_local_proj_actual_total",
-    "kfcontribretain_all_local_proj_retained_total",
-    "kfcontribretain_all_local_proj_actual_inlier",
-    "kfcontribretain_all_local_proj_retained_inlier",
-    "kfcontribretain_all_local_proj_inlier_retention",
-    "kfcontribretain_all_local_proj_actual_inlier_cells",
-    "kfcontribretain_all_local_proj_retained_inlier_cells",
-    "kfcontribretain_all_local_proj_inlier_cell_retention",
-    "kfcontribretain_close_0_10_actual_total",
-    "kfcontribretain_close_0_10_retained_total",
-    "kfcontribretain_close_0_10_actual_inlier",
-    "kfcontribretain_close_0_10_retained_inlier",
-    "kfcontribretain_close_0_10_inlier_retention",
-    "kfcontribretain_close_0_10_actual_inlier_cells",
-    "kfcontribretain_close_0_10_retained_inlier_cells",
-    "kfcontribretain_close_0_10_inlier_cell_retention",
-    "kfcontribretain_lmt_close_0_10_actual_total",
-    "kfcontribretain_lmt_close_0_10_retained_total",
-    "kfcontribretain_lmt_close_0_10_actual_inlier",
-    "kfcontribretain_lmt_close_0_10_retained_inlier",
-    "kfcontribretain_lmt_close_0_10_inlier_retention",
-    "kfcontribretain_lmt_close_0_10_actual_inlier_cells",
-    "kfcontribretain_lmt_close_0_10_retained_inlier_cells",
-    "kfcontribretain_lmt_close_0_10_inlier_cell_retention",
-    "kfcontribretain_tracking_stereo_close_0_10_actual_total",
-    "kfcontribretain_tracking_stereo_close_0_10_retained_total",
-    "kfcontribretain_tracking_stereo_close_0_10_actual_inlier",
-    "kfcontribretain_tracking_stereo_close_0_10_retained_inlier",
-    "kfcontribretain_tracking_stereo_close_0_10_inlier_retention",
-    "kfcontribretain_tracking_stereo_close_0_10_actual_inlier_cells",
-    "kfcontribretain_tracking_stereo_close_0_10_retained_inlier_cells",
-    "kfcontribretain_tracking_stereo_close_0_10_inlier_cell_retention",
-    "kfcontribretain_non_close_local_proj_actual_total",
-    "kfcontribretain_non_close_local_proj_retained_total",
-    "kfcontribretain_non_close_local_proj_actual_inlier",
-    "kfcontribretain_non_close_local_proj_retained_inlier",
-    "kfcontribretain_non_close_local_proj_inlier_retention",
-    "kfcontribretain_non_close_local_proj_actual_inlier_cells",
-    "kfcontribretain_non_close_local_proj_retained_inlier_cells",
-    "kfcontribretain_non_close_local_proj_inlier_cell_retention",
     "closebridge_all_0_5_features",
     "closebridge_all_0_5_no_mp",
     "closebridge_all_0_5_associated_mp",
@@ -477,44 +338,7 @@ AVG_KEYS = [
     "search_total_matches",
     "search_local_kfs_voted_candidates",
     "search_local_kfs_voted_kept",
-    "search_local_kfs_voted_skipped_by_budget",
     "search_local_kfs_voted_visibility_kept",
-    "search_local_kfs_voted_visibility_skipped",
-    "search_repeatability_vote_target_points",
-    "search_repeatability_vote_weak_points",
-    "search_repeatability_vote_weak_lowobs_points",
-    "search_repeatability_vote_weak_lowfound_points",
-    "search_repeatability_vote_weak_opt_unstable_points",
-    "search_repeatability_vote_weak_low_relevance_points",
-    "search_repeatability_vote_weak_raw",
-    "search_repeatability_vote_weak_effective",
-    "search_repeatability_vote_weak_suppressed",
-    "search_repeatability_vote_weak_kfs",
-    "search_repeatability_vote_behavior_active",
-    "search_mapping_probation_vote_target_points",
-    "search_mapping_probation_vote_active_points",
-    "search_mapping_probation_vote_promoted_points",
-    "search_mapping_probation_vote_raw",
-    "search_mapping_probation_vote_effective",
-    "search_mapping_probation_vote_suppressed",
-    "search_mapping_probation_vote_kfs",
-    "search_mapping_probation_vote_behavior_active",
-    "search_core_pool_candidates",
-    "search_core_pool_in_view",
-    "search_core_pool_matches",
-    "search_expansion_pool_candidates",
-    "search_expansion_pool_enabled",
-    "search_expansion_pool_input_capped",
-    "search_expansion_pool_suppressed",
-    "search_expansion_pool_matches",
-    "search_expansion_pool_match_cap_hit",
-    "search_probation_pool_candidates",
-    "search_probation_pool_in_view",
-    "search_probation_pool_enabled",
-    "search_probation_pool_input_capped",
-    "search_probation_pool_suppressed",
-    "search_probation_pool_matches",
-    "search_probation_pool_match_cap_hit",
     "search_localmap_lmt_0_10_from_reference",
     "search_localmap_lmt_0_10_from_voted",
     "search_localmap_lmt_0_10_from_expansion",
@@ -533,15 +357,6 @@ AVG_KEYS = [
     "search_refassoc_matcher_assign_reject",
     "search_refassoc_matcher_outside_reject",
     "search_refassoc_matcher_assigned",
-    "search_ref_fallback_shadow_target",
-    "search_ref_fallback_shadow_found_area",
-    "search_ref_fallback_shadow_area_candidates",
-    "search_ref_fallback_shadow_valid_candidate",
-    "search_ref_fallback_shadow_raw_candidate",
-    "search_ref_fallback_shadow_ratio_pass",
-    "search_ref_fallback_shadow_strict_pass",
-    "search_ref_fallback_shadow_best_dist_avg",
-    "search_ref_fallback_shadow_proj_norm_avg",
     "search_triang_0_10_history_gate_reject",
     "search_triang_0_10_visibility_history_recorded",
     "search_triang_0_10_visibility_history_evaluated",
@@ -638,57 +453,6 @@ AVG_KEYS = [
     "triangcreate_close_0_5_created",
     "triangcreate_close_5_10_created",
     "triangcreate_close_stereo_fallback_reject",
-    "triangcreate_mapping_feature_budget_candidate",
-    "triangcreate_mapping_feature_budget_unique_candidates",
-    "triangcreate_mapping_feature_budget_accept",
-    "triangcreate_mapping_feature_budget_reject",
-    "triangcreate_mapping_feature_budget_reject_grid",
-    "triangcreate_mapping_feature_budget_reject_low_response",
-    "triangcreate_mapping_feature_budget_reject_octave2p",
-    "triangcreate_mapping_feature_budget_reject_edge_grid",
-    "triangcreate_mapping_feature_budget_reject_duplicate",
-    "triangcreate_mapping_feature_budget_reject_keypoint_duplicate",
-    "triangcreate_mapping_feature_repeatability_candidate",
-    "triangcreate_mapping_feature_repeatability_repeatable_candidate",
-    "triangcreate_mapping_feature_repeatability_single_support_candidate",
-    "triangcreate_mapping_feature_repeatability_accept",
-    "triangcreate_mapping_feature_repeatability_fallback_accept",
-    "triangcreate_mapping_feature_repeatability_reject_single_support",
-    "triangcreate_mapping_feature_repeatability_shadow_reject_single_support",
-    "triangcreate_mapping_tracklet_enabled",
-    "triangcreate_mapping_tracklet_candidate",
-    "triangcreate_mapping_tracklet_created",
-    "triangcreate_mapping_tracklet_updated",
-    "triangcreate_mapping_tracklet_promoted",
-    "triangcreate_mapping_tracklet_expired",
-    "triangcreate_mapping_tracklet_conflict",
-    "triangcreate_mapping_tracklet_promotion_failed",
-    "triangcreate_mapping_tracklet_alive",
-    "kfcreate_mapping_feature_repeatability_candidate",
-    "kfcreate_mapping_feature_repeatability_repeatable_candidate",
-    "kfcreate_mapping_feature_repeatability_single_support_candidate",
-    "kfcreate_mapping_feature_repeatability_accept",
-    "kfcreate_mapping_feature_repeatability_fallback_accept",
-    "kfcreate_mapping_feature_repeatability_reject_single_support",
-    "kfcreate_mapping_feature_repeatability_shadow_reject_single_support",
-    "kfcreate_mapping_tracklet_enabled",
-    "kfcreate_mapping_tracklet_candidate",
-    "kfcreate_mapping_tracklet_created",
-    "kfcreate_mapping_tracklet_updated",
-    "kfcreate_mapping_tracklet_promoted",
-    "kfcreate_mapping_tracklet_expired",
-    "kfcreate_mapping_tracklet_conflict",
-    "kfcreate_mapping_tracklet_promotion_failed",
-    "kfcreate_mapping_tracklet_alive",
-    "kfcreate_mapping_tracklet_obs_avg",
-    "kfcreate_mapping_tracklet_pass_avg",
-    "kfcreate_mapping_tracklet_age_avg",
-    "triangcreate_mapping_probation_created",
-    "triangcreate_mapping_probation_created_0_5",
-    "triangcreate_mapping_probation_created_5_10",
-    "kfcreate_mapping_probation_created",
-    "kfcreate_mapping_probation_created_0_5",
-    "kfcreate_mapping_probation_created_5_10",
     "covisvote_mp_total",
     "covisvote_mp_local_mapping_triangulation",
     "covisvote_mp_lmt_0_10",
@@ -699,68 +463,22 @@ AVG_KEYS = [
     "covisvote_vote_lmt_0_10",
     "covisvote_vote_lmt_0_10_weak",
     "covisvote_vote_lmt_0_10_confirmed",
-    "covisvote_shadow_skipped_votes",
     "covisvote_mp_lmt_creation_0_10_long_evaluated",
     "covisvote_mp_lmt_creation_0_10_long_low_relevant",
     "covisvote_vote_lmt_creation_0_10_long_low_relevant",
-    "covisvote_long_relevance_shadow_skipped_votes",
-    "covisvote_repeatability_vote_target_points",
-    "covisvote_repeatability_vote_weak_points",
-    "covisvote_repeatability_vote_weak_lowobs_points",
-    "covisvote_repeatability_vote_weak_lowfound_points",
-    "covisvote_repeatability_vote_weak_young_points",
-    "covisvote_repeatability_vote_weak_low_relevance_points",
-    "covisvote_repeatability_vote_weak_raw",
-    "covisvote_repeatability_vote_weak_effective",
-    "covisvote_repeatability_vote_weak_suppressed",
-    "covisvote_repeatability_vote_weak_kfs",
-    "covisvote_repeatability_vote_behavior_active",
-    "covisvote_mapping_probation_target_points",
-    "covisvote_mapping_probation_active_points",
-    "covisvote_mapping_probation_promoted_points",
-    "covisvote_mapping_probation_promoted_now_points",
-    "covisvote_mapping_probation_vote_raw",
-    "covisvote_mapping_probation_vote_effective",
-    "covisvote_mapping_probation_vote_suppressed",
-    "covisvote_mapping_probation_vote_kfs",
-    "covisvote_mapping_probation_behavior_active",
     "covisvote_actual_kfs",
     "covisvote_actual_connected",
     "covisvote_actual_top_weight",
-    "covisvote_shadow_kfs",
-    "covisvote_shadow_connected",
-    "covisvote_shadow_top_weight",
-    "covisvote_shadow_connected_delta",
-    "covisvote_shadow_top_weight_delta",
-    "covisvote_shadow_dropped_connected",
-    "covisvote_long_relevance_shadow_kfs",
-    "covisvote_long_relevance_shadow_connected",
-    "covisvote_long_relevance_shadow_top_weight",
-    "covisvote_long_relevance_shadow_connected_delta",
-    "covisvote_long_relevance_shadow_top_weight_delta",
-    "covisvote_long_relevance_shadow_dropped_connected",
     "recentmp_total",
     "recentmp_kept",
     "recentmp_found_ratio_culled",
     "recentmp_low_obs_culled",
     "recentmp_aged_out_survived",
-    "recentmp_mapping_probation_active",
-    "recentmp_mapping_probation_kept",
-    "recentmp_mapping_probation_promoted",
-    "recentmp_mapping_probation_culled_no_inlier",
-    "recentmp_mapping_probation_culled_expired",
-    "recentmp_mapping_probation_culled_outlier",
     "recentmpsrc_local_mapping_triangulation_recent_total",
     "recentmpsrc_local_mapping_triangulation_kept",
     "recentmpsrc_local_mapping_triangulation_found_ratio_culled",
     "recentmpsrc_local_mapping_triangulation_low_obs_culled",
     "recentmpsrc_local_mapping_triangulation_aged_out_survived",
-    "recentmpsrc_local_mapping_triangulation_mapping_probation_active",
-    "recentmpsrc_local_mapping_triangulation_mapping_probation_kept",
-    "recentmpsrc_local_mapping_triangulation_mapping_probation_promoted",
-    "recentmpsrc_local_mapping_triangulation_mapping_probation_culled_no_inlier",
-    "recentmpsrc_local_mapping_triangulation_mapping_probation_culled_expired",
-    "recentmpsrc_local_mapping_triangulation_mapping_probation_culled_outlier",
     "reusefunnel_local_mapping_triangulation_0_5_selected",
     "reusefunnel_local_mapping_triangulation_0_5_not_in_frustum",
     "reusefunnel_local_mapping_triangulation_0_5_in_frustum",
@@ -861,20 +579,6 @@ KF_INSERT_NOVELTY_KEYS = [
     "novelty_new_close_cell_share",
     "novelty_nontracked_close_highconf",
     "novelty_highconf_new_close_cells",
-    "xfeat_kf_shadow_eligible",
-    "xfeat_kf_shadow_would_insert",
-    "xfeat_kf_shadow_would_suppress",
-    "xfeat_kf_shadow_weak_support",
-    "xfeat_kf_shadow_stable_support_ok",
-    "xfeat_kf_shadow_close_coverage_ok",
-    "xfeat_kf_shadow_novel_close_strong",
-    "xfeat_kf_shadow_close_insert",
-    "xfeat_kf_shadow_weak_inlier_threshold",
-    "xfeat_kf_guard_active",
-    "xfeat_kf_guard_suppress",
-    "xfeat_kf_guard_allow_weak_support",
-    "xfeat_kf_guard_allow_close_insert",
-    "xfeat_kf_guard_force_insert",
 ]
 
 
@@ -967,8 +671,6 @@ def segment_rows(rows: Sequence[Dict[str, object]], segment_size: int) -> List[D
         add_ratio_metric(out, diag, "grid_lmt_0_10_weighted_outlier_ratio", "grid_local_proj_lmt_0_10_outlier", "grid_local_proj_lmt_0_10_total")
         add_ratio_metric(out, diag, "grid_lmt_edge_0_10_weighted_outlier_ratio", "grid_local_proj_lmt_edge_0_10_outlier", "grid_local_proj_lmt_edge_0_10_total")
         add_ratio_metric(out, diag, "grid_tracking_stereo_0_10_weighted_outlier_ratio", "grid_local_proj_tracking_stereo_0_10_outlier", "grid_local_proj_tracking_stereo_0_10_total")
-        add_ratio_metric(out, diag, "pool_core_weighted_outlier_ratio", "pool_core_outlier", "pool_core_total")
-        add_ratio_metric(out, diag, "pool_expansion_weighted_outlier_ratio", "pool_expansion_outlier", "pool_expansion_total")
 
         add_share_metric(out, diag, "kfstruct_track_in_view_share", "kfstruct_local_mps_track_in_view", "kfstruct_local_mps")
         add_share_metric(out, diag, "kfstruct_voted_mp_share", "kfstruct_local_mps_from_voted", "kfstruct_local_mps")
@@ -983,40 +685,7 @@ def segment_rows(rows: Sequence[Dict[str, object]], segment_size: int) -> List[D
         add_share_metric(out, diag, "payload_suppressed_tracking_stereo_0_10_share", "payload_suppressed_tracking_stereo_0_10", "payload_candidates")
         add_share_metric(out, diag, "covisvote_lmt_0_10_weak_vote_share", "covisvote_vote_lmt_0_10_weak", "covisvote_vote_total")
         add_share_metric(out, diag, "covisvote_lmt_0_10_vote_share", "covisvote_vote_lmt_0_10", "covisvote_vote_total")
-        add_share_metric(out, diag, "covisvote_shadow_skipped_vote_share", "covisvote_shadow_skipped_votes", "covisvote_vote_total")
-        add_share_metric(out, diag, "covisvote_long_relevance_shadow_skipped_vote_share", "covisvote_long_relevance_shadow_skipped_votes", "covisvote_vote_total")
         add_share_metric(out, diag, "covisvote_long_low_relevant_mp_share", "covisvote_mp_lmt_creation_0_10_long_low_relevant", "covisvote_mp_lmt_creation_0_10_long_evaluated")
-        add_share_metric(out, diag, "covisvote_repeatability_weak_point_share", "covisvote_repeatability_vote_weak_points", "covisvote_repeatability_vote_target_points")
-        add_share_metric(out, diag, "covisvote_repeatability_weak_vote_suppressed_share", "covisvote_repeatability_vote_weak_suppressed", "covisvote_repeatability_vote_weak_raw")
-        add_share_metric(out, diag, "covisvote_mapping_probation_active_point_share", "covisvote_mapping_probation_active_points", "covisvote_mapping_probation_target_points")
-        add_share_metric(out, diag, "covisvote_mapping_probation_promoted_point_share", "covisvote_mapping_probation_promoted_points", "covisvote_mapping_probation_target_points")
-        add_share_metric(out, diag, "covisvote_mapping_probation_vote_suppressed_share", "covisvote_mapping_probation_vote_suppressed", "covisvote_mapping_probation_vote_raw")
-        add_share_metric(out, diag, "triangcreate_mapping_feature_repeatability_repeatable_share", "triangcreate_mapping_feature_repeatability_repeatable_candidate", "triangcreate_mapping_feature_repeatability_candidate")
-        add_share_metric(out, diag, "triangcreate_mapping_feature_repeatability_single_support_share", "triangcreate_mapping_feature_repeatability_single_support_candidate", "triangcreate_mapping_feature_repeatability_candidate")
-        add_share_metric(out, diag, "triangcreate_mapping_feature_repeatability_accept_share", "triangcreate_mapping_feature_repeatability_accept", "triangcreate_mapping_feature_repeatability_candidate")
-        add_share_metric(out, diag, "triangcreate_mapping_feature_repeatability_fallback_accept_share", "triangcreate_mapping_feature_repeatability_fallback_accept", "triangcreate_mapping_feature_repeatability_single_support_candidate")
-        add_share_metric(out, diag, "triangcreate_mapping_feature_repeatability_reject_single_support_share", "triangcreate_mapping_feature_repeatability_reject_single_support", "triangcreate_mapping_feature_repeatability_single_support_candidate")
-        add_share_metric(out, diag, "triangcreate_mapping_feature_repeatability_shadow_reject_single_support_share", "triangcreate_mapping_feature_repeatability_shadow_reject_single_support", "triangcreate_mapping_feature_repeatability_single_support_candidate")
-        add_share_metric(out, diag, "triangcreate_mapping_tracklet_created_share", "triangcreate_mapping_tracklet_created", "triangcreate_mapping_tracklet_candidate")
-        add_share_metric(out, diag, "triangcreate_mapping_tracklet_updated_share", "triangcreate_mapping_tracklet_updated", "triangcreate_mapping_tracklet_candidate")
-        add_share_metric(out, diag, "triangcreate_mapping_tracklet_promoted_share", "triangcreate_mapping_tracklet_promoted", "triangcreate_mapping_tracklet_candidate")
-        add_share_metric(out, diag, "triangcreate_mapping_tracklet_expired_share", "triangcreate_mapping_tracklet_expired", "triangcreate_mapping_tracklet_candidate")
-        add_share_metric(out, diag, "recentmp_mapping_probation_promoted_share", "recentmp_mapping_probation_promoted", "recentmp_mapping_probation_active")
-        add_share_metric(out, diag, "recentmp_mapping_probation_culled_no_inlier_share", "recentmp_mapping_probation_culled_no_inlier", "recentmp_mapping_probation_active")
-        add_share_metric(out, diag, "recentmp_mapping_probation_culled_expired_share", "recentmp_mapping_probation_culled_expired", "recentmp_mapping_probation_active")
-        add_share_metric(out, diag, "recentmp_mapping_probation_culled_outlier_share", "recentmp_mapping_probation_culled_outlier", "recentmp_mapping_probation_active")
-        add_share_metric(out, diag, "stablevote_lmt_weak_vote_share", "stablevote_lmt_weak_votes", "stablevote_lmt_votes")
-        add_share_metric(out, diag, "stablevote_lmt_0_10_weak_vote_share", "stablevote_lmt_0_10_weak_votes", "stablevote_lmt_0_10_votes")
-        add_share_metric(out, diag, "stablevote_lmt_10p_weak_vote_share", "stablevote_lmt_10p_weak_votes", "stablevote_lmt_10p_votes")
-        add_share_metric(out, diag, "stablevote_long_low_relevant_point_share", "stablevote_lmt_0_10_long_low_relevant_points", "stablevote_lmt_0_10_long_relevance_evaluated_points")
-        add_share_metric(out, diag, "stablevote_repeatability_weak_point_share", "stablevote_repeatability_vote_weak_points", "stablevote_repeatability_vote_target_points")
-        add_share_metric(out, diag, "stablevote_repeatability_weak_vote_suppressed_share", "stablevote_repeatability_vote_weak_suppressed", "stablevote_repeatability_vote_weak_raw")
-        add_share_metric(out, diag, "stablevote_mapping_probation_active_point_share", "stablevote_mapping_probation_vote_active_points", "stablevote_mapping_probation_vote_target_points")
-        add_share_metric(out, diag, "stablevote_mapping_probation_vote_suppressed_share", "stablevote_mapping_probation_vote_suppressed", "stablevote_mapping_probation_vote_raw")
-        add_share_metric(out, diag, "search_repeatability_weak_point_share", "search_repeatability_vote_weak_points", "search_repeatability_vote_target_points")
-        add_share_metric(out, diag, "search_repeatability_weak_vote_suppressed_share", "search_repeatability_vote_weak_suppressed", "search_repeatability_vote_weak_raw")
-        add_share_metric(out, diag, "search_mapping_probation_active_point_share", "search_mapping_probation_vote_active_points", "search_mapping_probation_vote_target_points")
-        add_share_metric(out, diag, "search_mapping_probation_vote_suppressed_share", "search_mapping_probation_vote_suppressed", "search_mapping_probation_vote_raw")
         add_share_metric(out, diag, "search_long_low_relevant_share", "search_triang_0_10_visibility_history_low_relevant", "search_triang_0_10_visibility_history_evaluated")
         add_share_metric(out, diag, "search_long_low_relevant_accepted_share", "search_triang_0_10_visibility_history_low_relevant_accepted", "search_triang_0_10_visibility_history_low_relevant")
         add_share_metric(out, diag, "closebridge_0_5_no_mp_share", "closebridge_all_0_5_no_mp", "closebridge_all_0_5_features")
@@ -1080,22 +749,6 @@ def segment_rows(rows: Sequence[Dict[str, object]], segment_size: int) -> List[D
         out["kfdecision_insert_rate"] = "" if not decision_rows else f"{len(insert_rows) / len(decision_rows):.9f}"
         out["kfdecision_need_insert_close_rate"] = mean([
             1.0 if str(row.get("kfdecision_need_insert_close", "0")) in ("1", "true", "True") else 0.0
-            for row in decision_rows
-        ])
-        out["kfdecision_xfeat_shadow_suppress_rate"] = mean([
-            1.0 if str(row.get("kfdecision_xfeat_kf_shadow_would_suppress", "0")) in ("1", "true", "True") else 0.0
-            for row in decision_rows
-        ])
-        out["kfdecision_xfeat_shadow_insert_rate"] = mean([
-            1.0 if str(row.get("kfdecision_xfeat_kf_shadow_would_insert", "0")) in ("1", "true", "True") else 0.0
-            for row in decision_rows
-        ])
-        out["kfdecision_xfeat_guard_active_rate"] = mean([
-            1.0 if str(row.get("kfdecision_xfeat_kf_guard_active", "0")) in ("1", "true", "True") else 0.0
-            for row in decision_rows
-        ])
-        out["kfdecision_xfeat_guard_suppress_rate"] = mean([
-            1.0 if str(row.get("kfdecision_xfeat_kf_guard_suppress", "0")) in ("1", "true", "True") else 0.0
             for row in decision_rows
         ])
         for key in KF_INSERT_NOVELTY_KEYS:
@@ -1184,10 +837,6 @@ def main() -> int:
     structure_prefixes = (
         "diag_",
         "kfstruct_",
-        "stablevote_",
-        "kfcontribshadow_",
-        "kfcontribselect_",
-        "kfcontribretain_",
         "closebridge_",
         "refbridge_",
         "refassoc_",
@@ -1211,8 +860,8 @@ def main() -> int:
         "reusecontribout_",
         "localkfclose_",
         "reuseoutcome_",
-        "reusecohort_",
         "maprepeat_",
+        "reusecohort_",
     )
     structure_deltas = metric_deltas(segments, args.top_k, structure_prefixes)
 
@@ -1225,7 +874,7 @@ def main() -> int:
         f"diff mean={sum(diff_vals) / len(diff_vals):.6f} rms={math.sqrt(sum(v * v for v in diff_vals) / len(diff_vals)):.6f} worse_ratio={sum(1 for v in diff_vals if v > 0.0) / len(diff_vals):.3f}",
         "",
         "Worst segments by mean ours-minus-ORB ATE:",
-        "segment,n,diag,ate_ours_rmse,ate_orb_rmse,ate_diff_mean,worse_ratio,mnInliers,local_mps,track_in_view_share,lmt_outlier,tracking_stereo_outlier,core_matches,expansion_matches,probation_matches,core_outlier,expansion_outlier,probation_outlier,covis_weak_vote_share,covis_shadow_connected,stable_shadow_mps,stable_shadow_trackable,stable_overlap,kf_inserts,kf_one_frame_share,kf_stable_support,kf_ref_overlap,kf_novel_close_cells,kf_highconf_novel_close_cells",
+        "segment,n,diag,ate_ours_rmse,ate_orb_rmse,ate_diff_mean,worse_ratio,mnInliers,local_mps,track_in_view_share,lmt_outlier,tracking_stereo_outlier,covis_weak_vote_share,kf_inserts,kf_one_frame_share,kf_stable_support,kf_ref_overlap,kf_novel_close_cells,kf_highconf_novel_close_cells",
     ]
     for row in sorted(segments, key=lambda item: maybe_float(item.get("ate_diff_mean")) or -1e9, reverse=True)[: args.top_k]:
         lines.append(
@@ -1238,17 +887,7 @@ def main() -> int:
             f"{row.get('kfstruct_track_in_view_share', '')},"
             f"{row.get('joint_lmt_weighted_outlier_ratio', '')},"
             f"{row.get('joint_tracking_stereo_weighted_outlier_ratio', '')},"
-            f"{row.get('search_core_pool_matches_avg', '')},"
-            f"{row.get('search_expansion_pool_matches_avg', '')},"
-            f"{row.get('search_probation_pool_matches_avg', '')},"
-            f"{row.get('pool_core_weighted_outlier_ratio', '')},"
-            f"{row.get('pool_expansion_weighted_outlier_ratio', '')},"
-            f"{row.get('pool_probation_weighted_outlier_ratio', '')},"
             f"{row.get('covisvote_lmt_0_10_weak_vote_share', '')},"
-            f"{row.get('covisvote_shadow_connected_avg', '')},"
-            f"{row.get('stablevote_shadow_local_mps_avg', '')},"
-            f"{row.get('stablevote_shadow_trackable_share_avg', '')},"
-            f"{row.get('stablevote_selected_kf_overlap_share_avg', '')},"
             f"{row.get('kfdecision_insert_count', '')},"
             f"{row.get('kfinsert_one_frame_share', '')},"
             f"{row.get('kfinsert_novelty_stable_inlier_assoc_avg', '')},"

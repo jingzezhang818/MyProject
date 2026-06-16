@@ -84,18 +84,6 @@ namespace
         return (frameId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0;
     }
 
-    bool IsXFeatOrbShapedInputEnabled()
-    {
-        static const bool enabled = []() {
-            const char* env = std::getenv("XFEAT_ORB_SHAPED_INPUT");
-            if(!env)
-                return false;
-            const std::string v(env);
-            return !(v.empty() || v == "0" || v == "false" || v == "FALSE");
-        }();
-        return enabled;
-    }
-
     float GetXFeatStereoDescThreshold()
     {
         static const float threshold = []() {
@@ -1073,10 +1061,7 @@ Frame::Frame(const Frame &frame)
      mvKeysRight(frame.mvKeysRight), mvKeysUn(frame.mvKeysUn), mvuRight(frame.mvuRight),
      mvDepth(frame.mvDepth), mvStereoBirthQuality(frame.mvStereoBirthQuality), mBowVec(frame.mBowVec), mFeatVec(frame.mFeatVec),
      mDescriptors(frame.mDescriptors.clone()), mDescriptorsRight(frame.mDescriptorsRight.clone()),
-     mvXFeatMappingEligible(frame.mvXFeatMappingEligible),
-     mvXFeatMappingProfileScore(frame.mvXFeatMappingProfileScore),
      mvpMapPoints(frame.mvpMapPoints), mvbOutlier(frame.mvbOutlier), mvXFeatMatchSource(frame.mvXFeatMatchSource),
-     mvXFeatLocalProjPool(frame.mvXFeatLocalProjPool),
      mvLocalProjBestDist(frame.mvLocalProjBestDist), mvLocalProjSecondDist(frame.mvLocalProjSecondDist),
      mvLocalProjRatio(frame.mvLocalProjRatio), mvLocalProjCandidateCount(frame.mvLocalProjCandidateCount),
      mvLocalProjRadiusPx(frame.mvLocalProjRadiusPx), mvLocalProjProjX(frame.mvLocalProjProjX),
@@ -1174,7 +1159,6 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvbOutlier = vector<bool>(N,false);
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
-    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
 
@@ -1275,12 +1259,9 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
 
     mTimeStereoMatch = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndStereoMatches - time_StartStereoMatches).count();
 #endif
-    BuildXFeatMappingProfile(imLeft.cols, imLeft.rows);
-
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvbOutlier = vector<bool>(N,false);
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
-    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
 
@@ -1367,7 +1348,6 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
-    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
@@ -1454,11 +1434,8 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
     UndistortKeyPoints();
 
     ComputeStereoFromRGBD(imDepth);
-    BuildXFeatMappingProfile(imGray.cols, imGray.rows);
-
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
-    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();
     mmMatchedInImage.clear();
@@ -1552,7 +1529,6 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
 
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
-    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();// = map<long unsigned int, cv::Point2f>(N, static_cast<cv::Point2f>(NULL));
     mmMatchedInImage.clear();
@@ -1658,11 +1634,8 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, XFextractor* extrac
     mvDepth = vector<float>(N,-1);
     mvStereoBirthQuality = vector<unsigned char>(N, kStereoBirthInvalid);
     mnCloseMPs = 0;
-    BuildXFeatMappingProfile(imGray.cols, imGray.rows);
-
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
-    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
 
     mmProjectPoints.clear();// = map<long unsigned int, cv::Point2f>(N, static_cast<cv::Point2f>(NULL));
     mmMatchedInImage.clear();
@@ -1766,267 +1739,6 @@ void Frame::ExtractXF(int flag, const cv::Mat &im, const int x0, const int x1)
         monoLeft = (*mpXFextractor)(im,cv::Mat(),mvKeys,mDescriptors,vLapping);
     else
         monoRight = (*mpXFextractorRight)(im,cv::Mat(),mvKeysRight,mDescriptorsRight,vLapping);
-}
-
-void Frame::BuildXFeatMappingProfile(const int imageCols, const int imageRows)
-{
-    mvXFeatMappingEligible.assign(static_cast<size_t>(N), 0);
-    mvXFeatMappingProfileScore.assign(static_cast<size_t>(N), -std::numeric_limits<float>::infinity());
-
-    if(N <= 0 || mDescriptors.empty() || mDescriptors.type() != CV_32F || !mpXFextractor)
-        return;
-
-    static constexpr float kMappingKeepRatio = 0.65f;
-    static constexpr int kGridCols = 8;
-    static constexpr int kGridRows = 6;
-
-    std::vector<int> levelBudgets = mpXFextractor->GetFeaturesPerLevel();
-    if(static_cast<int>(levelBudgets.size()) < mnScaleLevels)
-        levelBudgets.resize(static_cast<size_t>(mnScaleLevels), 0);
-
-    std::vector<std::vector<int>> levelIndices(static_cast<size_t>(std::max(1, mnScaleLevels)));
-    std::vector<int> levelRaw(static_cast<size_t>(std::max(1, mnScaleLevels)), 0);
-    std::vector<int> levelEligible(static_cast<size_t>(std::max(1, mnScaleLevels)), 0);
-
-    const float width = static_cast<float>(std::max(1, imageCols));
-    const float height = static_cast<float>(std::max(1, imageRows));
-    double responseSum = 0.0;
-    int responseCount = 0;
-
-    for(int i = 0; i < N; ++i)
-    {
-        if(i >= static_cast<int>(mvKeysUn.size()))
-            continue;
-
-        const cv::KeyPoint& kp = mvKeysUn[i];
-        const int level = std::max(0, std::min(mnScaleLevels - 1, kp.octave));
-        levelIndices[static_cast<size_t>(level)].push_back(i);
-        levelRaw[static_cast<size_t>(level)]++;
-
-        const bool hasDepth = i < static_cast<int>(mvDepth.size()) &&
-                              std::isfinite(mvDepth[i]) &&
-                              mvDepth[i] > 0.0f;
-        const bool closeDepth = hasDepth && mvDepth[i] <= mThDepth;
-        const unsigned char birthQuality =
-            i < static_cast<int>(mvStereoBirthQuality.size()) ? mvStereoBirthQuality[i] : kStereoBirthInvalid;
-
-        const float edgeMarginX = std::min(kp.pt.x, width - 1.0f - kp.pt.x) / width;
-        const float edgeMarginY = std::min(kp.pt.y, height - 1.0f - kp.pt.y) / height;
-        const float edgeMargin = std::min(edgeMarginX, edgeMarginY);
-        const float edgePenalty = edgeMargin < 0.04f ? 0.25f : 0.0f;
-
-        float stereoScore = 0.0f;
-        if(hasDepth)
-            stereoScore += closeDepth ? 0.30f : 0.15f;
-        if(birthQuality == kStereoBirthCloseHighConf)
-            stereoScore += 0.35f;
-        else if(birthQuality == kStereoBirthValid)
-            stereoScore += 0.20f;
-        else if(birthQuality == kStereoBirthCloseLowConf)
-            stereoScore -= 0.15f;
-
-        const float score =
-            kp.response +
-            stereoScore -
-            0.08f * static_cast<float>(level) -
-            edgePenalty;
-        mvXFeatMappingProfileScore[static_cast<size_t>(i)] = score;
-        responseSum += kp.response;
-        responseCount++;
-    }
-
-    std::vector<int> occupiedCells(static_cast<size_t>(kGridCols * kGridRows), 0);
-    for(int level = 0; level < mnScaleLevels; ++level)
-    {
-        std::vector<int>& indices = levelIndices[static_cast<size_t>(level)];
-        if(indices.empty())
-            continue;
-
-        std::sort(indices.begin(), indices.end(), [&](const int a, const int b) {
-            const float sa = mvXFeatMappingProfileScore[static_cast<size_t>(a)];
-            const float sb = mvXFeatMappingProfileScore[static_cast<size_t>(b)];
-            if(sa != sb)
-                return sa > sb;
-            if(mvKeysUn[a].response != mvKeysUn[b].response)
-                return mvKeysUn[a].response > mvKeysUn[b].response;
-            return a < b;
-        });
-
-        const int raw = static_cast<int>(indices.size());
-        const int extractorBudget =
-            level < static_cast<int>(levelBudgets.size()) && levelBudgets[static_cast<size_t>(level)] > 0
-                ? levelBudgets[static_cast<size_t>(level)]
-                : raw;
-        int target = std::max(1, static_cast<int>(std::round(static_cast<float>(std::min(raw, extractorBudget)) *
-                                                             kMappingKeepRatio)));
-        if(raw > 1)
-            target = std::min(target, raw - 1);
-        target = std::max(1, std::min(target, raw));
-
-        const int perCellCap =
-            std::max(1, static_cast<int>(std::ceil(static_cast<float>(target) /
-                                                   static_cast<float>(kGridCols * kGridRows) * 2.0f)));
-        std::vector<int> cellCounts(static_cast<size_t>(kGridCols * kGridRows), 0);
-        std::vector<unsigned char> picked(static_cast<size_t>(N), 0);
-        int selected = 0;
-
-        auto cellIndexFor = [&](const cv::KeyPoint& kp) -> int {
-            int cellX = static_cast<int>((kp.pt.x / width) * static_cast<float>(kGridCols));
-            int cellY = static_cast<int>((kp.pt.y / height) * static_cast<float>(kGridRows));
-            cellX = std::max(0, std::min(kGridCols - 1, cellX));
-            cellY = std::max(0, std::min(kGridRows - 1, cellY));
-            return cellY * kGridCols + cellX;
-        };
-
-        for(const int idx : indices)
-        {
-            if(selected >= target)
-                break;
-            const int cell = cellIndexFor(mvKeysUn[idx]);
-            if(cellCounts[static_cast<size_t>(cell)] >= perCellCap)
-                continue;
-            mvXFeatMappingEligible[static_cast<size_t>(idx)] = 1;
-            picked[static_cast<size_t>(idx)] = 1;
-            cellCounts[static_cast<size_t>(cell)]++;
-            occupiedCells[static_cast<size_t>(cell)] = 1;
-            selected++;
-        }
-
-        for(const int idx : indices)
-        {
-            if(selected >= target)
-                break;
-            if(picked[static_cast<size_t>(idx)])
-                continue;
-            const int cell = cellIndexFor(mvKeysUn[idx]);
-            mvXFeatMappingEligible[static_cast<size_t>(idx)] = 1;
-            occupiedCells[static_cast<size_t>(cell)] = 1;
-            selected++;
-        }
-
-        levelEligible[static_cast<size_t>(level)] = selected;
-    }
-
-    const int rawN = N;
-    const int eligibleBeforeCompact = static_cast<int>(std::count(mvXFeatMappingEligible.begin(),
-                                                                   mvXFeatMappingEligible.end(),
-                                                                   static_cast<unsigned char>(1)));
-    const bool compactEnabled = IsXFeatOrbShapedInputEnabled();
-    if(compactEnabled)
-        ApplyXFeatOrbShapedInputProfile();
-
-    if(ShouldPrintXFeatFrameDebug(mnId))
-    {
-        const int gridOccupied = static_cast<int>(std::count(occupiedCells.begin(), occupiedCells.end(), 1));
-        const double eligibleRatio = rawN > 0
-            ? static_cast<double>(eligibleBeforeCompact) / static_cast<double>(rawN)
-            : 0.0;
-        const double responseAvg = responseCount > 0 ? responseSum / static_cast<double>(responseCount) : 0.0;
-
-        auto joinInts = [](const std::vector<int>& values) -> std::string {
-            std::ostringstream oss;
-            for(size_t i = 0; i < values.size(); ++i)
-            {
-                if(i > 0)
-                    oss << ",";
-                oss << values[i];
-            }
-            return oss.str();
-        };
-
-        const std::ios::fmtflags oldFlags = std::cout.flags();
-        const std::streamsize oldPrecision = std::cout.precision();
-        std::cout << std::fixed << std::setprecision(6)
-                  << "[Frame][XFeatMappingProfile]"
-                  << " frame=" << mnId
-                  << " raw_kpts=" << rawN
-                  << " eligible_kpts=" << eligibleBeforeCompact
-                  << " eligible_ratio=" << eligibleRatio
-                  << " backend_raw_kpts=" << rawN
-                  << " backend_eligible_kpts=" << eligibleBeforeCompact
-                  << " backend_eligible_ratio=" << eligibleRatio
-                  << " compact_enabled=" << (compactEnabled ? 1 : 0)
-                  << " compact_kpts=" << N
-                  << " compact_ratio="
-                  << (rawN > 0 ? static_cast<double>(N) / static_cast<double>(rawN) : 0.0)
-                  << " level_raw=" << joinInts(levelRaw)
-                  << " level_eligible=" << joinInts(levelEligible)
-                  << " backend_level_raw=" << joinInts(levelRaw)
-                  << " backend_level_eligible=" << joinInts(levelEligible)
-                  << " grid_occupied=" << gridOccupied
-                  << " backend_grid_occupied=" << gridOccupied
-                  << " response_avg=" << responseAvg
-                  << std::endl;
-        std::cout.flags(oldFlags);
-        std::cout.precision(oldPrecision);
-    }
-}
-
-void Frame::ApplyXFeatOrbShapedInputProfile()
-{
-    const int rawN = N;
-    if(rawN <= 0 ||
-       mvXFeatMappingEligible.size() < static_cast<size_t>(rawN) ||
-       mvKeys.size() < static_cast<size_t>(rawN) ||
-       mvKeysUn.size() < static_cast<size_t>(rawN) ||
-       mDescriptors.empty() ||
-       mDescriptors.rows < rawN)
-    {
-        return;
-    }
-
-    std::vector<int> keep;
-    keep.reserve(static_cast<size_t>(rawN));
-    for(int i = 0; i < rawN; ++i)
-    {
-        if(mvXFeatMappingEligible[static_cast<size_t>(i)] != 0)
-            keep.push_back(i);
-    }
-
-    if(keep.empty() || static_cast<int>(keep.size()) >= rawN)
-        return;
-
-    auto compactKeyPoints = [&](const std::vector<cv::KeyPoint>& src) {
-        std::vector<cv::KeyPoint> dst;
-        dst.reserve(keep.size());
-        for(const int idx : keep)
-        {
-            if(idx >= 0 && idx < static_cast<int>(src.size()))
-                dst.push_back(src[static_cast<size_t>(idx)]);
-        }
-        return dst;
-    };
-
-    auto compactFloatVector = [&](const std::vector<float>& src, const float fallback) {
-        std::vector<float> dst;
-        dst.reserve(keep.size());
-        for(const int idx : keep)
-            dst.push_back(idx >= 0 && idx < static_cast<int>(src.size()) ? src[static_cast<size_t>(idx)] : fallback);
-        return dst;
-    };
-
-    auto compactByteVector = [&](const std::vector<unsigned char>& src, const unsigned char fallback) {
-        std::vector<unsigned char> dst;
-        dst.reserve(keep.size());
-        for(const int idx : keep)
-            dst.push_back(idx >= 0 && idx < static_cast<int>(src.size()) ? src[static_cast<size_t>(idx)] : fallback);
-        return dst;
-    };
-
-    cv::Mat compactDescriptors(static_cast<int>(keep.size()), mDescriptors.cols, mDescriptors.type());
-    for(size_t row = 0; row < keep.size(); ++row)
-        mDescriptors.row(keep[row]).copyTo(compactDescriptors.row(static_cast<int>(row)));
-
-    mvKeys = compactKeyPoints(mvKeys);
-    mvKeysUn = compactKeyPoints(mvKeysUn);
-    mvuRight = compactFloatVector(mvuRight, -1.0f);
-    mvDepth = compactFloatVector(mvDepth, -1.0f);
-    mvStereoBirthQuality = compactByteVector(mvStereoBirthQuality, kStereoBirthInvalid);
-    mvXFeatMappingProfileScore =
-        compactFloatVector(mvXFeatMappingProfileScore, -std::numeric_limits<float>::infinity());
-    mDescriptors = compactDescriptors;
-    N = static_cast<int>(keep.size());
-    mvXFeatMappingEligible.assign(static_cast<size_t>(N), 1);
 }
 
 bool Frame::isSet() const {
@@ -3375,7 +3087,6 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(nullptr));
     mvbOutlier = vector<bool>(N,false);
     mvXFeatMatchSource = vector<unsigned char>(N, 0);
-    mvXFeatLocalProjPool = vector<unsigned char>(N, 0);
 
     AssignFeaturesToGrid();
 

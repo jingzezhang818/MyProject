@@ -11,8 +11,27 @@
 - `SearchLocalPoints()` 保留保守 history gate。
 - `XFeatMatcher::SearchByProjection()` 保留 `local_mapping_triangulation && 0 < depth <= 10m && proj_norm > 1.0` outside gate。
 - Rover-style backend contract 默认关闭：默认应看到 `rover_backend=0`、`level_gate=1`；只有显式 `XFEAT_ENABLE_ROVER_BACKEND=1` 时才跑 Rover A/B。
-- `LocalMapping.cc` 中 mapping probation、pending tracklet、mapping feature budget/repeatability 等真实行为默认关闭；相关字段只作为诊断或历史记录，不应继续影响 `CreateNewMapPoints()`。
+- `LocalMapping.cc` 中 mapping probation、pending tracklet、mapping feature budget/repeatability、close/mid pair-selection 等实验行为已从源码主路径清理。
 - 保留结构诊断和 shadow diagnostics，但不要默认启用已经证明不稳定的真实行为。
+
+### 2026-06-08 代码收敛边界
+
+本次整理只收敛非 LightGlue 的实验行为。LG 相关路径暂不删除、不改默认逻辑，原因是 Rover-SLAM / SuperPoint-SLAM 都把 LG 用在 tracking、triangulation、relocalization、loop candidate 等 2D-2D matching 环节，后续仍可能借鉴其使用方式。
+
+本次实际收敛：
+
+- `LocalMapping.cc` 的 close/mid pair-selection 行为从默认开启改为默认关闭。该分支会真实改变 close/mid LMT 创建，不能再混入安全基线。
+- `XFEAT_ROVER_STYLE_FEATURES` 的非 LG 行为影响已移除。Projection matcher 只受 `XFEAT_ENABLE_ROVER_BACKEND` / `XFEAT_PROJ_DISABLE_LEVEL_GATE` 这类显式 A/B 控制。
+- `XFeatMappingProfile / XFEAT_ORB_SHAPED_INPUT` 主路径已移除，包括 `mvXFeatMappingEligible / mvXFeatMappingProfileScore`、Frame compact、CreateKF backend eligible 统计和 CreateNewMapPoints profile fallback。
+- `pending mapping tracklet` 与 `mapping probation` 实验行为已从源码主路径清理：不再保留 MapPoint probation 状态、pending tracklet 状态、probation covis vote、probation local-proj pool 或对应永远为 0 的日志字段。
+- `SearchLocalPoints()` 的 core/expansion pool 包装已从源码主路径清理：local projection 恢复为单一候选集合投影，`LocalProjPoolError` 和 `core_pool_* / expansion_pool_*` 当前诊断字段不再输出。
+- `LocalMapping::CreateNewMapPoints()` 中默认关闭的 mapping feature budget / repeatability / close-pair selection 分支已删除，`[LocalMapping][TriangCreate]` 与 `[LocalMapping][KFCreateStructure]` 不再输出这些永远为 0 或历史实验字段。
+- `Tracking::UpdateLocalKeyFrames()` 的 voted-KF soft cap / visibility hybrid selection 已从真实行为回退：所有 vote KFs 按 ORB-SLAM 原始语义进入 local map，visibility/budget/contribution 只保留为 deep 诊断输入。
+- LG local verification、motion LG、triangulation LG 等代码路径未在本轮改动。
+
+仍建议后续清理但本轮未删的历史代码：
+
+- 已证明无收益的 heavy shadow 诊断：应继续压到 `XFEAT_DIAG_DEEP=1` 或后续删除。
 
 ## 当前新增诊断：close/mid triangulation input failure
 
@@ -1490,3 +1509,35 @@ TriangInput 结论：
 - 这轮修改是有效的 hygiene：它修正了 weak `top1` pair 先占槽的问题，且没有伤 tracking。
 - 但它没有解决根因：`5_10m` close/mid LMT 的 two-view triangulation 仍受 parallax / baseline-depth trade-off 限制；后续 `local_proj + LMT` 仍有约 `20%` outlier 和接近 `2px` 的 inlier residual。
 - 不建议继续围绕 pair score 微调。若保留该版本，应把它视为安全小修，而不是主线突破。
+
+## 代码收敛：`SearchLocalPoints` 日志瘦身
+
+背景：
+
+- 在收敛安全基线后，`experiment_logs/Stereo/EuRoC/V1_01_easy/run_EuRoC_V1_01_easy_stereo_0.032709.log` 仍显示 `[SearchLocalPoints]` 单行包含大量历史实验字段。
+- 其中 `lg_local_*`、`ref_fallback_shadow_*`、`refassoc_matcher_*`、`local_kfs_voted_budget_*`、`local_proj_triang_0_10_proj_edge_*` 等字段在默认命令下长期为 0。
+- 这些字段不改变行为，但会显著降低日志可读性，并容易让后续分析重新绕回已关闭的实验线。
+
+修改：
+
+- 不改 SLAM 行为，不改 LightGlue 路径，不改 local projection 决策。
+- 将 `[SearchLocalPoints]` 输出拆成基础字段与可选字段组。
+- 基础字段继续默认输出：
+  - `local_mps / already_matched / local_found_ratio_* / local_kfs_voted_candidates / local_kfs_voted_kept`
+  - `local_in_frustum / local_track_in_view`
+  - `local_proj_close_tracking_stereo_*`
+  - `nToMatch / th / mode / th_high / matches`
+- 以下字段组仅在对应计数非零、功能启用，或 `XFEAT_DIAG_DEEP=1` 时输出：
+  - found-ratio per-source breakdown
+  - voted-KF budget / visibility shadow
+  - repeatability vote shadow
+  - close/mid LMT history / visibility-history / provenance priority
+  - projection-edge shadow / outside reject details
+  - reference association matcher / fallback shadow
+  - LightGlue local verification fields
+
+验收：
+
+- `git diff --check -- src/Tracking.cc` 通过。
+- 预期默认 EuRoC/SePT debug 运行仍保留核心结构指标，但 `[SearchLocalPoints]` 不再输出大量 disabled/zero 实验字段。
+- 如需完整历史诊断，显式增加 `XFEAT_DIAG_DEEP=1`。

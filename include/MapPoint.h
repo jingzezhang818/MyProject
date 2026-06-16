@@ -245,13 +245,6 @@ public:
                                   const float depth,
                                   const unsigned char stereoBirthQuality);
     bool HasMappingFeatureQuality() const;
-    void SetMappingProbation(const bool active,
-                             const long unsigned int startKfId,
-                             const float depthAtCreation);
-    bool IsMappingProbation() const;
-    bool WasMappingProbation() const;
-    bool IsMappingProbationPromoted() const;
-    bool TryPromoteMappingProbation(const long unsigned int currentKfId);
     void RecordLocalProjectionAttempt(const long unsigned int frameId);
     void RecordLocalProjectionMatch(const long unsigned int frameId);
     void RecordLocalProjectionOutcome(const long unsigned int frameId, const bool bInlier);
@@ -296,12 +289,6 @@ public:
     float mMappingFeatureResponse;
     float mMappingFeatureDepth;
     unsigned char mMappingFeatureStereoBirthQuality;
-    bool mbMappingProbation = false;
-    bool mbMappingProbationEver = false;
-    bool mbMappingProbationPromoted = false;
-    long unsigned int mnMappingProbationStartKF = 0;
-    long unsigned int mnMappingProbationPromotedKF = 0;
-    float mMappingProbationDepthAtCreation = -1.0f;
     int mLocalProjAttemptCount;
     int mLocalProjMatchCount;
     int mLocalProjOptInlierCount;
