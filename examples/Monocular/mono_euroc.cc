@@ -92,7 +92,7 @@ int main(int argc, char **argv)
 
         // Main loop
         cv::Mat im;
-        int proccIm = 0; 
+        int proccIm = 0;
         for(int ni=0; ni<nImages[seq]; ni++, proccIm++)
         {
 
@@ -108,7 +108,8 @@ int main(int argc, char **argv)
             }
 
             if(imageScale != 1.f)
-            {
+            {.
+
 #ifdef REGISTER_TIMES
     #ifdef COMPILEDWITHC11
                 std::chrono::steady_clock::time_point t_Start_Resize = std::chrono::steady_clock::now();

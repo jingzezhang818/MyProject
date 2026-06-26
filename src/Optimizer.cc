@@ -167,8 +167,7 @@ bool ShouldPrintXFeatDebug(const long unsigned int frameId)
 
 bool ShouldPrintPoseOptResidualCalib(const long unsigned int frameId)
 {
-    return IsEnvFlagEnabled("XFEAT_DEBUG") &&
-           IsEnvFlagEnabled("XFEAT_DIAG_FEATURE_DISTRIBUTION") &&
+    return IsEnvFlagEnabled("XFEAT_DIAG_MEASUREMENT_CALIB") &&
            (frameId == 0 || (frameId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0);
 }
 

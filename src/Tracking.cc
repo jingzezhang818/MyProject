@@ -101,6 +101,18 @@ namespace
         return enabled;
     }
 
+    bool IsXFeatMeasurementCalibDiagEnabled()
+    {
+        static const bool enabled = IsEnvFlagEnabled("XFEAT_DIAG_MEASUREMENT_CALIB");
+        return enabled;
+    }
+
+    bool ShouldPrintXFeatMeasurementCalib(const long unsigned int frameId)
+    {
+        return IsXFeatMeasurementCalibDiagEnabled() &&
+               (frameId % static_cast<long unsigned int>(GetXFeatFeatureDiagInterval())) == 0;
+    }
+
     int GetXFeatFeatureDiagInterval()
     {
         //诊断: 每隔多少帧打印一次分布日志；默认每帧打印。
@@ -253,6 +265,12 @@ namespace
         return enabled;
     }
 
+    bool IsXFeatKFInsertGuardEnabled()
+    {
+        static const bool enabled = IsEnvFlagEnabled("XFEAT_KF_INSERT_GUARD");
+        return enabled;
+    }
+
     int GetXFeatMotionWeakMinInliers()
     {
         static const int value = GetEnvIntInRange("XFEAT_MOTION_WEAK_MIN_INLIERS", 80, 0, 10000);
@@ -286,6 +304,33 @@ namespace
     float GetXFeatMotionGuardMinFoundRatio()
     {
         static const float value = GetEnvFloat("XFEAT_MOTION_GUARD_MIN_FOUND_RATIO", 0.35f, 0.0f, 1.0f);
+        return value;
+    }
+
+    bool IsXFeatLocalMapCoreFirstEnabled()
+    {
+        static const bool enabled = IsEnvFlagEnabled("XFEAT_LOCALMAP_CORE_FIRST");
+        return enabled;
+    }
+
+    int GetXFeatLocalMapCoreFirstMinPrior()
+    {
+        static const int value =
+            GetEnvIntInRange("XFEAT_LOCALMAP_CORE_FIRST_MIN_PRIOR", 120, 0, 10000);
+        return value;
+    }
+
+    int GetXFeatLocalMapCoreFirstMinCoreMatches()
+    {
+        static const int value =
+            GetEnvIntInRange("XFEAT_LOCALMAP_CORE_FIRST_MIN_CORE_MATCHES", 40, 0, 10000);
+        return value;
+    }
+
+    int GetXFeatLocalMapCoreFirstMinTotalMatches()
+    {
+        static const int value =
+            GetEnvIntInRange("XFEAT_LOCALMAP_CORE_FIRST_MIN_TOTAL_MATCHES", 160, 0, 10000);
         return value;
     }
 
@@ -2331,170 +2376,10 @@ namespace
            << " depth_avg=" << depthAvg;
     }
 
-    struct MotionLightGlueGeometryStats
-    {
-        int total = 0;
-        int inlier = 0;
-        int outlier = 0;
-        int errValid = 0;
-        int gt10 = 0;
-        int gt20 = 0;
-        int gt50 = 0;
-        int inlierGt10 = 0;
-        int inlierGt20 = 0;
-        int inlierGt50 = 0;
-        int outlierGt10 = 0;
-        int outlierGt20 = 0;
-        int outlierGt50 = 0;
-        int depthValid = 0;
-        int closeDepth = 0;
-        int depthGt50 = 0;
-        int depthGt100 = 0;
-        std::vector<float> errSamples;
-        std::vector<float> inlierErrSamples;
-        std::vector<float> outlierErrSamples;
-        std::vector<float> depthSamples;
-        std::vector<float> inlierDepthSamples;
-        std::vector<float> outlierDepthSamples;
-    };
-
-    void AccumulateMotionLightGlueGeometry(MotionLightGlueGeometryStats& stats,
-                                           const float reprojErr,
-                                           const float depth,
-                                           const bool isInlier,
-                                           const float closeDepthThreshold)
-    {
-        stats.total++;
-        if(isInlier)
-            stats.inlier++;
-        else
-            stats.outlier++;
-
-        if(std::isfinite(reprojErr))
-        {
-            stats.errValid++;
-            stats.errSamples.push_back(reprojErr);
-            if(reprojErr > 10.0f)
-                stats.gt10++;
-            if(reprojErr > 20.0f)
-                stats.gt20++;
-            if(reprojErr > 50.0f)
-                stats.gt50++;
-
-            if(isInlier)
-            {
-                stats.inlierErrSamples.push_back(reprojErr);
-                if(reprojErr > 10.0f)
-                    stats.inlierGt10++;
-                if(reprojErr > 20.0f)
-                    stats.inlierGt20++;
-                if(reprojErr > 50.0f)
-                    stats.inlierGt50++;
-            }
-            else
-            {
-                stats.outlierErrSamples.push_back(reprojErr);
-                if(reprojErr > 10.0f)
-                    stats.outlierGt10++;
-                if(reprojErr > 20.0f)
-                    stats.outlierGt20++;
-                if(reprojErr > 50.0f)
-                    stats.outlierGt50++;
-            }
-        }
-
-        if(std::isfinite(depth) && depth > 0.0f)
-        {
-            stats.depthValid++;
-            stats.depthSamples.push_back(depth);
-            if(depth < closeDepthThreshold)
-                stats.closeDepth++;
-            if(depth > 50.0f)
-                stats.depthGt50++;
-            if(depth > 100.0f)
-                stats.depthGt100++;
-
-            if(isInlier)
-                stats.inlierDepthSamples.push_back(depth);
-            else
-                stats.outlierDepthSamples.push_back(depth);
-        }
-    }
-
-    void LogMotionLightGlueGeometryDiagnostics(const Frame& F,
-                                               const std::vector<unsigned char>& lgAssigned,
-                                               const std::vector<float>& initialProjErr,
-                                               const std::vector<float>& initialDepth,
-                                               const float closeDepthThreshold)
-    {
-        MotionLightGlueGeometryStats stats;
-        const size_t n = std::min({F.mvpMapPoints.size(),
-                                   F.mvbOutlier.size(),
-                                   lgAssigned.size(),
-                                   initialProjErr.size(),
-                                   initialDepth.size()});
-        for(size_t i = 0; i < n; ++i)
-        {
-            if(!lgAssigned[i] || !F.mvpMapPoints[i])
-                continue;
-            AccumulateMotionLightGlueGeometry(stats,
-                                              initialProjErr[i],
-                                              initialDepth[i],
-                                              !F.mvbOutlier[i],
-                                              closeDepthThreshold);
-        }
-
-        std::vector<float> errSamples = stats.errSamples;
-        std::vector<float> inlierErrSamples = stats.inlierErrSamples;
-        std::vector<float> outlierErrSamples = stats.outlierErrSamples;
-        std::vector<float> depthSamples = stats.depthSamples;
-        std::vector<float> inlierDepthSamples = stats.inlierDepthSamples;
-        std::vector<float> outlierDepthSamples = stats.outlierDepthSamples;
-
-        const double outlierRatio = stats.total > 0
-            ? static_cast<double>(stats.outlier) / static_cast<double>(stats.total)
-            : 0.0;
-
-        std::cout << "[TrackMotion][LGGeom]"
-                  << " frame_id=" << F.mnId
-                  << " total=" << stats.total
-                  << " inlier=" << stats.inlier
-                  << " outlier=" << stats.outlier
-                  << " outlier_ratio=" << outlierRatio
-                  << " proj_err_valid=" << stats.errValid
-                  << " proj_err_p50=" << (errSamples.empty() ? 0.0f : DepthPercentile(errSamples, 0.50f))
-                  << " proj_err_p90=" << (errSamples.empty() ? 0.0f : DepthPercentile(errSamples, 0.90f))
-                  << " proj_err_p99=" << (errSamples.empty() ? 0.0f : DepthPercentile(errSamples, 0.99f))
-                  << " proj_err_gt10=" << stats.gt10
-                  << " proj_err_gt20=" << stats.gt20
-                  << " proj_err_gt50=" << stats.gt50
-                  << " inlier_proj_err_p90=" << (inlierErrSamples.empty() ? 0.0f : DepthPercentile(inlierErrSamples, 0.90f))
-                  << " outlier_proj_err_p90=" << (outlierErrSamples.empty() ? 0.0f : DepthPercentile(outlierErrSamples, 0.90f))
-                  << " inlier_gt10=" << stats.inlierGt10
-                  << " inlier_gt20=" << stats.inlierGt20
-                  << " inlier_gt50=" << stats.inlierGt50
-                  << " outlier_gt10=" << stats.outlierGt10
-                  << " outlier_gt20=" << stats.outlierGt20
-                  << " outlier_gt50=" << stats.outlierGt50
-                  << " depth_valid=" << stats.depthValid
-                  << " close_depth=" << stats.closeDepth
-                  << " depth_gt50=" << stats.depthGt50
-                  << " depth_gt100=" << stats.depthGt100
-                  << " depth_p50=" << (depthSamples.empty() ? 0.0f : DepthPercentile(depthSamples, 0.50f))
-                  << " depth_p90=" << (depthSamples.empty() ? 0.0f : DepthPercentile(depthSamples, 0.90f))
-                  << " inlier_depth_p50=" << (inlierDepthSamples.empty() ? 0.0f : DepthPercentile(inlierDepthSamples, 0.50f))
-                  << " inlier_depth_p90=" << (inlierDepthSamples.empty() ? 0.0f : DepthPercentile(inlierDepthSamples, 0.90f))
-                  << " outlier_depth_p50=" << (outlierDepthSamples.empty() ? 0.0f : DepthPercentile(outlierDepthSamples, 0.50f))
-                  << " outlier_depth_p90=" << (outlierDepthSamples.empty() ? 0.0f : DepthPercentile(outlierDepthSamples, 0.90f))
-                  << std::endl;
-    }
-
     void LogTrackLocalMapConstraintSourceDiagnostics(const Frame& F)
     {
         static constexpr int kNumSources = 8;
-        static constexpr int kNumDepthBins = 6;
         ReprojectionConstraintStats bySource[kNumSources];
-        ReprojectionConstraintStats bySourceDepth[kNumSources][kNumDepthBins];
 
         const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
         for(size_t i = 0; i < n; ++i)
@@ -2514,7 +2399,6 @@ namespace
             ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
             const bool isInlier = !F.mvbOutlier[i];
             AccumulateReprojectionConstraint(bySource[source], reprojErr, depth, isInlier);
-            AccumulateReprojectionConstraint(bySourceDepth[source][DepthBinIndex(depth)], reprojErr, depth, isInlier);
         }
 
         const std::ios::fmtflags oldFlags = std::cout.flags();
@@ -2531,35 +2415,16 @@ namespace
             std::cout << std::endl;
         }
 
-        if(IsXFeatFeatureDiagEnabled())
-        {
-            for(int source = 0; source < kNumSources; ++source)
-            {
-                for(int bin = 0; bin < kNumDepthBins; ++bin)
-                {
-                    if(bySourceDepth[source][bin].total <= 0)
-                        continue;
-                    std::cout << "[TrackLocalMap][SourceDepthError]"
-                              << " frame_id=" << F.mnId
-                              << " source=" << XFeatMatchSourceName(static_cast<unsigned char>(source))
-                              << " depth_bin=" << DepthBinName(bin);
-                    AppendReprojectionConstraintStats(std::cout, bySourceDepth[source][bin]);
-                    std::cout << std::endl;
-                }
-            }
-        }
         std::cout.flags(oldFlags);
         std::cout.precision(oldPrecision);
     }
 
     void LogTrackLocalMapMapPointSourceDiagnostics(const Frame& F)
     {
-        if(!IsXFeatFeatureDiagEnabled())
+        if(!IsXFeatDeepDiagEnabled())
             return;
 
-        static constexpr int kNumDepthBins = 6;
         ReprojectionConstraintStats bySource[kMapPointCreationSourceCount];
-        ReprojectionConstraintStats bySourceDepth[kMapPointCreationSourceCount][kNumDepthBins];
 
         const size_t n = std::min(F.mvpMapPoints.size(), F.mvbOutlier.size());
         for(size_t i = 0; i < n; ++i)
@@ -2576,7 +2441,6 @@ namespace
             ComputeFrameReprojectionError(F, static_cast<int>(i), pMP, reprojErr, depth);
             const bool isInlier = !F.mvbOutlier[i];
             AccumulateReprojectionConstraint(bySource[sourceIdx], reprojErr, depth, isInlier);
-            AccumulateReprojectionConstraint(bySourceDepth[sourceIdx][DepthBinIndex(depth)], reprojErr, depth, isInlier);
         }
 
         const std::ios::fmtflags oldFlags = std::cout.flags();
@@ -2592,22 +2456,6 @@ namespace
                       << " source=" << MapPointCreationSourceName(source);
             AppendReprojectionConstraintStats(std::cout, bySource[sourceIdx]);
             std::cout << std::endl;
-        }
-
-        for(size_t sourceIdx = 0; sourceIdx < kMapPointCreationSourceCount; ++sourceIdx)
-        {
-            const MapPoint::CreationSource source = static_cast<MapPoint::CreationSource>(sourceIdx);
-            for(int bin = 0; bin < kNumDepthBins; ++bin)
-            {
-                if(bySourceDepth[sourceIdx][bin].total <= 0)
-                    continue;
-                std::cout << "[TrackLocalMap][MPSourceDepthError]"
-                          << " frame_id=" << F.mnId
-                          << " source=" << MapPointCreationSourceName(source)
-                          << " depth_bin=" << DepthBinName(bin);
-                AppendReprojectionConstraintStats(std::cout, bySourceDepth[sourceIdx][bin]);
-                std::cout << std::endl;
-            }
         }
         std::cout.flags(oldFlags);
         std::cout.precision(oldPrecision);
@@ -2664,7 +2512,7 @@ namespace
 
     void LogTrackLocalMapTriangulationQualityDiagnostics(const Frame& F)
     {
-        if(!IsXFeatFeatureDiagEnabled())
+        if(!IsXFeatDeepDiagEnabled())
             return;
 
         static constexpr int kNumDepthBins = 6;
@@ -3861,7 +3709,7 @@ namespace
 
     void LogTrackLocalMapXFeatMeasurementCalibDiagnostics(const Frame& F)
     {
-        if(!IsXFeatFeatureDiagEnabled())
+        if(!IsXFeatMeasurementCalibDiagEnabled())
             return;
         if(F.mDescriptors.empty() || F.mDescriptors.type() != CV_32F)
             return;
@@ -8619,7 +8467,6 @@ void Tracking::Track()
             const bool bUseORBDiag = (std::getenv("USE_ORB") != nullptr);
             LogFeatureDistributionDiagnostics(mCurrentFrame, mState, bOK, bUseORBDiag, mnMatchesInliers);
         }
-
         // Reset if the camera get lost soon after initialization
         if(mState==LOST)
         {
@@ -9805,36 +9652,6 @@ bool Tracking::TrackWithMotionModel()
             return false;
     }
 
-    StereoDepthConstraintStats motionStereoBeforeOpt;
-    AccumulateStereoDepthConstraintStats(mCurrentFrame, mThDepth, false, motionStereoBeforeOpt);
-    std::vector<unsigned char> lgMotionGeomAssigned;
-    std::vector<float> lgMotionInitialProjErr;
-    std::vector<float> lgMotionInitialDepth;
-    if(bUsedLightGlueMotion)
-    {
-        lgMotionGeomAssigned.assign(static_cast<size_t>(mCurrentFrame.N), 0);
-        lgMotionInitialProjErr.assign(static_cast<size_t>(mCurrentFrame.N),
-                                      std::numeric_limits<float>::quiet_NaN());
-        lgMotionInitialDepth.assign(static_cast<size_t>(mCurrentFrame.N),
-                                    std::numeric_limits<float>::quiet_NaN());
-        const size_t n = std::min({mCurrentFrame.mvpMapPoints.size(),
-                                   mCurrentFrame.mvXFeatMatchSource.size(),
-                                   lgMotionGeomAssigned.size()});
-        for(size_t i = 0; i < n; ++i)
-        {
-            MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
-            if(!pMP || mCurrentFrame.mvXFeatMatchSource[i] != kXFeatMatchMotionLightGlue)
-                continue;
-
-            lgMotionGeomAssigned[i] = 1;
-            float reprojErr = std::numeric_limits<float>::quiet_NaN();
-            float depth = std::numeric_limits<float>::quiet_NaN();
-            ComputeFrameReprojectionError(mCurrentFrame, static_cast<int>(i), pMP, reprojErr, depth);
-            lgMotionInitialProjErr[i] = reprojErr;
-            lgMotionInitialDepth[i] = depth;
-        }
-    }
-
     // Optimize frame pose with all matches
     Optimizer::PoseOptimization(&mCurrentFrame);
     //调试: PoseOptimization 后的匹配统计。
@@ -9851,8 +9668,6 @@ bool Tracking::TrackWithMotionModel()
     const float outlierRatio = assoc_cnt > 0
         ? static_cast<float>(assoc_cnt - inlier_cnt) / static_cast<float>(assoc_cnt)
         : 0.0f;
-    StereoDepthConstraintStats motionStereoAfterOpt;
-    AccumulateStereoDepthConstraintStats(mCurrentFrame, mThDepth, true, motionStereoAfterOpt);
 
     if(bUsedLightGlueMotion)
     {
@@ -9912,18 +9727,6 @@ bool Tracking::TrackWithMotionModel()
                   << " post_pose_inliers=" << inlier_cnt
                   << " outlier_ratio=" << outlierRatio
                   << std::endl;
-        std::cout << std::fixed << std::setprecision(6)
-                  << "[TrackMotion][StereoDepth]"
-                  << " frame_id=" << mCurrentFrame.mnId
-                  << " mThDepth=" << mThDepth;
-        AppendStereoDepthConstraintStats(std::cout, "before", motionStereoBeforeOpt);
-        AppendStereoDepthConstraintStats(std::cout, "after", motionStereoAfterOpt);
-        std::cout << std::endl;
-        LogMotionLightGlueGeometryDiagnostics(mCurrentFrame,
-                                              lgMotionGeomAssigned,
-                                              lgMotionInitialProjErr,
-                                              lgMotionInitialDepth,
-                                              mThDepth);
         std::cout.flags(oldFlags);
         std::cout.precision(oldPrecision);
     }
@@ -10106,23 +9909,22 @@ bool Tracking::TrackLocalMap()
     {
         LogTrackLocalMapConstraintSourceDiagnostics(mCurrentFrame);
         LogTrackLocalMapJointSourceDiagnostics(mCurrentFrame);
-        LogTrackLocalMapCloseReuseOutcomeDiagnostics(mCurrentFrame);
-        LogTrackLocalMapCloseReuseContributionOutcomeDiagnostics(mCurrentFrame, mmLocalMPProvenance);
-        LogTrackLocalMapCloseReuseCohortAliveDiagnostics(mCurrentFrame, mpAtlas->GetCurrentMap());
-        LogTrackLocalMapMappingRepeatabilityCohortDiagnostics(mCurrentFrame, mpAtlas->GetCurrentMap());
-        LogTrackLocalMapConstraintGridDiagnostics(mCurrentFrame);
-        LogTrackLocalMapInlierGeometryDiagnostics(mCurrentFrame);
-        LogTrackLocalMapMappingFeatureOutcomeDiagnostics(mCurrentFrame);
         LogTrackLocalMapInlierMix(mCurrentFrame);
 
         if(IsXFeatDeepDiagEnabled())
         {
+            LogTrackLocalMapCloseReuseOutcomeDiagnostics(mCurrentFrame);
+            LogTrackLocalMapCloseReuseContributionOutcomeDiagnostics(mCurrentFrame, mmLocalMPProvenance);
+            LogTrackLocalMapCloseReuseCohortAliveDiagnostics(mCurrentFrame, mpAtlas->GetCurrentMap());
+            LogTrackLocalMapMappingRepeatabilityCohortDiagnostics(mCurrentFrame, mpAtlas->GetCurrentMap());
+            LogTrackLocalMapConstraintGridDiagnostics(mCurrentFrame);
+            LogTrackLocalMapInlierGeometryDiagnostics(mCurrentFrame);
+            LogTrackLocalMapMappingFeatureOutcomeDiagnostics(mCurrentFrame);
             LogTrackLocalMapLocalProjMatcherQualityFineDiagnostics(mCurrentFrame);
             LogTrackLocalMapMapPointSourceDiagnostics(mCurrentFrame);
             LogTrackLocalMapTriangulationQualityDiagnostics(mCurrentFrame);
             LogTrackLocalMapTriangulationMultiViewDiagnostics(mCurrentFrame);
             LogTrackLocalMapTriangulationLocalProjHistoryDiagnostics(mCurrentFrame);
-            LogTrackLocalMapXFeatMeasurementCalibDiagnostics(mCurrentFrame);
             LogTrackLocalMapLocalProjMatcherQualityDiagnostics(mCurrentFrame);
             LogTrackLocalMapLocalProjPoseContextDiagnostics(mCurrentFrame,
                                                             assoc_before_search,
@@ -10137,6 +9939,10 @@ bool Tracking::TrackLocalMap()
             LogTrackLocalMapLocalMapProvenanceDiagnostics(mCurrentFrame, mmLocalMPProvenance);
             LogTrackLocalMapLocalProjPriorityDiagnostics(mCurrentFrame, mmLocalMPProvenance);
         }
+    }
+    if(ShouldPrintXFeatMeasurementCalib(mCurrentFrame.mnId))
+    {
+        LogTrackLocalMapXFeatMeasurementCalibDiagnostics(mCurrentFrame);
     }
     RecordTrackLocalMapTriangulationLocalProjHistoryOutcomes(mCurrentFrame);
 
@@ -10620,338 +10426,67 @@ bool Tracking::NeedNewKeyFrame()
 
     const XFeatKFGuardMetrics xfeatKfGuard = ComputeXFeatKFGuardMetrics();
 
-    auto LogKFDecision = [&](const bool needNewKF, const char* decision)
+    const bool bXFeatKFInsertGuardEnabled = IsXFeatKFInsertGuardEnabled();
+    const bool bXFeatKFInsertGuardEligible =
+        bXFeatKFInsertGuardEnabled && xfeatKfGuard.eligible;
+    const bool c1cNoClose =
+        mSensor!=System::MONOCULAR &&
+        mSensor!=System::IMU_MONOCULAR &&
+        mSensor!=System::IMU_STEREO &&
+        mSensor!=System::IMU_RGBD &&
+        (mnMatchesInliers < nRefMatches * 0.25);
+    const bool c2NoClose =
+        (mnMatchesInliers < nRefMatches * thRefRatio) && mnMatchesInliers > 15;
+    const bool bNeedNewKFWithoutClose =
+        (((c1a || c1b || c1cNoClose) && c2NoClose) || c3 || c4);
+    const bool bCloseOnlyInsertion =
+        bOriginalNeedNewKF && bNeedToInsertClose && !bNeedNewKFWithoutClose;
+    bool bCloseGuardSuppress = false;
+    const char* closeGuardReason = "disabled";
+    if(!bXFeatKFInsertGuardEnabled)
     {
-        const bool bDetailedNoveltyDiag = IsXFeatFeatureDiagEnabled();
-        const bool bPrintInsertionEvent =
-            IsXFeatDebugEnabled() && bDetailedNoveltyDiag && needNewKF;
-        if(!ShouldPrintXFeatDebug(mCurrentFrame.mnId) && !bPrintInsertionEvent)
+        closeGuardReason = "disabled";
+    }
+    else if(!bXFeatKFInsertGuardEligible)
+    {
+        closeGuardReason = "not_eligible";
+    }
+    else if(!bCloseOnlyInsertion)
+    {
+        closeGuardReason = "not_close_only";
+    }
+    else if(c1a)
+    {
+        closeGuardReason = "max_frame";
+    }
+    else if(xfeatKfGuard.weakSupport)
+    {
+        closeGuardReason = "weak_support";
+    }
+    else if(!xfeatKfGuard.stableSupportOk)
+    {
+        closeGuardReason = "unstable_support";
+    }
+    else if(xfeatKfGuard.closeInsert)
+    {
+        closeGuardReason = "novel_close";
+    }
+    else
+    {
+        bCloseGuardSuppress = true;
+        closeGuardReason = "stable_close_only";
+    }
+
+    auto LogKFDecision = [&](const bool needNewKF, const char* decision, const bool forceLog = false)
+    {
+        if(!needNewKF && !forceLog)
+            return;
+        if(!ShouldPrintXFeatDebug(mCurrentFrame.mnId))
             return;
         const long int framesSinceLastKF =
             mCurrentFrame.mnId >= mnLastKeyFrameId
                 ? static_cast<long int>(mCurrentFrame.mnId - mnLastKeyFrameId)
                 : -1;
-
-        if(bDetailedNoveltyDiag)
-        {
-            constexpr int kBridgeDepthBinCount = 2;
-            constexpr int kCloseFeatureNoMPSource = 0;
-            constexpr int kCloseFeatureAllSource =
-                static_cast<int>(kMapPointCreationSourceCount) + 1;
-            constexpr int kCloseFeatureSourceCount = kCloseFeatureAllSource + 1;
-            constexpr int kReferenceAllSource =
-                static_cast<int>(kMapPointCreationSourceCount);
-            constexpr int kReferenceSourceCount = kReferenceAllSource + 1;
-            constexpr int kReferenceDepthBinCount = 4;
-
-            struct CloseFeatureBridgeStats
-            {
-                int features = 0;
-                int noMP = 0;
-                int badMP = 0;
-                int associatedMP = 0;
-                int inlier = 0;
-                int outlier = 0;
-                int stableInlier = 0;
-                int lowObsInlier = 0;
-                int lowFoundInlier = 0;
-                int localProjInlier = 0;
-                int motionInlier = 0;
-            };
-
-            struct ReferenceReuseBridgeStats
-            {
-                int refSlots = 0;
-                int predictedVisible = 0;
-                int currentAssoc = 0;
-                int currentInlier = 0;
-                int stableCurrentInlier = 0;
-                int localProjInlier = 0;
-                int motionInlier = 0;
-            };
-
-            auto CloseBridgeDepthBin = [](const float depth) -> int
-            {
-                if(!std::isfinite(depth) || depth <= 0.0f || depth > 10.0f)
-                    return -1;
-                return depth <= 5.0f ? 0 : 1;
-            };
-            auto CloseBridgeDepthName = [](const int bin) -> const char*
-            {
-                return bin == 0 ? "0_5" : "5_10";
-            };
-            auto ReferenceBridgeDepthBin = [](const float depth) -> int
-            {
-                if(!std::isfinite(depth) || depth <= 0.0f)
-                    return 3;
-                if(depth <= 5.0f)
-                    return 0;
-                if(depth <= 10.0f)
-                    return 1;
-                return 2;
-            };
-            auto ReferenceBridgeDepthName = [](const int bin) -> const char*
-            {
-                switch(bin)
-                {
-                    case 0: return "0_5";
-                    case 1: return "5_10";
-                    case 2: return "10p";
-                    default: return "invalid";
-                }
-            };
-            auto CloseFeatureSourceName = [&](const int sourceBin) -> const char*
-            {
-                if(sourceBin == kCloseFeatureNoMPSource)
-                    return "none";
-                if(sourceBin == kCloseFeatureAllSource)
-                    return "all";
-                return MapPointCreationSourceName(
-                    static_cast<MapPoint::CreationSource>(sourceBin - 1));
-            };
-            auto ReferenceSourceName = [&](const int sourceBin) -> const char*
-            {
-                if(sourceBin == kReferenceAllSource)
-                    return "all";
-                return MapPointCreationSourceName(
-                    static_cast<MapPoint::CreationSource>(sourceBin));
-            };
-            auto IsStableMapPoint = [](MapPoint* pMP) -> bool
-            {
-                if(!pMP || pMP->isBad() || pMP->Observations() < 3)
-                    return false;
-                const float foundRatio = pMP->GetFoundRatio();
-                return std::isfinite(foundRatio) && foundRatio >= 0.35f;
-            };
-
-            CloseFeatureBridgeStats closeFeatureStats[kCloseFeatureSourceCount][kBridgeDepthBinCount] = {};
-            auto AccumulateCloseFeature =
-                [&](CloseFeatureBridgeStats& stats,
-                    MapPoint* pMP,
-                    const bool bInlier,
-                    const unsigned char matchSource)
-            {
-                ++stats.features;
-                if(!pMP)
-                {
-                    ++stats.noMP;
-                    return;
-                }
-                if(pMP->isBad())
-                {
-                    ++stats.badMP;
-                    return;
-                }
-                ++stats.associatedMP;
-                if(!bInlier)
-                {
-                    ++stats.outlier;
-                    return;
-                }
-                ++stats.inlier;
-                const int observations = pMP->Observations();
-                const float foundRatio = pMP->GetFoundRatio();
-                if(IsStableMapPoint(pMP))
-                    ++stats.stableInlier;
-                if(observations < 3)
-                    ++stats.lowObsInlier;
-                if(!std::isfinite(foundRatio) || foundRatio < 0.35f)
-                    ++stats.lowFoundInlier;
-                if(matchSource == kXFeatMatchLocalProjection ||
-                   matchSource == kXFeatMatchLocalProjectionLightGlueVerified)
-                {
-                    ++stats.localProjInlier;
-                }
-                if(matchSource == kXFeatMatchMotionProjection ||
-                   matchSource == kXFeatMatchMotionLightGlue)
-                {
-                    ++stats.motionInlier;
-                }
-            };
-
-            const int nLeft =
-                mCurrentFrame.Nleft == -1 ? mCurrentFrame.N : mCurrentFrame.Nleft;
-            const int nFeatureDepths =
-                std::min(nLeft, static_cast<int>(mCurrentFrame.mvDepth.size()));
-            for(int i = 0; i < nFeatureDepths; ++i)
-            {
-                const int depthBin = CloseBridgeDepthBin(mCurrentFrame.mvDepth[static_cast<size_t>(i)]);
-                if(depthBin < 0)
-                    continue;
-                MapPoint* pMP =
-                    i < static_cast<int>(mCurrentFrame.mvpMapPoints.size())
-                        ? mCurrentFrame.mvpMapPoints[static_cast<size_t>(i)]
-                        : nullptr;
-                const bool bInlier =
-                    pMP &&
-                    (i >= static_cast<int>(mCurrentFrame.mvbOutlier.size()) ||
-                     !mCurrentFrame.mvbOutlier[static_cast<size_t>(i)]);
-                const unsigned char matchSource =
-                    i < static_cast<int>(mCurrentFrame.mvXFeatMatchSource.size())
-                        ? mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)]
-                        : kXFeatMatchUnknown;
-                const int sourceBin = pMP
-                    ? 1 + static_cast<int>(MapPointCreationSourceIndex(pMP->GetCreationSource()))
-                    : kCloseFeatureNoMPSource;
-                AccumulateCloseFeature(closeFeatureStats[sourceBin][depthBin],
-                                       pMP,
-                                       bInlier,
-                                       matchSource);
-                AccumulateCloseFeature(closeFeatureStats[kCloseFeatureAllSource][depthBin],
-                                       pMP,
-                                       bInlier,
-                                       matchSource);
-            }
-
-            for(int depthBin = 0; depthBin < kBridgeDepthBinCount; ++depthBin)
-            {
-                for(int sourceBin = 0; sourceBin < kCloseFeatureSourceCount; ++sourceBin)
-                {
-                    const CloseFeatureBridgeStats& stats = closeFeatureStats[sourceBin][depthBin];
-                    if(stats.features == 0 && sourceBin != kCloseFeatureAllSource)
-                        continue;
-                    const float stableShare = stats.features > 0
-                        ? static_cast<float>(stats.stableInlier) /
-                          static_cast<float>(stats.features)
-                        : 0.0f;
-                    std::cout << "[Tracking][CloseFeatureReuseBridge]"
-                              << " frame_id=" << mCurrentFrame.mnId
-                              << " source=" << CloseFeatureSourceName(sourceBin)
-                              << " depth_bin=" << CloseBridgeDepthName(depthBin)
-                              << " features=" << stats.features
-                              << " no_mp=" << stats.noMP
-                              << " bad_mp=" << stats.badMP
-                              << " associated_mp=" << stats.associatedMP
-                              << " inlier=" << stats.inlier
-                              << " outlier=" << stats.outlier
-                              << " stable_inlier=" << stats.stableInlier
-                              << " stable_feature_share=" << stableShare
-                              << " lowobs_inlier=" << stats.lowObsInlier
-                              << " lowfound_inlier=" << stats.lowFoundInlier
-                              << " local_proj_inlier=" << stats.localProjInlier
-                              << " motion_inlier=" << stats.motionInlier
-                              << std::endl;
-                }
-            }
-
-            struct CurrentAssociation
-            {
-                bool associated = false;
-                bool inlier = false;
-                bool stableInlier = false;
-                bool localProjInlier = false;
-                bool motionInlier = false;
-            };
-            std::unordered_map<MapPoint*, CurrentAssociation> currentAssociations;
-            const size_t nCurrentAssociations =
-                std::min(mCurrentFrame.mvpMapPoints.size(), mCurrentFrame.mvbOutlier.size());
-            for(size_t i = 0; i < nCurrentAssociations; ++i)
-            {
-                MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
-                if(!pMP || pMP->isBad())
-                    continue;
-                CurrentAssociation& association = currentAssociations[pMP];
-                association.associated = true;
-                if(mCurrentFrame.mvbOutlier[i])
-                    continue;
-                association.inlier = true;
-                association.stableInlier = association.stableInlier || IsStableMapPoint(pMP);
-                const unsigned char matchSource =
-                    i < mCurrentFrame.mvXFeatMatchSource.size()
-                        ? mCurrentFrame.mvXFeatMatchSource[i]
-                        : kXFeatMatchUnknown;
-                association.localProjInlier =
-                    association.localProjInlier ||
-                    matchSource == kXFeatMatchLocalProjection ||
-                    matchSource == kXFeatMatchLocalProjectionLightGlueVerified;
-                association.motionInlier =
-                    association.motionInlier ||
-                    matchSource == kXFeatMatchMotionProjection ||
-                    matchSource == kXFeatMatchMotionLightGlue;
-            }
-
-            ReferenceReuseBridgeStats referenceStats[kReferenceSourceCount][kReferenceDepthBinCount] = {};
-            if(mpReferenceKF)
-            {
-                const std::vector<MapPoint*> referenceMPs = mpReferenceKF->GetMapPointMatches();
-                for(MapPoint* pMP : referenceMPs)
-                {
-                    if(!pMP || pMP->isBad() || pMP->Observations() < nMinObs)
-                        continue;
-                    const float depth = ResolveMapPointQualityDepth(
-                        mCurrentFrame,
-                        pMP,
-                        std::numeric_limits<float>::quiet_NaN());
-                    const int depthBin = ReferenceBridgeDepthBin(depth);
-                    const int sourceBin =
-                        static_cast<int>(MapPointCreationSourceIndex(pMP->GetCreationSource()));
-                    const auto itAssociation = currentAssociations.find(pMP);
-                    const CurrentAssociation* pAssociation =
-                        itAssociation == currentAssociations.end() ? nullptr : &itAssociation->second;
-
-                    auto accumulateReference = [&](ReferenceReuseBridgeStats& stats)
-                    {
-                        ++stats.refSlots;
-                        if(ClassifyMapPointLightVisibilityInFrame(mCurrentFrame, pMP) ==
-                           LocalMapPredVisibilityStatus::Visible)
-                        {
-                            ++stats.predictedVisible;
-                        }
-                        if(!pAssociation)
-                            return;
-                        if(pAssociation->associated)
-                            ++stats.currentAssoc;
-                        if(pAssociation->inlier)
-                            ++stats.currentInlier;
-                        if(pAssociation->stableInlier)
-                            ++stats.stableCurrentInlier;
-                        if(pAssociation->localProjInlier)
-                            ++stats.localProjInlier;
-                        if(pAssociation->motionInlier)
-                            ++stats.motionInlier;
-                    };
-                    accumulateReference(referenceStats[sourceBin][depthBin]);
-                    accumulateReference(referenceStats[kReferenceAllSource][depthBin]);
-                }
-            }
-
-            for(int depthBin = 0; depthBin < kReferenceDepthBinCount; ++depthBin)
-            {
-                for(int sourceBin = 0; sourceBin < kReferenceSourceCount; ++sourceBin)
-                {
-                    const ReferenceReuseBridgeStats& stats = referenceStats[sourceBin][depthBin];
-                    if(stats.refSlots == 0 && sourceBin != kReferenceAllSource)
-                        continue;
-                    const float visibleShare = stats.refSlots > 0
-                        ? static_cast<float>(stats.predictedVisible) /
-                          static_cast<float>(stats.refSlots)
-                        : 0.0f;
-                    const float inlierShare = stats.refSlots > 0
-                        ? static_cast<float>(stats.currentInlier) /
-                          static_cast<float>(stats.refSlots)
-                        : 0.0f;
-                    const float stableInlierShare = stats.refSlots > 0
-                        ? static_cast<float>(stats.stableCurrentInlier) /
-                          static_cast<float>(stats.refSlots)
-                        : 0.0f;
-                    std::cout << "[Tracking][ReferenceReuseBridge]"
-                              << " frame_id=" << mCurrentFrame.mnId
-                              << " source=" << ReferenceSourceName(sourceBin)
-                              << " depth_bin=" << ReferenceBridgeDepthName(depthBin)
-                              << " ref_slots=" << stats.refSlots
-                              << " predicted_visible=" << stats.predictedVisible
-                              << " visible_share=" << visibleShare
-                              << " current_assoc=" << stats.currentAssoc
-                              << " current_inlier=" << stats.currentInlier
-                              << " current_inlier_share=" << inlierShare
-                              << " stable_current_inlier=" << stats.stableCurrentInlier
-                              << " stable_current_inlier_share=" << stableInlierShare
-                              << " local_proj_inlier=" << stats.localProjInlier
-                              << " motion_inlier=" << stats.motionInlier
-                              << std::endl;
-                }
-            }
-        }
 
         std::cout << "[Tracking][KFDecision]"
                   << " frame_id=" << mCurrentFrame.mnId
@@ -10977,31 +10512,22 @@ bool Tracking::NeedNewKeyFrame()
                   << " c4=" << (c4 ? 1 : 0)
                   << " need_new_kf=" << (needNewKF ? 1 : 0)
                   << " decision=" << decision
-                  << " insertion_event_log=" << (bPrintInsertionEvent ? 1 : 0);
-        if(bDetailedNoveltyDiag)
-        {
-            std::cout << " novelty_inlier_assoc=" << xfeatKfGuard.inlierAssoc
-                      << " novelty_stable_inlier_assoc=" << xfeatKfGuard.stableInlierAssoc
-                      << " novelty_stable_inlier_share=" << xfeatKfGuard.stableInlierShare
-                      << " novelty_ref_overlap_inlier=" << xfeatKfGuard.refOverlapInlier
-                      << " novelty_ref_overlap_share=" << xfeatKfGuard.refOverlapShare
-                      << " novelty_stable_ref_overlap_share=" << xfeatKfGuard.stableRefOverlapShare
-                      << " novelty_inlier_cells=" << xfeatKfGuard.inlierSpatial.nonEmptyCells
-                      << " novelty_stable_inlier_cells=" << xfeatKfGuard.stableSpatial.nonEmptyCells
-                      << " novelty_tracked_close_cells=" << xfeatKfGuard.trackedCloseCells
-                      << " novelty_nontracked_close_cells=" << xfeatKfGuard.nonTrackedCloseCells
-                      << " novelty_new_close_cells=" << xfeatKfGuard.novelCloseCells
-                      << " novelty_new_close_cell_share=" << xfeatKfGuard.novelCloseCellShare
-                      << " novelty_nontracked_close_highconf=" << xfeatKfGuard.nonTrackedCloseHighConf
-                      << " novelty_highconf_new_close_cells=" << xfeatKfGuard.highConfNovelCloseCells
-                      << " novelty_weak_support=" << (xfeatKfGuard.weakSupport ? 1 : 0)
-                      << " novelty_stable_support_ok=" << (xfeatKfGuard.stableSupportOk ? 1 : 0)
-                      << " novelty_close_coverage_ok=" << (xfeatKfGuard.closeCoverageOk ? 1 : 0)
-                      << " novelty_close_insert=" << (xfeatKfGuard.closeInsert ? 1 : 0)
-                      << " novelty_weak_inlier_threshold=" << xfeatKfGuard.weakInlierThreshold;
-        }
+                  << " kf_guard_enabled=" << (bXFeatKFInsertGuardEnabled ? 1 : 0)
+                  << " kf_guard_eligible=" << (bXFeatKFInsertGuardEligible ? 1 : 0)
+                  << " need_without_close=" << (bNeedNewKFWithoutClose ? 1 : 0)
+                  << " close_only_insertion=" << (bCloseOnlyInsertion ? 1 : 0)
+                  << " close_guard_suppressed=" << (bCloseGuardSuppress ? 1 : 0)
+                  << " close_guard_reason=" << closeGuardReason
+                  << " c1c_no_close=" << (c1cNoClose ? 1 : 0)
+                  << " c2_no_close=" << (c2NoClose ? 1 : 0);
         std::cout << std::endl;
     };
+
+    if(bOriginalNeedNewKF && bCloseGuardSuppress)
+    {
+        LogKFDecision(false, "close_guard_suppressed", true);
+        return false;
+    }
 
     if(bOriginalNeedNewKF)
     {
@@ -11024,14 +10550,14 @@ bool Tracking::NeedNewKeyFrame()
                 }
                 else
                 {
-                    LogKFDecision(false, "queue_full");
+                    LogKFDecision(false, "queue_full", true);
                     return false;
                 }
             }
             else
             {
                 //std::cout << "NeedNewKeyFrame: localmap is busy" << std::endl;
-                LogKFDecision(false, "local_mapping_busy");
+                LogKFDecision(false, "local_mapping_busy", true);
                 return false;
             }
         }
@@ -11260,8 +10786,7 @@ void Tracking::CreateNewKeyFrame()
     mnLastKeyFrameId = mCurrentFrame.mnId;
     mpLastKeyFrame = pKF;
 
-    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId) ||
-       (IsXFeatDebugEnabled() && IsXFeatFeatureDiagEnabled()))
+    if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
         const long int framesSincePreviousKF =
             mCurrentFrame.mnId >= previousLastKeyFrameId
@@ -11333,6 +10858,17 @@ void Tracking::SearchLocalPoints()
         : mThDepth;
     const std::string localFoundRatioScope = GetLocalMapFoundRatioScope();
     const bool bUseLightGlueLocalMap = !bUseORB && IsXFeatLightGlueLocalMapEnabled();
+    const bool bUseLocalMapCoreFirst = !bUseORB && IsXFeatLocalMapCoreFirstEnabled();
+    const int coreFirstMinPrior = GetXFeatLocalMapCoreFirstMinPrior();
+    const int coreFirstMinCoreMatches = GetXFeatLocalMapCoreFirstMinCoreMatches();
+    const int coreFirstMinTotalMatches = GetXFeatLocalMapCoreFirstMinTotalMatches();
+    int coreFirstCoreCandidates = 0;
+    int coreFirstExpansionCandidates = 0;
+    int coreFirstExpansionAdmitted = 0;
+    int coreFirstExpansionSuppressed = 0;
+    int coreFirstCoreMatches = 0;
+    int coreFirstExpansionMatches = 0;
+    const char* coreFirstDecision = bUseLocalMapCoreFirst ? "pending" : "disabled";
     int localFoundRatioRejectedBySource[kMapPointCreationSourceCount] = {};
     int localFoundRatioRejectedDepthQualified = 0;
     int localFoundRatioRejectedDepthQualifiedBySource[kMapPointCreationSourceCount] = {};
@@ -11399,6 +10935,23 @@ void Tracking::SearchLocalPoints()
     static constexpr int kMappingFeatureReuseCombinedBins = 6;
     std::vector<MapPoint*> vpLocalProjectionMapPoints;
     vpLocalProjectionMapPoints.reserve(mvpLocalMapPoints.size());
+    std::vector<MapPoint*> vpCoreLocalProjectionMapPoints;
+    std::vector<MapPoint*> vpExpansionLocalProjectionMapPoints;
+    if(bUseLocalMapCoreFirst)
+    {
+        vpCoreLocalProjectionMapPoints.reserve(mvpLocalMapPoints.size());
+        vpExpansionLocalProjectionMapPoints.reserve(mvpLocalMapPoints.size() / 2);
+    }
+    struct DeferredLocalProjectionPoint
+    {
+        MapPoint* pMP = nullptr;
+        float depth = std::numeric_limits<float>::quiet_NaN();
+    };
+    std::vector<DeferredLocalProjectionPoint> vDeferredExpansionLocalPoints;
+    if(bUseLocalMapCoreFirst)
+    {
+        vDeferredExpansionLocalPoints.reserve(mvpLocalMapPoints.size() / 2);
+    }
     MappingFeatureReuseFunnelStats mappingFeatureGridFunnel[kMappingFeatureReuseGridBins];
     MappingFeatureReuseFunnelStats mappingFeatureOctaveFunnel[kMappingFeatureReuseOctaveBins];
     MappingFeatureReuseFunnelStats mappingFeatureResponseFunnel[kMappingFeatureReuseResponseBins];
@@ -11554,7 +11107,7 @@ void Tracking::SearchLocalPoints()
     int lgLocalConflictLowScore = 0;
     int lgLocalMapUpdatedEdgeCandidates = 0;
     int lgLocalMapUpdatedEdgeVerified = 0;
-    int lgLocalMapUpdatedEdgeConflictShadow = 0;
+    int lgLocalMapUpdatedEdgeConflictUnverified = 0;
     int lgLocalMapUpdatedEdgeNoEvidence = 0;
     int lgLocalMapUpdatedEdgeNonTargetIgnored = 0;
     bool bLightGlueLocalFailed = false;
@@ -11745,13 +11298,55 @@ void Tracking::SearchLocalPoints()
         return false;
     };
 
+    auto isCoreLocalProjectionPoint =
+        [&](MapPoint* pMP,
+            const float resolvedDepth,
+            const Tracking::LocalMPProvenance* pProvenance) -> bool
+    {
+        if(!bUseLocalMapCoreFirst || !pMP)
+            return true;
+
+        if(!IsCloseReuseTarget(pMP, resolvedDepth))
+            return true;
+
+        const Tracking::LocalKFProvenanceRole role = pProvenance
+            ? pProvenance->bestRole
+            : Tracking::LocalKFProvenanceRole::Unknown;
+        if(role == Tracking::LocalKFProvenanceRole::Reference)
+            return true;
+        if(role == Tracking::LocalKFProvenanceRole::Voted &&
+           pProvenance &&
+           pProvenance->bestVoteCount >= 15 &&
+           pProvenance->localObservations >= 4)
+        {
+            return true;
+        }
+
+        const float foundRatio = pMP->GetFoundRatio();
+        if(pMP->Observations() >= 4 &&
+           std::isfinite(foundRatio) &&
+           foundRatio >= 0.45f)
+        {
+            return true;
+        }
+
+        if(IsLocalProjHistoryTarget(pMP, resolvedDepth))
+        {
+            const int priorityBin = LocalProjPriorityBin(pMP, pProvenance, resolvedDepth);
+            return priorityBin == 1 || priorityBin == 2 || priorityBin == 3;
+        }
+
+        return false;
+    };
+
     auto admitLocalProjectionPoint = [&](MapPoint* pMP,
-                                         const float resolvedDepth)
+                                         const float resolvedDepth,
+                                         std::vector<MapPoint*>& target)
     {
         if(!pMP)
             return;
         pMP->IncreaseVisible();
-        vpLocalProjectionMapPoints.push_back(pMP);
+        target.push_back(pMP);
         nToMatch++;
         nLocalInFrustum++;
         if(CloseReuseFunnelStats* stats = closeReuseBucket(pMP, resolvedDepth))
@@ -11923,6 +11518,15 @@ void Tracking::SearchLocalPoints()
                     }
                 }
             }
+            Tracking::LocalKFProvenanceRole localRole = Tracking::LocalKFProvenanceRole::Unknown;
+            const Tracking::LocalMPProvenance* pLocalProvenance = nullptr;
+            const auto itLocalProv = mmLocalMPProvenance.find(pMP);
+            if(itLocalProv != mmLocalMPProvenance.end() &&
+               itLocalProv->second.frameId == mCurrentFrame.mnId)
+            {
+                localRole = itLocalProv->second.bestRole;
+                pLocalProvenance = &itLocalProv->second;
+            }
             if(IsLocalProjHistoryTarget(pMP, resolvedDepth))
             {
                 triang0To10HistoryGateCandidate++;
@@ -11961,17 +11565,7 @@ void Tracking::SearchLocalPoints()
             }
             if(IsLocalProjHistoryTarget(pMP, resolvedDepth))
             {
-                Tracking::LocalKFProvenanceRole role = Tracking::LocalKFProvenanceRole::Unknown;
-                const Tracking::LocalMPProvenance* pProvenance = nullptr;
-                const auto itProv = mmLocalMPProvenance.find(pMP);
-                if(itProv != mmLocalMPProvenance.end() &&
-                   itProv->second.frameId == mCurrentFrame.mnId)
-                {
-                    role = itProv->second.bestRole;
-                    pProvenance = &itProv->second;
-                }
-
-                switch(role)
+                switch(localRole)
                 {
                     case Tracking::LocalKFProvenanceRole::Reference:
                         localmapLmt0To10FromReference++;
@@ -11992,11 +11586,36 @@ void Tracking::SearchLocalPoints()
                         break;
                 }
 
-                const int priorityBin = LocalProjPriorityBin(pMP, pProvenance, resolvedDepth);
+                const int priorityBin = LocalProjPriorityBin(pMP, pLocalProvenance, resolvedDepth);
                 if(priorityBin >= 0 && priorityBin < kLocalProjPriorityBinCount)
                     triang0To10PriorityCandidate[priorityBin]++;
             }
-            admitLocalProjectionPoint(pMP, resolvedDepth);
+            const bool bCoreLocalProjectionPoint =
+                isCoreLocalProjectionPoint(pMP, resolvedDepth, pLocalProvenance);
+            if(bUseLocalMapCoreFirst && !bCoreLocalProjectionPoint)
+            {
+                DeferredLocalProjectionPoint deferred;
+                deferred.pMP = pMP;
+                deferred.depth = resolvedDepth;
+                vDeferredExpansionLocalPoints.push_back(deferred);
+                ++coreFirstExpansionCandidates;
+            }
+            else
+            {
+                if(bUseLocalMapCoreFirst)
+                {
+                    ++coreFirstCoreCandidates;
+                    admitLocalProjectionPoint(pMP,
+                                              resolvedDepth,
+                                              vpCoreLocalProjectionMapPoints);
+                }
+                else
+                {
+                    admitLocalProjectionPoint(pMP,
+                                              resolvedDepth,
+                                              vpLocalProjectionMapPoints);
+                }
+            }
         }
         else if(selectedStats)
         {
@@ -12010,7 +11629,35 @@ void Tracking::SearchLocalPoints()
         }
     }
 
-    if(nToMatch>0)
+    auto admitDeferredExpansionPoints =
+        [&](const std::vector<DeferredLocalProjectionPoint>& deferredPoints)
+    {
+        for(const DeferredLocalProjectionPoint& deferred : deferredPoints)
+        {
+            if(!deferred.pMP || deferred.pMP->isBad())
+                continue;
+            admitLocalProjectionPoint(deferred.pMP,
+                                      deferred.depth,
+                                      vpExpansionLocalProjectionMapPoints);
+            ++coreFirstExpansionAdmitted;
+        }
+    };
+
+    auto suppressDeferredExpansionPoints =
+        [&](const std::vector<DeferredLocalProjectionPoint>& deferredPoints)
+    {
+        for(const DeferredLocalProjectionPoint& deferred : deferredPoints)
+        {
+            if(!deferred.pMP)
+                continue;
+            deferred.pMP->mbTrackInView = false;
+            deferred.pMP->mbTrackInViewR = false;
+            ++coreFirstExpansionSuppressed;
+        }
+    };
+
+    if(nToMatch>0 ||
+       (bUseLocalMapCoreFirst && !vDeferredExpansionLocalPoints.empty()))
     {
         const bool bMonocularVisual = (mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
         int th = 1;
@@ -12106,7 +11753,76 @@ void Tracking::SearchLocalPoints()
         }
         else
         {
-            if(!vpLocalProjectionMapPoints.empty())
+            if(bUseLocalMapCoreFirst)
+            {
+                XFeatMatcher matcher(0.8f, false);
+                if(!vpCoreLocalProjectionMapPoints.empty())
+                {
+                    coreFirstCoreMatches = matcher.SearchByProjection(mCurrentFrame,
+                                                                      vpCoreLocalProjectionMapPoints,
+                                                                      th,
+                                                                      bFarFilter,
+                                                                      thFarPoints,
+                                                                      GetXFeatThHighLocalProjection(),
+                                                                      -1,
+                                                                      true);
+                    matches += coreFirstCoreMatches;
+                    AccumulateProjectionStats(matcher.LastProjectionMapPointStats());
+                }
+
+                const bool bHasAnyExpansion = !vDeferredExpansionLocalPoints.empty();
+                bool bNeedExpansion = bHasAnyExpansion;
+                if(!bHasAnyExpansion)
+                {
+                    coreFirstDecision = "no_expansion";
+                    bNeedExpansion = false;
+                }
+                else if(vpCoreLocalProjectionMapPoints.empty())
+                {
+                    coreFirstDecision = "no_core";
+                }
+                else if(nAlreadyMatched < coreFirstMinPrior)
+                {
+                    coreFirstDecision = "prior_weak";
+                }
+                else if(coreFirstCoreMatches < coreFirstMinCoreMatches)
+                {
+                    coreFirstDecision = "core_weak";
+                }
+                else if(nAlreadyMatched + coreFirstCoreMatches < coreFirstMinTotalMatches)
+                {
+                    coreFirstDecision = "total_weak";
+                }
+                else
+                {
+                    coreFirstDecision = "skip_expansion";
+                    bNeedExpansion = false;
+                }
+
+                if(bNeedExpansion)
+                {
+                    admitDeferredExpansionPoints(vDeferredExpansionLocalPoints);
+                    if(!vpExpansionLocalProjectionMapPoints.empty())
+                    {
+                        coreFirstExpansionMatches =
+                            matcher.SearchByProjection(mCurrentFrame,
+                                                       vpExpansionLocalProjectionMapPoints,
+                                                       th,
+                                                       bFarFilter,
+                                                       thFarPoints,
+                                                       GetXFeatThHighLocalProjection(),
+                                                       -1,
+                                                       false);
+                        matches += coreFirstExpansionMatches;
+                        AccumulateProjectionStats(matcher.LastProjectionMapPointStats());
+                    }
+                }
+                else
+                {
+                    suppressDeferredExpansionPoints(vDeferredExpansionLocalPoints);
+                }
+            }
+            else if(!vpLocalProjectionMapPoints.empty())
             {
                 XFeatMatcher matcher(0.8f, false);
                 matches = matcher.SearchByProjection(mCurrentFrame,
@@ -12334,7 +12050,7 @@ void Tracking::SearchLocalPoints()
                         ++lgLocalMapUpdatedEdgeNoEvidence;
                         continue;
                     }
-                    ++lgLocalMapUpdatedEdgeConflictShadow;
+                    ++lgLocalMapUpdatedEdgeConflictUnverified;
                 }
                 matches = std::max(0, matches - lgLocalRejected);
                 projectionMatches = matches;
@@ -12414,31 +12130,17 @@ void Tracking::SearchLocalPoints()
 
         const bool bDeepSearchLocalDiag = IsXFeatDeepDiagEnabled();
         const bool bHasLocalFoundRatioSourceDiag =
-            bDeepSearchLocalDiag || bUseLocalFoundRatioGate || nLocalFoundRatioRejected > 0;
-        const bool bHasLocalKFVisibilityDiag =
-            bDeepSearchLocalDiag || mnLocalMapVotedKFVisibilityKept > 0;
-        const bool bHasTriangHistoryDiag =
-            bDeepSearchLocalDiag || triang0To10HistoryGateCandidate > 0;
-        const bool bHasTriangVisibilityHistoryDiag =
-            bDeepSearchLocalDiag || triang0To10VisibilityHistoryEvaluated > 0;
-        const bool bHasLocalMapRoleDiag =
-            bDeepSearchLocalDiag ||
-            localmapLmt0To10FromReference > 0 ||
-            localmapLmt0To10FromVoted > 0 ||
-            localmapLmt0To10FromExpansion > 0 ||
-            localmapLmt0To10FromTemporal > 0 ||
-            localmapLmt0To10FromUnknown > 0;
+            bDeepSearchLocalDiag || nLocalFoundRatioRejected > 0;
+        const bool bHasLocalKFVisibilityDiag = bDeepSearchLocalDiag;
+        const bool bHasTriangHistoryDiag = bDeepSearchLocalDiag;
+        const bool bHasTriangVisibilityHistoryDiag = bDeepSearchLocalDiag;
+        const bool bHasLocalMapRoleDiag = bDeepSearchLocalDiag;
         const bool bHasPriorityDiag = bDeepSearchLocalDiag;
         const bool bHasProjectionEdgeDiag =
             bDeepSearchLocalDiag ||
             localProjTriang0To10ProjOutsideReject > 0 ||
             localProjTriang0To10CompanionOutsideReject > 0;
-        const bool bHasRefAssocMatcherDiag =
-            bDeepSearchLocalDiag ||
-            refAssocMatcherInput > 0 ||
-            refAssocMatcherProjected > 0 ||
-            refAssocMatcherCandidatePool > 0 ||
-            refAssocMatcherAssigned > 0;
+        const bool bHasRefAssocMatcherDiag = bDeepSearchLocalDiag;
         const bool bHasLightGlueLocalDiag =
             bDeepSearchLocalDiag ||
             bUseLightGlueLocalMap ||
@@ -12447,7 +12149,12 @@ void Tracking::SearchLocalPoints()
             lgLocalFilled > 0 ||
             lgLocalVerifyCandidates > 0 ||
             lgLocalMapUpdatedEdgeCandidates > 0 ||
-            lgLocalMapUpdatedEdgeConflictShadow > 0;
+            lgLocalMapUpdatedEdgeConflictUnverified > 0;
+        const bool bHasCoreFirstDiag =
+            bDeepSearchLocalDiag ||
+            bUseLocalMapCoreFirst ||
+            coreFirstExpansionCandidates > 0 ||
+            coreFirstExpansionSuppressed > 0;
 
         if(ShouldPrintXFeatDebug(mCurrentFrame.mnId) && bMotionGuardEnabled)
         {
@@ -12501,6 +12208,21 @@ void Tracking::SearchLocalPoints()
                   << " th=" << thValue
                   << " mode=" << (bUseORB ? "ORBProj" : (bUseLightGlueLocalMap ? "XFeatProj+LightGlueLocal" : "XFeatProj"))
                   << " th_high=" << (bUseORB ? -1.0f : GetXFeatThHighLocalProjection());
+        if(bHasCoreFirstDiag)
+        {
+            std::cout << " localmap_core_first=" << (bUseLocalMapCoreFirst ? 1 : 0)
+                      << " core_first_prior=" << nAlreadyMatched
+                      << " core_first_min_prior=" << coreFirstMinPrior
+                      << " core_first_min_core_matches=" << coreFirstMinCoreMatches
+                      << " core_first_min_total_matches=" << coreFirstMinTotalMatches
+                      << " core_first_core_candidates=" << coreFirstCoreCandidates
+                      << " core_first_expansion_candidates=" << coreFirstExpansionCandidates
+                      << " core_first_expansion_admitted=" << coreFirstExpansionAdmitted
+                      << " core_first_expansion_suppressed=" << coreFirstExpansionSuppressed
+                      << " core_first_core_matches=" << coreFirstCoreMatches
+                      << " core_first_expansion_matches=" << coreFirstExpansionMatches
+                      << " core_first_decision=" << coreFirstDecision;
+        }
         if(bHasLocalFoundRatioSourceDiag)
         {
             std::cout << " local_found_ratio_rejected_depth_qualified=" << localFoundRatioRejectedDepthQualified
@@ -12624,8 +12346,7 @@ void Tracking::SearchLocalPoints()
                       << " lg_local_proj_radius=" << (bUseLightGlueLocalMap ? GetXFeatLightGlueLocalMapProjRadius() : 0.0f)
                       << " lg_local_map_updated_edge_candidates=" << lgLocalMapUpdatedEdgeCandidates
                       << " lg_local_map_updated_edge_verified=" << lgLocalMapUpdatedEdgeVerified
-                      << " lg_local_map_updated_edge_conflict_reject=0"
-                      << " lg_local_map_updated_edge_conflict_shadow=" << lgLocalMapUpdatedEdgeConflictShadow
+                      << " lg_local_map_updated_edge_conflict_unverified=" << lgLocalMapUpdatedEdgeConflictUnverified
                       << " lg_local_map_updated_edge_no_evidence=" << lgLocalMapUpdatedEdgeNoEvidence
                       << " lg_local_map_updated_edge_non_target_ignored=" << lgLocalMapUpdatedEdgeNonTargetIgnored;
         }
@@ -12639,7 +12360,7 @@ void Tracking::SearchLocalPoints()
                   << " matches_total_added=" << (matchesValue + lgLocalFilled)
                   << std::endl;
 
-        if(!IsXFeatFeatureDiagEnabled())
+        if(!IsXFeatDeepDiagEnabled())
             return;
 
         const std::ios::fmtflags oldFlags = std::cout.flags();

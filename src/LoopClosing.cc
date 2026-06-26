@@ -24,13 +24,175 @@
 #include "Optimizer.h"
 #include "ORBmatcher.h"
 #include "G2oTypes.h"
+#include "XFeatLighterGlueMatcher.h"
 
+#include<algorithm>
+#include<cstdlib>
+#include<exception>
 #include<mutex>
+#include<string>
 #include<thread>
+#include<unordered_map>
 
 
 namespace ORB_SLAM3
 {
+namespace
+{
+
+bool IsLoopEnvFlagEnabled(const char* key)
+{
+    const char* env = std::getenv(key);
+    if(!env)
+        return false;
+
+    const std::string v(env);
+    return !(v.empty() || v == "0" || v == "false" || v == "FALSE");
+}
+
+int GetLoopEnvIntInRange(const char* key, const int fallback, const int minValue, const int maxValue)
+{
+    const char* env = std::getenv(key);
+    if(!env)
+        return fallback;
+
+    try
+    {
+        const int v = std::stoi(std::string(env));
+        return std::max(minValue, std::min(maxValue, v));
+    }
+    catch(...)
+    {
+        return fallback;
+    }
+}
+
+float GetLoopEnvFloatInRange(const char* key,
+                             const float fallback,
+                             const float minValue,
+                             const float maxValue)
+{
+    const char* env = std::getenv(key);
+    if(!env)
+        return fallback;
+
+    try
+    {
+        const float v = std::stof(std::string(env));
+        return std::max(minValue, std::min(maxValue, v));
+    }
+    catch(...)
+    {
+        return fallback;
+    }
+}
+
+bool IsXFeatLoopLightGlueEnabled()
+{
+    if(std::getenv("USE_ORB") != nullptr)
+        return false;
+    return IsLoopEnvFlagEnabled("XFEAT_USE_LIGHTGLUE_LOOP");
+}
+
+int GetLoopCandidateCount(const bool bUseLightGlueLoop)
+{
+    if(!bUseLightGlueLoop)
+        return 3;
+    return GetLoopEnvIntInRange("XFEAT_LOOP_CANDIDATES", 10, 1, 100);
+}
+
+float GetXFeatLightGlueLoopConfidence()
+{
+    if(std::getenv("XFEAT_LIGHTGLUE_LOOP_CONF"))
+        return GetLoopEnvFloatInRange("XFEAT_LIGHTGLUE_LOOP_CONF", 0.1f, 0.0f, 1.0f);
+    return GetLoopEnvFloatInRange("XFEAT_LIGHTGLUE_CONF", 0.1f, 0.0f, 1.0f);
+}
+
+bool IsXFeatLoopLightGlueExpandEnabled()
+{
+    return IsLoopEnvFlagEnabled("XFEAT_LOOP_LG_EXPAND");
+}
+
+int GetXFeatLoopLightGlueExpandCovisibles()
+{
+    return GetLoopEnvIntInRange("XFEAT_LOOP_LG_EXPAND_COVISIBLES", 3, 0, 10);
+}
+
+int GetXFeatLoopLightGlueExpandMinDirect()
+{
+    return GetLoopEnvIntInRange("XFEAT_LOOP_LG_EXPAND_MIN_DIRECT", 12, 0, 1000);
+}
+
+int GetXFeatLoopLightGlueMaxCallsPerKeyFrame()
+{
+    return GetLoopEnvIntInRange("XFEAT_LOOP_LG_MAX_CALLS_PER_KF", 24, 1, 1000);
+}
+
+struct LoopLightGlueCandidateMatch
+{
+    int currentIdx = -1;
+    MapPoint* pMP = nullptr;
+    KeyFrame* pSourceKF = nullptr;
+    float score = 0.0f;
+};
+
+int AssignLoopLightGlueMatches(const std::vector<LoopLightGlueCandidateMatch>& candidates,
+                               const int nCurrent,
+                               std::vector<MapPoint*>& vpMatchedPoints,
+                               std::vector<KeyFrame*>& vpKeyFrameMatchedMP)
+{
+    std::vector<int> bestForCurrent(static_cast<size_t>(std::max(0, nCurrent)), -1);
+    std::unordered_map<long unsigned int, int> bestForMapPoint;
+    bestForMapPoint.reserve(candidates.size());
+
+    for(int i = 0; i < static_cast<int>(candidates.size()); ++i)
+    {
+        const LoopLightGlueCandidateMatch& c = candidates[i];
+        if(c.currentIdx < 0 || c.currentIdx >= nCurrent || !c.pMP || c.pMP->isBad() || !c.pSourceKF)
+            continue;
+
+        int& currentBest = bestForCurrent[static_cast<size_t>(c.currentIdx)];
+        if(currentBest < 0 || c.score > candidates[currentBest].score)
+            currentBest = i;
+
+        auto it = bestForMapPoint.find(c.pMP->mnId);
+        if(it == bestForMapPoint.end() || c.score > candidates[it->second].score)
+            bestForMapPoint[c.pMP->mnId] = i;
+    }
+
+    int assigned = 0;
+    for(int idx = 0; idx < nCurrent; ++idx)
+    {
+        const int candIdx = bestForCurrent[static_cast<size_t>(idx)];
+        if(candIdx < 0)
+            continue;
+
+        const LoopLightGlueCandidateMatch& c = candidates[candIdx];
+        const auto it = bestForMapPoint.find(c.pMP->mnId);
+        if(it == bestForMapPoint.end() || it->second != candIdx)
+            continue;
+
+        vpMatchedPoints[static_cast<size_t>(idx)] = c.pMP;
+        vpKeyFrameMatchedMP[static_cast<size_t>(idx)] = c.pSourceKF;
+        ++assigned;
+    }
+
+    return assigned;
+}
+
+const char* XFeatGbaAbortReasonName(const int reason)
+{
+    switch(reason)
+    {
+    case 1: return "idx_changed";
+    case 2: return "imu_state_changed";
+    case 3: return "finish_requested";
+    case 4: return "stop_requested";
+    default: return "none";
+    }
+}
+
+} // namespace
 
 LoopClosing::LoopClosing(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, const bool bFixScale, const bool bActiveLC):
     mbResetRequested(false), mbResetActiveMapRequested(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas),
@@ -40,6 +202,46 @@ LoopClosing::LoopClosing(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pV
 {
     mnCovisibilityConsistencyTh = 3;
     mpLastCurrentKF = static_cast<KeyFrame*>(NULL);
+    mpCurrentKF = static_cast<KeyFrame*>(NULL);
+    mpLoopLastCurrentKF = static_cast<KeyFrame*>(NULL);
+    mpLoopMatchedKF = static_cast<KeyFrame*>(NULL);
+    mpMergeLastCurrentKF = static_cast<KeyFrame*>(NULL);
+    mpMergeMatchedKF = static_cast<KeyFrame*>(NULL);
+
+    mnXFeatLoopLgCandidatesChecked = 0;
+    mnXFeatLoopLgCandidateMaxRank = -1;
+    mnXFeatLoopLgSim3ConvergedCandidates = 0;
+    mnXFeatLoopLgTotalCalls = 0;
+    mnXFeatLoopLgAcceptCount = 0;
+    mnXFeatLoopLgLastAcceptCurrentKF = -1;
+    mnXFeatLoopLgLastAcceptCandidateKF = -1;
+    mnXFeatLoopLgLastAcceptMatchedKF = -1;
+    mnXFeatLoopLgLastAcceptRank = -1;
+    mnXFeatLoopLgLastAcceptInitialMatches = -1;
+    mnXFeatLoopLgLastAcceptSim3Inliers = -1;
+    mnXFeatLoopLgLastAcceptProjOptMatches = -1;
+    mnXFeatLoopLgLastAcceptCovValid = -1;
+    mnXFeatLoopLgBestAcceptCurrentKF = -1;
+    mnXFeatLoopLgBestAcceptCandidateKF = -1;
+    mnXFeatLoopLgBestAcceptMatchedKF = -1;
+    mnXFeatLoopLgBestAcceptRank = -1;
+    mnXFeatLoopLgBestAcceptSim3Inliers = -1;
+    mnXFeatLoopLgBestAcceptProjOptMatches = -1;
+    mnXFeatLoopLgBestAcceptCovValid = -1;
+    mnXFeatLoopCorrectionCount = 0;
+    mnXFeatLoopLastCorrectionCurrentKF = -1;
+    mnXFeatLoopLastCorrectionMatchedKF = -1;
+    mnXFeatLoopLastCorrectionCoincidences = -1;
+    mnXFeatGbaStartedCount = 0;
+    mnXFeatGbaOptimizerFinishedCount = 0;
+    mnXFeatGbaAppliedCount = 0;
+    mnXFeatGbaAbortedCount = 0;
+    mnXFeatGbaStopRequestedCount = 0;
+    mnXFeatLastGbaLoopKF = -1;
+    mnXFeatLastGbaAbortReason = 0;
+    mbXFeatShutdownSawLoopNotFinished = false;
+    mbXFeatShutdownSawGbaRunning = false;
+    mbXFeatShutdownTimeout = false;
 
 #ifdef REGISTER_TIMES
 
@@ -76,6 +278,80 @@ LoopClosing::LoopClosing(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pV
     mnCorrectionGBA = 0;
 }
 
+void LoopClosing::RecordXFeatLoopShutdownStatus(const bool bLoopCloserNotFinished,
+                                                const bool bLoopCloserRunningGBA,
+                                                const bool bShutdownTimeout)
+{
+    unique_lock<mutex> lock(mMutexXFeatLoopSummary);
+    mbXFeatShutdownSawLoopNotFinished = mbXFeatShutdownSawLoopNotFinished || bLoopCloserNotFinished;
+    mbXFeatShutdownSawGbaRunning = mbXFeatShutdownSawGbaRunning || bLoopCloserRunningGBA;
+    mbXFeatShutdownTimeout = mbXFeatShutdownTimeout || bShutdownTimeout;
+}
+
+void LoopClosing::PrintXFeatLoopSummary()
+{
+    unique_lock<mutex> lock(mMutexXFeatLoopSummary);
+    std::cout << "[LoopLG][Summary]"
+              << " checked_candidates=" << mnXFeatLoopLgCandidatesChecked
+              << " max_candidate_rank=" << mnXFeatLoopLgCandidateMaxRank
+              << " sim3_converged_candidates=" << mnXFeatLoopLgSim3ConvergedCandidates
+              << " total_lg_calls=" << mnXFeatLoopLgTotalCalls
+              << " accept_count=" << mnXFeatLoopLgAcceptCount
+              << " last_accept_current_kf=" << mnXFeatLoopLgLastAcceptCurrentKF
+              << " last_accept_candidate_kf=" << mnXFeatLoopLgLastAcceptCandidateKF
+              << " last_accept_matched_kf=" << mnXFeatLoopLgLastAcceptMatchedKF
+              << " last_accept_rank=" << mnXFeatLoopLgLastAcceptRank
+              << " last_accept_initial_matches=" << mnXFeatLoopLgLastAcceptInitialMatches
+              << " last_accept_sim3_inliers=" << mnXFeatLoopLgLastAcceptSim3Inliers
+              << " last_accept_proj_opt_matches=" << mnXFeatLoopLgLastAcceptProjOptMatches
+              << " last_accept_cov_valid=" << mnXFeatLoopLgLastAcceptCovValid
+              << " best_accept_current_kf=" << mnXFeatLoopLgBestAcceptCurrentKF
+              << " best_accept_candidate_kf=" << mnXFeatLoopLgBestAcceptCandidateKF
+              << " best_accept_matched_kf=" << mnXFeatLoopLgBestAcceptMatchedKF
+              << " best_accept_rank=" << mnXFeatLoopLgBestAcceptRank
+              << " best_accept_sim3_inliers=" << mnXFeatLoopLgBestAcceptSim3Inliers
+              << " best_accept_proj_opt_matches=" << mnXFeatLoopLgBestAcceptProjOptMatches
+              << " best_accept_cov_valid=" << mnXFeatLoopLgBestAcceptCovValid
+              << " loop_correction_count=" << mnXFeatLoopCorrectionCount
+              << " last_loop_current_kf=" << mnXFeatLoopLastCorrectionCurrentKF
+              << " last_loop_matched_kf=" << mnXFeatLoopLastCorrectionMatchedKF
+              << " last_loop_num_coincidences=" << mnXFeatLoopLastCorrectionCoincidences
+              << " gba_started=" << mnXFeatGbaStartedCount
+              << " gba_optimizer_finished=" << mnXFeatGbaOptimizerFinishedCount
+              << " gba_applied=" << mnXFeatGbaAppliedCount
+              << " gba_aborted=" << mnXFeatGbaAbortedCount
+              << " gba_stop_requested=" << mnXFeatGbaStopRequestedCount
+              << " last_gba_loop_kf=" << mnXFeatLastGbaLoopKF
+              << " last_gba_abort_reason=" << XFeatGbaAbortReasonName(mnXFeatLastGbaAbortReason)
+              << " shutdown_saw_loop_not_finished=" << (mbXFeatShutdownSawLoopNotFinished ? 1 : 0)
+              << " shutdown_saw_gba_running=" << (mbXFeatShutdownSawGbaRunning ? 1 : 0)
+              << " shutdown_timeout=" << (mbXFeatShutdownTimeout ? 1 : 0)
+              << std::endl;
+}
+
+void LoopClosing::RequestShutdownGBAStop()
+{
+    if(!mMutexGBA.try_lock())
+    {
+        cout << "[LoopGBA] shutdown timeout: GBA mutex busy, continuing shutdown." << endl;
+        return;
+    }
+
+    unique_lock<mutex> lock(mMutexGBA, std::adopt_lock);
+    if(!mbRunningGBA)
+        return;
+
+    const bool bAlreadyStopRequested = mbStopGBA;
+    mbStopGBA = true;
+    {
+        unique_lock<mutex> summaryLock(mMutexXFeatLoopSummary);
+        if(!bAlreadyStopRequested)
+            ++mnXFeatGbaStopRequestedCount;
+    }
+    cout << "[LoopGBA] shutdown timeout: requesting GBA stop"
+         << (bAlreadyStopRequested ? " (already requested)." : ".") << endl;
+}
+
 void LoopClosing::SetTracker(Tracking *pTracker)
 {
     mpTracker=pTracker;
@@ -93,6 +369,9 @@ void LoopClosing::Run()
 
     while(1)
     {
+        if(CheckFinish()){
+            break;
+        }
 
         //NEW LOOP AND MERGE DETECTION ALGORITHM
         //----------------------------
@@ -100,6 +379,40 @@ void LoopClosing::Run()
 
         if(CheckNewKeyFrames())
         {
+            auto cleanupCurrentPlaceRecognition = [&]() {
+                if(mbLoopDetected || mnLoopNumCoincidences > 0)
+                {
+                    if(mpLoopLastCurrentKF)
+                        mpLoopLastCurrentKF->SetErase();
+                    if(mpLoopMatchedKF)
+                        mpLoopMatchedKF->SetErase();
+                    mnLoopNumCoincidences = 0;
+                    mnLoopNumNotFound = 0;
+                    mvpLoopMatchedMPs.clear();
+                    mvpLoopMPs.clear();
+                    mbLoopDetected = false;
+                }
+
+                if(mbMergeDetected || mnMergeNumCoincidences > 0)
+                {
+                    if(mpMergeLastCurrentKF)
+                        mpMergeLastCurrentKF->SetErase();
+                    if(mpMergeMatchedKF)
+                        mpMergeMatchedKF->SetErase();
+                    mnMergeNumCoincidences = 0;
+                    mnMergeNumNotFound = 0;
+                    mvpMergeMatchedMPs.clear();
+                    mvpMergeMPs.clear();
+                    mbMergeDetected = false;
+                }
+
+                if(mpCurrentKF)
+                {
+                    mpCurrentKF->mbCurrentPlaceRecognition = false;
+                    mpCurrentKF->SetErase();
+                }
+            };
+
             if(mpLastCurrentKF)
             {
                 mpLastCurrentKF->mvpLoopCandKFs.clear();
@@ -110,6 +423,13 @@ void LoopClosing::Run()
 #endif
 
             bool bFindedRegion = NewDetectCommonRegions();
+
+            if(CheckFinish())
+            {
+                if(bFindedRegion)
+                    cleanupCurrentPlaceRecognition();
+                break;
+            }
 
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndPR = std::chrono::steady_clock::now();
@@ -310,6 +630,10 @@ void LoopClosing::Run()
 
 void LoopClosing::InsertKeyFrame(KeyFrame *pKF)
 {
+    unique_lock<mutex> finishLock(mMutexFinish);
+    if(mbFinishRequested)
+        return;
+
     unique_lock<mutex> lock(mMutexLoopQueue);
     if(pKF->mnId!=0)
         mlpLoopKeyFrameQueue.push_back(pKF);
@@ -323,6 +647,9 @@ bool LoopClosing::CheckNewKeyFrames()
 
 bool LoopClosing::NewDetectCommonRegions()
 {
+    if(CheckFinish())
+        return false;
+
     // To deactivate placerecognition. No loopclosing nor merging will be performed
     if(!mbActiveLC)
         return false;
@@ -336,6 +663,13 @@ bool LoopClosing::NewDetectCommonRegions()
         mpCurrentKF->mbCurrentPlaceRecognition = true;
 
         mpLastMap = mpCurrentKF->GetMap();
+    }
+
+    if(CheckFinish())
+    {
+        mpCurrentKF->SetErase();
+        mpCurrentKF->mbCurrentPlaceRecognition = false;
+        return false;
     }
 
     if(mpLastMap->IsInertial() && !mpLastMap->GetIniertialBA2())
@@ -482,13 +816,17 @@ bool LoopClosing::NewDetectCommonRegions()
 
     // Extract candidates from the bag of words
     vector<KeyFrame*> vpMergeBowCand, vpLoopBowCand;
+    const bool bUseLightGlueLoop = IsXFeatLoopLightGlueEnabled();
     if(!bMergeDetectedInKF || !bLoopDetectedInKF)
     {
         // Search in BoW
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartQuery = std::chrono::steady_clock::now();
 #endif
-        mpKeyFrameDB->DetectNBestCandidates(mpCurrentKF, vpLoopBowCand, vpMergeBowCand,3);
+        mpKeyFrameDB->DetectNBestCandidates(mpCurrentKF,
+                                            vpLoopBowCand,
+                                            vpMergeBowCand,
+                                            GetLoopCandidateCount(bUseLightGlueLoop));
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_EndQuery = std::chrono::steady_clock::now();
 
@@ -504,12 +842,32 @@ bool LoopClosing::NewDetectCommonRegions()
     //Loop candidates
     if(!bLoopDetectedInKF && !vpLoopBowCand.empty())
     {
-        mbLoopDetected = DetectCommonRegionsFromBoW(vpLoopBowCand, mpLoopMatchedKF, mpLoopLastCurrentKF, mg2oLoopSlw, mnLoopNumCoincidences, mvpLoopMPs, mvpLoopMatchedMPs);
+        mbLoopDetected = DetectCommonRegionsFromBoW(vpLoopBowCand,
+                                                    mpLoopMatchedKF,
+                                                    mpLoopLastCurrentKF,
+                                                    mg2oLoopSlw,
+                                                    mnLoopNumCoincidences,
+                                                    mvpLoopMPs,
+                                                    mvpLoopMatchedMPs,
+                                                    bUseLightGlueLoop);
+    }
+    if(CheckFinish())
+    {
+        mpCurrentKF->SetErase();
+        mpCurrentKF->mbCurrentPlaceRecognition = false;
+        return false;
     }
     // Merge candidates
     if(!bMergeDetectedInKF && !vpMergeBowCand.empty())
     {
-        mbMergeDetected = DetectCommonRegionsFromBoW(vpMergeBowCand, mpMergeMatchedKF, mpMergeLastCurrentKF, mg2oMergeSlw, mnMergeNumCoincidences, mvpMergeMPs, mvpMergeMatchedMPs);
+        mbMergeDetected = DetectCommonRegionsFromBoW(vpMergeBowCand,
+                                                     mpMergeMatchedKF,
+                                                     mpMergeLastCurrentKF,
+                                                     mg2oMergeSlw,
+                                                     mnMergeNumCoincidences,
+                                                     mvpMergeMPs,
+                                                     mvpMergeMatchedMPs,
+                                                     false);
     }
 
 #ifdef REGISTER_TIMES
@@ -535,8 +893,13 @@ bool LoopClosing::NewDetectCommonRegions()
 bool LoopClosing::DetectAndReffineSim3FromLastKF(KeyFrame* pCurrentKF, KeyFrame* pMatchedKF, g2o::Sim3 &gScw, int &nNumProjMatches,
                                                  std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs)
 {
+    if(CheckFinish())
+        return false;
+
     set<MapPoint*> spAlreadyMatchedMPs;
     nNumProjMatches = FindMatchesByProjection(pCurrentKF, pMatchedKF, gScw, spAlreadyMatchedMPs, vpMPs, vpMatchedMPs);
+    if(CheckFinish())
+        return false;
 
     int nProjMatches = 30;
     int nProjOptMatches = 50;
@@ -553,7 +916,11 @@ bool LoopClosing::DetectAndReffineSim3FromLastKF(KeyFrame* pCurrentKF, KeyFrame*
         bool bFixedScale = mbFixScale;       // TODO CHECK; Solo para el monocular inertial
         if(mpTracker->mSensor==System::IMU_MONOCULAR && !pCurrentKF->GetMap()->GetIniertialBA2())
             bFixedScale=false;
+        if(CheckFinish())
+            return false;
         int numOptMatches = Optimizer::OptimizeSim3(mpCurrentKF, pMatchedKF, vpMatchedMPs, gScm, 10, bFixedScale, mHessian7x7, true);
+        if(CheckFinish())
+            return false;
 
         //Verbose::PrintMess("Sim3 reffine: There are " + to_string(numOptMatches) + " matches after of the optimization ", Verbose::VERBOSITY_DEBUG);
 
@@ -564,7 +931,11 @@ bool LoopClosing::DetectAndReffineSim3FromLastKF(KeyFrame* pCurrentKF, KeyFrame*
             vector<MapPoint*> vpMatchedMP;
             vpMatchedMP.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint*>(NULL));
 
+            if(CheckFinish())
+                return false;
             nNumProjMatches = FindMatchesByProjection(pCurrentKF, pMatchedKF, gScw_estimation, spAlreadyMatchedMPs, vpMPs, vpMatchedMPs);
+            if(CheckFinish())
+                return false;
             if(nNumProjMatches >= nProjMatchesRep)
             {
                 gScw = gScw_estimation;
@@ -576,8 +947,12 @@ bool LoopClosing::DetectAndReffineSim3FromLastKF(KeyFrame* pCurrentKF, KeyFrame*
 }
 
 bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, KeyFrame* &pMatchedKF2, KeyFrame* &pLastCurrentKF, g2o::Sim3 &g2oScw,
-                                             int &nNumCoincidences, std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs)
+                                             int &nNumCoincidences, std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs,
+                                             bool bUseLightGlueInitialMatches)
 {
+    if(CheckFinish())
+        return false;
+
     int nBoWMatches = 20;
     int nBoWInliers = 15;
     int nSim3Inliers = 20;
@@ -593,8 +968,22 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
 
     // Varibles to select the best numbe
     KeyFrame* pBestMatchedKF;
+    KeyFrame* pBestBowCandidateKF = nullptr;
     int nBestMatchesReproj = 0;
     int nBestNumCoindicendes = 0;
+    int nBestCandidateRank = -1;
+    int nBestInitialMatches = 0;
+    int nBestDirectRawMatches = 0;
+    int nBestDirectAssigned = 0;
+    int nBestLightGlueCalls = 0;
+    int nBestLightGlueCallsBudgetUsed = 0;
+    int nBestExpandedWindows = 0;
+    bool bBestExpanded = false;
+    std::string sBestExpansionReason = "none";
+    int nBestSim3Inliers = 0;
+    int nBestProjMatches = -1;
+    int nBestOptMatches = -1;
+    int nBestProjOptMatches = -1;
     g2o::Sim3 g2oBestScw;
     std::vector<MapPoint*> vpBestMapPoints;
     std::vector<MapPoint*> vpBestMatchedMapPoints;
@@ -602,13 +991,35 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
     int numCandidates = vpBowCand.size();
     vector<int> vnStage(numCandidates, 0);
     vector<int> vnMatchesStage(numCandidates, 0);
+    const bool bUseLoopLightGlueExpansion = bUseLightGlueInitialMatches &&
+                                            IsXFeatLoopLightGlueExpandEnabled();
+    const int nLoopLightGlueExpandCovisibles = GetXFeatLoopLightGlueExpandCovisibles();
+    const int nLoopLightGlueExpandMinDirect = GetXFeatLoopLightGlueExpandMinDirect();
+    const int nLoopLightGlueMaxCallsPerKeyFrame = GetXFeatLoopLightGlueMaxCallsPerKeyFrame();
+    int nLoopLightGlueCallsForCurrentKF = 0;
 
     int index = 0;
     //Verbose::PrintMess("BoW candidates: There are " + to_string(vpBowCand.size()) + " possible candidates ", Verbose::VERBOSITY_DEBUG);
     for(KeyFrame* pKFi : vpBowCand)
     {
+        if(CheckFinish())
+            return false;
+
         if(!pKFi || pKFi->isBad())
             continue;
+
+        int loopLgCalls = 0;
+        int loopLgDirectRawMatches = 0;
+        int loopLgDirectAssigned = 0;
+        int loopExpandedWindows = 0;
+        bool loopExpanded = false;
+        std::string loopExpansionReason = bUseLightGlueInitialMatches ? "disabled" : "orb_path";
+        int loopSim3Inliers = 0;
+        int loopProjMatches = -1;
+        int loopOptMatches = -1;
+        int loopProjOptMatches = -1;
+        int loopCovValid = 0;
+        bool loopSim3Converged = false;
 
         // std::cout << "KF candidate: " << pKFi->mnId << std::endl;
         // Current KF against KF with covisibles version
@@ -644,6 +1055,8 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
 
         std::vector<std::vector<MapPoint*> > vvpMatchedMPs;
         vvpMatchedMPs.resize(vpCovKFi.size());
+        std::vector<std::vector<float> > vvMatchedScores;
+        vvMatchedScores.resize(vpCovKFi.size());
         std::set<MapPoint*> spMatchedMPi;
         int numBoWMatches = 0;
 
@@ -653,35 +1066,193 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
         std::vector<MapPoint*> vpMatchedPoints = std::vector<MapPoint*>(mpCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint*>(NULL));
         std::vector<KeyFrame*> vpKeyFrameMatchedMP = std::vector<KeyFrame*>(mpCurrentKF->GetMapPointMatches().size(), static_cast<KeyFrame*>(NULL));
 
-        int nIndexMostBoWMatchesKF=0;
-        for(int j=0; j<vpCovKFi.size(); ++j)
+        if(bUseLightGlueInitialMatches)
         {
-            if(!vpCovKFi[j] || vpCovKFi[j]->isBad())
-                continue;
+            std::vector<LoopLightGlueCandidateMatch> vLoopLgCandidateMatches;
+            vLoopLgCandidateMatches.reserve(static_cast<size_t>(mpCurrentKF->N));
 
-            int num = matcherBoW.SearchByBoW(mpCurrentKF, vpCovKFi[j], vvpMatchedMPs[j]);
-            if (num > nMostBoWNumMatches)
+            auto collectWindowMatches = [&](const int windowIdx) {
+                if(windowIdx < 0 || windowIdx >= static_cast<int>(vvpMatchedMPs.size()) ||
+                   windowIdx >= static_cast<int>(vpCovKFi.size()) || !vpCovKFi[windowIdx])
+                    return;
+
+                const std::vector<MapPoint*>& vMatchedMPs = vvpMatchedMPs[windowIdx];
+                const std::vector<float>& vScores = vvMatchedScores[windowIdx];
+                for(int k = 0; k < static_cast<int>(vMatchedMPs.size()); ++k)
+                {
+                    MapPoint* pMP = vMatchedMPs[k];
+                    if(!pMP || pMP->isBad())
+                        continue;
+
+                    float score = 0.0f;
+                    if(k < static_cast<int>(vScores.size()) && vScores[k] >= 0.0f)
+                        score = vScores[k];
+
+                    vLoopLgCandidateMatches.push_back(LoopLightGlueCandidateMatch{k, pMP, vpCovKFi[windowIdx], score});
+                }
+            };
+
+            auto runLightGlueWindow = [&](const int windowIdx, const bool bDirectWindow) -> int {
+                if(windowIdx < 0 || windowIdx >= static_cast<int>(vpCovKFi.size()) ||
+                   !vpCovKFi[windowIdx] || vpCovKFi[windowIdx]->isBad())
+                    return -1;
+
+                if(CheckFinish())
+                    return -1;
+
+                if(nLoopLightGlueCallsForCurrentKF >= nLoopLightGlueMaxCallsPerKeyFrame)
+                    return -1;
+
+                ++loopLgCalls;
+                ++nLoopLightGlueCallsForCurrentKF;
+                int num = 0;
+                try
+                {
+                    static XFeatLighterGlueMatcher lightGlueMatcher;
+                    num = lightGlueMatcher.SearchByLightGlue(mpCurrentKF,
+                                                             vpCovKFi[windowIdx],
+                                                             vvpMatchedMPs[windowIdx],
+                                                             GetXFeatLightGlueLoopConfidence(),
+                                                             &vvMatchedScores[windowIdx]);
+                    const XFeatLighterGlueMatcher::Stats& lgStats = lightGlueMatcher.LastStats();
+                    if(bDirectWindow)
+                    {
+                        loopLgDirectRawMatches = lgStats.lg_raw_matches;
+                        loopLgDirectAssigned = lgStats.one_to_one;
+                    }
+                    collectWindowMatches(windowIdx);
+                }
+                catch(const std::exception& e)
+                {
+                    std::cerr << "[LoopLG][Fallback]"
+                              << " current_kf=" << mpCurrentKF->mnId
+                              << " candidate_kf=" << pKFi->mnId
+                              << " window_kf=" << vpCovKFi[windowIdx]->mnId
+                              << " error=" << e.what()
+                              << std::endl;
+                    num = matcherBoW.SearchByBoW(mpCurrentKF, vpCovKFi[windowIdx], vvpMatchedMPs[windowIdx]);
+                    vvMatchedScores[windowIdx].assign(vvpMatchedMPs[windowIdx].size(), 0.0f);
+                    collectWindowMatches(windowIdx);
+                }
+
+                if(num > nMostBoWNumMatches)
+                {
+                    nMostBoWNumMatches = num;
+                    pMostBoWMatchesKF = vpCovKFi[windowIdx];
+                }
+                return num;
+            };
+
+            const int directMatches = runLightGlueWindow(0, true);
+            if(CheckFinish())
+                return false;
+            if(directMatches < 0)
             {
-                nMostBoWNumMatches = num;
-                nIndexMostBoWMatchesKF = j;
+                loopExpansionReason = "budget_exhausted_direct";
             }
-        }
-
-        for(int j=0; j<vpCovKFi.size(); ++j)
-        {
-            for(int k=0; k < vvpMatchedMPs[j].size(); ++k)
+            else if(!bUseLoopLightGlueExpansion)
             {
-                MapPoint* pMPi_j = vvpMatchedMPs[j][k];
-                if(!pMPi_j || pMPi_j->isBad())
+                loopExpansionReason = "disabled";
+            }
+            else if(loopLgDirectAssigned < nLoopLightGlueExpandMinDirect)
+            {
+                loopExpansionReason = "direct_below_min";
+            }
+            else if(nLoopLightGlueExpandCovisibles <= 0)
+            {
+                loopExpansionReason = "expand_zero";
+            }
+            else if(nLoopLightGlueCallsForCurrentKF >= nLoopLightGlueMaxCallsPerKeyFrame)
+            {
+                loopExpansionReason = "budget_exhausted";
+            }
+            else
+            {
+                const int nRemainingCandidateDirectBudget = std::max(0, numCandidates - index - 1);
+                const int nExpansionBudget = nLoopLightGlueMaxCallsPerKeyFrame -
+                                             nLoopLightGlueCallsForCurrentKF -
+                                             nRemainingCandidateDirectBudget;
+                const int nMaxExpansionWindows = std::min(nLoopLightGlueExpandCovisibles,
+                                                          std::max(0, nExpansionBudget));
+                if(nMaxExpansionWindows <= 0)
+                {
+                    loopExpansionReason = "budget_reserved_for_direct";
+                }
+                else
+                {
+                    loopExpansionReason = "expanded";
+                    for(int j = 1; j < static_cast<int>(vpCovKFi.size()) &&
+                                  loopExpandedWindows < nMaxExpansionWindows; ++j)
+                    {
+                        if(CheckFinish())
+                        {
+                            loopExpansionReason = loopExpanded ? "expanded_finish_requested" : "finish_requested";
+                            break;
+                        }
+
+                        const int nRemainingExpansionBudget = nLoopLightGlueMaxCallsPerKeyFrame -
+                                                              nLoopLightGlueCallsForCurrentKF -
+                                                              nRemainingCandidateDirectBudget;
+                        if(nRemainingExpansionBudget <= 0)
+                        {
+                            loopExpansionReason = loopExpanded ? "expanded_budget_reserved" : "budget_reserved_for_direct";
+                            break;
+                        }
+
+                        const int num = runLightGlueWindow(j, false);
+                        if(CheckFinish())
+                            return false;
+                        if(num >= 0)
+                        {
+                            ++loopExpandedWindows;
+                            loopExpanded = true;
+                        }
+                    }
+
+                    if(!loopExpanded && loopExpansionReason == "expanded")
+                        loopExpansionReason = "no_valid_expand_window";
+                }
+            }
+
+            if(CheckFinish())
+                return false;
+            numBoWMatches = AssignLoopLightGlueMatches(vLoopLgCandidateMatches,
+                                                       static_cast<int>(vpMatchedPoints.size()),
+                                                       vpMatchedPoints,
+                                                       vpKeyFrameMatchedMP);
+        }
+        else
+        {
+            for(int j=0; j<vpCovKFi.size(); ++j)
+            {
+                if(!vpCovKFi[j] || vpCovKFi[j]->isBad())
                     continue;
 
-                if(spMatchedMPi.find(pMPi_j) == spMatchedMPi.end())
-                {
-                    spMatchedMPi.insert(pMPi_j);
-                    numBoWMatches++;
+                int num = matcherBoW.SearchByBoW(mpCurrentKF, vpCovKFi[j], vvpMatchedMPs[j]);
 
-                    vpMatchedPoints[k]= pMPi_j;
-                    vpKeyFrameMatchedMP[k] = vpCovKFi[j];
+                if (num > nMostBoWNumMatches)
+                {
+                    nMostBoWNumMatches = num;
+                    pMostBoWMatchesKF = vpCovKFi[j];
+                }
+            }
+
+            for(int j=0; j<vpCovKFi.size(); ++j)
+            {
+                for(int k=0; k < vvpMatchedMPs[j].size(); ++k)
+                {
+                    MapPoint* pMPi_j = vvpMatchedMPs[j][k];
+                    if(!pMPi_j || pMPi_j->isBad())
+                        continue;
+
+                    if(spMatchedMPi.find(pMPi_j) == spMatchedMPi.end())
+                    {
+                        spMatchedMPi.insert(pMPi_j);
+                        numBoWMatches++;
+
+                        vpMatchedPoints[k]= pMPi_j;
+                        vpKeyFrameMatchedMP[k] = vpCovKFi[j];
+                    }
                 }
             }
         }
@@ -700,14 +1271,19 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
 
             bool bNoMore = false;
             vector<bool> vbInliers;
-            int nInliers;
+            int nInliers = 0;
             bool bConverge = false;
             Eigen::Matrix4f mTcm;
-            while(!bConverge && !bNoMore)
+            while(!bConverge && !bNoMore && !CheckFinish())
             {
                 mTcm = solver.iterate(20,bNoMore, vbInliers, nInliers, bConverge);
                 //Verbose::PrintMess("BoW guess: Solver achieve " + to_string(nInliers) + " geometrical inliers among " + to_string(nBoWInliers) + " BoW matches", Verbose::VERBOSITY_DEBUG);
             }
+            if(CheckFinish())
+                return false;
+
+            loopSim3Converged = bConverge;
+            loopSim3Inliers = nInliers;
 
             if(bConverge)
             {
@@ -744,6 +1320,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                 //std::cout << "There are " << vpKeyFrames.size() <<" KFs which view all the mappoints" << std::endl;
 
                 g2o::Sim3 gScm(solver.GetEstimatedRotation().cast<double>(),solver.GetEstimatedTranslation().cast<double>(), (double) solver.GetEstimatedScale());
+                KeyFrame* pLoopValidationKF = (bUseLightGlueInitialMatches && pMostBoWMatchesKF) ? pMostBoWMatchesKF : pKFi;
                 g2o::Sim3 gSmw(pMostBoWMatchesKF->GetRotation().cast<double>(),pMostBoWMatchesKF->GetTranslation().cast<double>(),1.0);
                 g2o::Sim3 gScw = gScm*gSmw; // Similarity matrix of current from the world position
                 Sophus::Sim3f mScw = Converter::toSophus(gScw);
@@ -752,7 +1329,12 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                 vpMatchedMP.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint*>(NULL));
                 vector<KeyFrame*> vpMatchedKF;
                 vpMatchedKF.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<KeyFrame*>(NULL));
+                if(CheckFinish())
+                    return false;
                 int numProjMatches = matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpKeyFrames, vpMatchedMP, vpMatchedKF, 8, 1.5);
+                if(CheckFinish())
+                    return false;
+                loopProjMatches = numProjMatches;
                 //cout <<"BoW: " << numProjMatches << " matches between " << vpMapPoints.size() << " points with coarse Sim3" << endl;
 
                 if(numProjMatches >= nProjMatches)
@@ -764,7 +1346,12 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                     if(mpTracker->mSensor==System::IMU_MONOCULAR && !mpCurrentKF->GetMap()->GetIniertialBA2())
                         bFixedScale=false;
 
-                    int numOptMatches = Optimizer::OptimizeSim3(mpCurrentKF, pKFi, vpMatchedMP, gScm, 10, mbFixScale, mHessian7x7, true);
+                    if(CheckFinish())
+                        return false;
+                    int numOptMatches = Optimizer::OptimizeSim3(mpCurrentKF, pLoopValidationKF, vpMatchedMP, gScm, 10, bFixedScale, mHessian7x7, true);
+                    if(CheckFinish())
+                        return false;
+                    loopOptMatches = numOptMatches;
 
                     if(numOptMatches >= nSim3Inliers)
                     {
@@ -774,7 +1361,12 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
 
                         vector<MapPoint*> vpMatchedMP;
                         vpMatchedMP.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint*>(NULL));
+                        if(CheckFinish())
+                            return false;
                         int numProjOptMatches = matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpMatchedMP, 5, 1.0);
+                        if(CheckFinish())
+                            return false;
+                        loopProjOptMatches = numProjOptMatches;
 
                         if(numProjOptMatches >= nProjOptMatches)
                         {
@@ -787,11 +1379,11 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                     continue;
                                 }
 
-                                tuple<size_t,size_t> indexes = pMPi->GetIndexInKeyFrame(pKFi);
+                                tuple<size_t,size_t> indexes = pMPi->GetIndexInKeyFrame(pLoopValidationKF);
                                 int index = get<0>(indexes);
                                 if(index >= 0)
                                 {
-                                    int coord_x = pKFi->mvKeysUn[index].pt.x;
+                                    int coord_x = pLoopValidationKF->mvKeysUn[index].pt.x;
                                     if(coord_x < min_x)
                                     {
                                         min_x = coord_x;
@@ -800,7 +1392,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                     {
                                         max_x = coord_x;
                                     }
-                                    int coord_y = pKFi->mvKeysUn[index].pt.y;
+                                    int coord_y = pLoopValidationKF->mvKeysUn[index].pt.y;
                                     if(coord_y < min_y)
                                     {
                                         min_y = coord_y;
@@ -819,7 +1411,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                             vector<KeyFrame*> vpCurrentCovKFs = mpCurrentKF->GetBestCovisibilityKeyFrames(nNumCovisibles);
 
                             int j = 0;
-                            while(nNumKFs < 3 && j<vpCurrentCovKFs.size())
+                            while(nNumKFs < 3 && j<vpCurrentCovKFs.size() && !CheckFinish())
                             {
                                 KeyFrame* pKFj = vpCurrentCovKFs[j];
                                 Sophus::SE3d mTjc = (pKFj->GetPose() * mpCurrentKF->GetPoseInverse()).cast<double>();
@@ -839,6 +1431,10 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                 }
                                 j++;
                             }
+                            if(CheckFinish())
+                                return false;
+
+                            loopCovValid = nNumKFs;
 
                             if(nNumKFs < 3)
                             {
@@ -850,7 +1446,21 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                             {
                                 nBestMatchesReproj = numProjOptMatches;
                                 nBestNumCoindicendes = nNumKFs;
+                                pBestBowCandidateKF = pKFi;
                                 pBestMatchedKF = pMostBoWMatchesKF;
+                                nBestCandidateRank = index;
+                                nBestInitialMatches = numBoWMatches;
+                                nBestDirectRawMatches = loopLgDirectRawMatches;
+                                nBestDirectAssigned = loopLgDirectAssigned;
+                                nBestLightGlueCalls = loopLgCalls;
+                                nBestLightGlueCallsBudgetUsed = nLoopLightGlueCallsForCurrentKF;
+                                nBestExpandedWindows = loopExpandedWindows;
+                                bBestExpanded = loopExpanded;
+                                sBestExpansionReason = loopExpansionReason;
+                                nBestSim3Inliers = loopSim3Inliers;
+                                nBestProjMatches = loopProjMatches;
+                                nBestOptMatches = loopOptMatches;
+                                nBestProjOptMatches = loopProjOptMatches;
                                 g2oBestScw = gScw;
                                 vpBestMapPoints = vpMapPoints;
                                 vpBestMatchedMapPoints = vpMatchedMP;
@@ -863,6 +1473,16 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
             {
                 Verbose::PrintMess("BoW candidate: it don't match with the current one", Verbose::VERBOSITY_DEBUG);
             }*/
+        }
+
+        if(bUseLightGlueInitialMatches)
+        {
+            unique_lock<mutex> lock(mMutexXFeatLoopSummary);
+            ++mnXFeatLoopLgCandidatesChecked;
+            mnXFeatLoopLgCandidateMaxRank = std::max(mnXFeatLoopLgCandidateMaxRank, index);
+            if(loopSim3Converged)
+                ++mnXFeatLoopLgSim3ConvergedCandidates;
+            mnXFeatLoopLgTotalCalls += loopLgCalls;
         }
         index++;
     }
@@ -877,7 +1497,62 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
         vpMPs = vpBestMapPoints;
         vpMatchedMPs = vpBestMatchedMapPoints;
 
-        return nNumCoincidences >= 3;
+        const bool bAccepted = nNumCoincidences >= 3;
+        if(bUseLightGlueInitialMatches && bAccepted)
+        {
+            std::cout << "[LoopLG][Accept]"
+                      << " current_kf=" << mpCurrentKF->mnId
+                      << " candidate_kf="
+                      << (pBestBowCandidateKF ? static_cast<long long>(pBestBowCandidateKF->mnId) : -1)
+                      << " candidate_rank=" << nBestCandidateRank
+                      << " matched_kf=" << (pMatchedKF2 ? static_cast<long long>(pMatchedKF2->mnId) : -1)
+                      << " initial_matches=" << nBestInitialMatches
+                      << " direct_raw=" << nBestDirectRawMatches
+                      << " direct_assigned=" << nBestDirectAssigned
+                      << " expanded=" << (bBestExpanded ? 1 : 0)
+                      << " expanded_windows=" << nBestExpandedWindows
+                      << " expansion_reason=" << sBestExpansionReason
+                      << " lg_calls=" << nBestLightGlueCalls
+                      << " lg_calls_budget_used=" << nBestLightGlueCallsBudgetUsed
+                      << " sim3_inliers=" << nBestSim3Inliers
+                      << " proj_matches=" << nBestProjMatches
+                      << " opt_matches=" << nBestOptMatches
+                      << " proj_opt_matches=" << nBestProjOptMatches
+                      << " best_proj_matches=" << nBestMatchesReproj
+                      << " cov_valid=" << nBestNumCoindicendes
+                      << std::endl;
+
+            unique_lock<mutex> lock(mMutexXFeatLoopSummary);
+            ++mnXFeatLoopLgAcceptCount;
+            mnXFeatLoopLgLastAcceptCurrentKF = static_cast<int>(mpCurrentKF->mnId);
+            mnXFeatLoopLgLastAcceptCandidateKF =
+                pBestBowCandidateKF ? static_cast<int>(pBestBowCandidateKF->mnId) : -1;
+            mnXFeatLoopLgLastAcceptMatchedKF =
+                pMatchedKF2 ? static_cast<int>(pMatchedKF2->mnId) : -1;
+            mnXFeatLoopLgLastAcceptRank = nBestCandidateRank;
+            mnXFeatLoopLgLastAcceptInitialMatches = nBestInitialMatches;
+            mnXFeatLoopLgLastAcceptSim3Inliers = nBestSim3Inliers;
+            mnXFeatLoopLgLastAcceptProjOptMatches = nBestProjOptMatches;
+            mnXFeatLoopLgLastAcceptCovValid = nBestNumCoindicendes;
+
+            const bool bBetterAcceptedLoop =
+                nBestSim3Inliers > mnXFeatLoopLgBestAcceptSim3Inliers ||
+                (nBestSim3Inliers == mnXFeatLoopLgBestAcceptSim3Inliers &&
+                 nBestProjOptMatches > mnXFeatLoopLgBestAcceptProjOptMatches);
+            if(bBetterAcceptedLoop)
+            {
+                mnXFeatLoopLgBestAcceptCurrentKF = static_cast<int>(mpCurrentKF->mnId);
+                mnXFeatLoopLgBestAcceptCandidateKF =
+                    pBestBowCandidateKF ? static_cast<int>(pBestBowCandidateKF->mnId) : -1;
+                mnXFeatLoopLgBestAcceptMatchedKF =
+                    pMatchedKF2 ? static_cast<int>(pMatchedKF2->mnId) : -1;
+                mnXFeatLoopLgBestAcceptRank = nBestCandidateRank;
+                mnXFeatLoopLgBestAcceptSim3Inliers = nBestSim3Inliers;
+                mnXFeatLoopLgBestAcceptProjOptMatches = nBestProjOptMatches;
+                mnXFeatLoopLgBestAcceptCovValid = nBestNumCoindicendes;
+            }
+        }
+        return bAccepted;
     }
     else
     {
@@ -898,8 +1573,13 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
 bool LoopClosing::DetectCommonRegionsFromLastKF(KeyFrame* pCurrentKF, KeyFrame* pMatchedKF, g2o::Sim3 &gScw, int &nNumProjMatches,
                                                 std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs)
 {
+    if(CheckFinish())
+        return false;
+
     set<MapPoint*> spAlreadyMatchedMPs(vpMatchedMPs.begin(), vpMatchedMPs.end());
     nNumProjMatches = FindMatchesByProjection(pCurrentKF, pMatchedKF, gScw, spAlreadyMatchedMPs, vpMPs, vpMatchedMPs);
+    if(CheckFinish())
+        return false;
 
     int nProjMatches = 30;
     if(nNumProjMatches >= nProjMatches)
@@ -914,6 +1594,9 @@ int LoopClosing::FindMatchesByProjection(KeyFrame* pCurrentKF, KeyFrame* pMatche
                                          set<MapPoint*> &spMatchedMPinOrigin, vector<MapPoint*> &vpMapPoints,
                                          vector<MapPoint*> &vpMatchedMapPoints)
 {
+    if(CheckFinish())
+        return 0;
+
     int nNumCovisibles = 10;
     vector<KeyFrame*> vpCovKFm = pMatchedKFw->GetBestCovisibilityKeyFrames(nNumCovisibles);
     int nInitialCov = vpCovKFm.size();
@@ -924,6 +1607,9 @@ int LoopClosing::FindMatchesByProjection(KeyFrame* pCurrentKF, KeyFrame* pMatche
     {
         for(int i=0; i<nInitialCov; ++i)
         {
+            if(CheckFinish())
+                return 0;
+
             vector<KeyFrame*> vpKFs = vpCovKFm[i]->GetBestCovisibilityKeyFrames(nNumCovisibles);
             int nInserted = 0;
             int j = 0;
@@ -944,6 +1630,9 @@ int LoopClosing::FindMatchesByProjection(KeyFrame* pCurrentKF, KeyFrame* pMatche
     vpMatchedMapPoints.clear();
     for(KeyFrame* pKFi : vpCovKFm)
     {
+        if(CheckFinish())
+            return 0;
+
         for(MapPoint* pMPij : pKFi->GetMapPointMatches())
         {
             if(!pMPij || pMPij->isBad())
@@ -961,6 +1650,8 @@ int LoopClosing::FindMatchesByProjection(KeyFrame* pCurrentKF, KeyFrame* pMatche
     ORBmatcher matcher(0.9, true);
 
     vpMatchedMapPoints.resize(pCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint*>(NULL));
+    if(CheckFinish())
+        return 0;
     int num_matches = matcher.SearchByProjection(pCurrentKF, mScw, vpMapPoints, vpMatchedMapPoints, 3, 1.5);
 
     return num_matches;
@@ -969,6 +1660,15 @@ int LoopClosing::FindMatchesByProjection(KeyFrame* pCurrentKF, KeyFrame* pMatche
 void LoopClosing::CorrectLoop()
 {
     //cout << "Loop detected!" << endl;
+    {
+        unique_lock<mutex> lock(mMutexXFeatLoopSummary);
+        ++mnXFeatLoopCorrectionCount;
+        mnXFeatLoopLastCorrectionCurrentKF =
+            mpCurrentKF ? static_cast<int>(mpCurrentKF->mnId) : -1;
+        mnXFeatLoopLastCorrectionMatchedKF =
+            mpLoopMatchedKF ? static_cast<int>(mpLoopMatchedKF->mnId) : -1;
+        mnXFeatLoopLastCorrectionCoincidences = mnLoopNumCoincidences;
+    }
 
     // Send a stop signal to Local Mapping
     // Avoid new keyframes are inserted while correcting the loop
@@ -979,6 +1679,10 @@ void LoopClosing::CorrectLoop()
     if(isRunningGBA())
     {
         cout << "Stoping Global Bundle Adjustment...";
+        {
+            unique_lock<mutex> summaryLock(mMutexXFeatLoopSummary);
+            ++mnXFeatGbaStopRequestedCount;
+        }
         unique_lock<mutex> lock(mMutexGBA);
         mbStopGBA = true;
 
@@ -993,7 +1697,7 @@ void LoopClosing::CorrectLoop()
     }
 
     // Wait until Local Mapping has effectively stopped
-    while(!mpLocalMapper->isStopped())
+    while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
     {
         usleep(1000);
     }
@@ -1195,6 +1899,13 @@ void LoopClosing::CorrectLoop()
     mpLoopMatchedKF->AddLoopEdge(mpCurrentKF);
     mpCurrentKF->AddLoopEdge(mpLoopMatchedKF);
 
+    if(CheckFinish())
+    {
+        mpLocalMapper->Release();
+        mLastLoopKFid = mpCurrentKF->mnId;
+        return;
+    }
+
     // Launch a new thread to perform Global Bundle Adjustment (Only if few keyframes, if not it would take too much time)
     if(!pLoopMap->isImuInitialized() || (pLoopMap->KeyFramesInMap()<200 && mpAtlas->CountMaps()==1))
     {
@@ -1247,7 +1958,7 @@ void LoopClosing::MergeLocal()
     //cout << "Request Stop Local Mapping" << endl;
     mpLocalMapper->RequestStop();
     // Wait until Local Mapping has effectively stopped
-    while(!mpLocalMapper->isStopped())
+    while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
     {
         usleep(1000);
     }
@@ -1706,7 +2417,7 @@ void LoopClosing::MergeLocal()
 
         mpLocalMapper->RequestStop();
         // Wait until Local Mapping has effectively stopped
-        while(!mpLocalMapper->isStopped())
+        while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
         {
             usleep(1000);
         }
@@ -1820,7 +2531,7 @@ void LoopClosing::MergeLocal2()
     //cout << "Request Stop Local Mapping" << endl;
     mpLocalMapper->RequestStop();
     // Wait until Local Mapping has effectively stopped
-    while(!mpLocalMapper->isStopped())
+    while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
     {
         usleep(1000);
     }
@@ -2268,6 +2979,11 @@ void LoopClosing::ResetIfRequested()
 void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoopKF)
 {  
     Verbose::PrintMess("Starting Global Bundle Adjustment", Verbose::VERBOSITY_NORMAL);
+    {
+        unique_lock<mutex> lock(mMutexXFeatLoopSummary);
+        ++mnXFeatGbaStartedCount;
+        mnXFeatLastGbaLoopKF = static_cast<int>(nLoopKF);
+    }
 
 #ifdef REGISTER_TIMES
     std::chrono::steady_clock::time_point time_StartFGBA = std::chrono::steady_clock::now();
@@ -2284,6 +3000,10 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
         Optimizer::GlobalBundleAdjustemnt(pActiveMap,10,&mbStopGBA,nLoopKF,false);
     else
         Optimizer::FullInertialBA(pActiveMap,7,false,nLoopKF,&mbStopGBA);
+    {
+        unique_lock<mutex> lock(mMutexXFeatLoopSummary);
+        ++mnXFeatGbaOptimizerFinishedCount;
+    }
 
 #ifdef REGISTER_TIMES
     std::chrono::steady_clock::time_point time_EndGBA = std::chrono::steady_clock::now();
@@ -2307,10 +3027,28 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
     {
         unique_lock<mutex> lock(mMutexGBA);
         if(idx!=mnFullBAIdx)
+        {
+            mbFinishedGBA = true;
+            mbRunningGBA = false;
+            {
+                unique_lock<mutex> summaryLock(mMutexXFeatLoopSummary);
+                ++mnXFeatGbaAbortedCount;
+                mnXFeatLastGbaAbortReason = 1;
+            }
             return;
+        }
 
         if(!bImuInit && pActiveMap->isImuInitialized())
+        {
+            mbFinishedGBA = true;
+            mbRunningGBA = false;
+            {
+                unique_lock<mutex> summaryLock(mMutexXFeatLoopSummary);
+                ++mnXFeatGbaAbortedCount;
+                mnXFeatLastGbaAbortReason = 2;
+            }
             return;
+        }
 
         if(!mbStopGBA)
         {
@@ -2503,6 +3241,16 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
             vdFGBATotal_ms.push_back(timeFGBA);
 #endif
             Verbose::PrintMess("Map updated!", Verbose::VERBOSITY_NORMAL);
+            {
+                unique_lock<mutex> summaryLock(mMutexXFeatLoopSummary);
+                ++mnXFeatGbaAppliedCount;
+            }
+        }
+        else
+        {
+            unique_lock<mutex> summaryLock(mMutexXFeatLoopSummary);
+            ++mnXFeatGbaAbortedCount;
+            mnXFeatLastGbaAbortReason = 4;
         }
 
         mbFinishedGBA = true;
@@ -2512,9 +3260,16 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
 
 void LoopClosing::RequestFinish()
 {
-    unique_lock<mutex> lock(mMutexFinish);
-    // cout << "LC: Finish requested" << endl;
-    mbFinishRequested = true;
+    {
+        unique_lock<mutex> lock(mMutexFinish);
+        // cout << "LC: Finish requested" << endl;
+        mbFinishRequested = true;
+    }
+
+    {
+        unique_lock<mutex> lock(mMutexLoopQueue);
+        mlpLoopKeyFrameQueue.clear();
+    }
 }
 
 bool LoopClosing::CheckFinish()

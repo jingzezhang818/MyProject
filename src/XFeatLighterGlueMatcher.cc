@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -47,6 +48,12 @@ bool IsEnvFlagEnabled(const char* key)
 
     const std::string v(env);
     return !(v.empty() || v == "0" || v == "false" || v == "FALSE");
+}
+
+std::mutex& LightGlueInferenceMutex()
+{
+    static std::mutex mutex;
+    return mutex;
 }
 
 bool PassMotionProjectionGate(MapPoint* pMP,
@@ -158,6 +165,7 @@ int AssignBestUniqueTriangulationPairs(const std::vector<TriangulationCandidate>
 XFeatLighterGlueMatcher::XFeatLighterGlueMatcher(const std::string& weightPath)
     : device_(SelectDevice()), matcher_(XFeatLightGlueConfig())
 {
+    std::lock_guard<std::mutex> lock(LightGlueInferenceMutex());
     matcher_.To(device_);
     matcher_.LoadWeights(weightPath.empty() ? DefaultWeightPath() : weightPath);
 }
@@ -407,12 +415,15 @@ int XFeatLighterGlueMatcher::SearchByLightGlue(KeyFrame* pKF,
     const float refHeight = static_cast<float>(std::max(1, pKF->mnMaxY));
     const float curWidth = std::max(1.0f, Frame::mnMaxX);
     const float curHeight = std::max(1.0f, Frame::mnMaxY);
-    const CachedInputTensors& refInput = GetKeyFrameInputTensors(*pKF, nRef, refWidth, refHeight);
-    const CachedInputTensors& curInput = GetFrameInputTensors(F, nCur, curWidth, curHeight);
-
-    const auto matches = matcher_.MatchPrepared(refInput.kpts, refInput.desc,
-                                                curInput.kpts, curInput.desc,
-                                                minConf);
+    std::vector<LGMatch> matches;
+    {
+        std::lock_guard<std::mutex> lock(LightGlueInferenceMutex());
+        const CachedInputTensors& refInput = GetKeyFrameInputTensors(*pKF, nRef, refWidth, refHeight);
+        const CachedInputTensors& curInput = GetFrameInputTensors(F, nCur, curWidth, curHeight);
+        matches = matcher_.MatchPrepared(refInput.kpts, refInput.desc,
+                                         curInput.kpts, curInput.desc,
+                                         minConf);
+    }
     lastStats_.lg_raw_matches = static_cast<int>(matches.size());
 
     const std::vector<MapPoint*> refMapPoints = pKF->GetMapPointMatches();
@@ -472,14 +483,17 @@ int XFeatLighterGlueMatcher::SearchByLightGlue(const Frame& LastFrame,
     const float lastHeight = std::max(1.0f, LastFrame.mnMaxY);
     const float curWidth = std::max(1.0f, CurrentFrame.mnMaxX);
     const float curHeight = std::max(1.0f, CurrentFrame.mnMaxY);
-    const CachedInputTensors& lastInput = GetFrameInputTensors(LastFrame, nLast, lastWidth, lastHeight);
-    const torch::Tensor kptsLastCached = lastInput.kpts;
-    const torch::Tensor descLastCached = lastInput.desc;
-    const CachedInputTensors& curInput = GetFrameInputTensors(CurrentFrame, nCur, curWidth, curHeight);
-
-    const auto matches = matcher_.MatchPrepared(kptsLastCached, descLastCached,
-                                                curInput.kpts, curInput.desc,
-                                                minConf);
+    std::vector<LGMatch> matches;
+    {
+        std::lock_guard<std::mutex> lock(LightGlueInferenceMutex());
+        const CachedInputTensors& lastInput = GetFrameInputTensors(LastFrame, nLast, lastWidth, lastHeight);
+        const torch::Tensor kptsLastCached = lastInput.kpts;
+        const torch::Tensor descLastCached = lastInput.desc;
+        const CachedInputTensors& curInput = GetFrameInputTensors(CurrentFrame, nCur, curWidth, curHeight);
+        matches = matcher_.MatchPrepared(kptsLastCached, descLastCached,
+                                         curInput.kpts, curInput.desc,
+                                         minConf);
+    }
     lastStats_.lg_raw_matches = static_cast<int>(matches.size());
 
     const bool useProjGate = IsEnvFlagEnabled("XFEAT_LG_MOTION_USE_PROJ_GATE");
@@ -505,6 +519,73 @@ int XFeatLighterGlueMatcher::SearchByLightGlue(const Frame& LastFrame,
     lastStats_.proj_gate_keep = static_cast<int>(candidates.size());
 
     const int assigned = AssignBestUniqueCandidates(candidates, CurrentFrame.N, vpMapPointMatches, vMatchScores);
+    lastStats_.one_to_one = assigned;
+    return assigned;
+}
+
+int XFeatLighterGlueMatcher::SearchByLightGlue(KeyFrame* pKF1,
+                                               KeyFrame* pKF2,
+                                               std::vector<MapPoint*>& vpMatches12,
+                                               float minConf,
+                                               std::vector<float>* vMatchScores)
+{
+    lastStats_ = Stats{};
+    const int nOut = pKF1 ? std::max(0, pKF1->N) : 0;
+    vpMatches12.assign(static_cast<size_t>(nOut), static_cast<MapPoint*>(nullptr));
+    if(vMatchScores)
+        vMatchScores->assign(static_cast<size_t>(nOut), -1.0f);
+
+    if(!pKF1 || !pKF2 || pKF1->N <= 0 || pKF2->N <= 0 ||
+       pKF1->mDescriptors.empty() || pKF2->mDescriptors.empty())
+        return 0;
+
+    lastStats_.ref_kf_id = pKF1->mnId;
+    lastStats_.last_frame_id = pKF2->mnId;
+
+    const int n1 = std::min({pKF1->N,
+                             static_cast<int>(pKF1->mvKeysUn.size()),
+                             pKF1->mDescriptors.rows});
+    const int n2 = std::min({pKF2->N,
+                             static_cast<int>(pKF2->mvKeysUn.size()),
+                             pKF2->mDescriptors.rows});
+    lastStats_.N_ref = n1;
+    lastStats_.N_cur = n2;
+
+    if(n1 <= 0 || n2 <= 0)
+        return 0;
+
+    const float width1 = static_cast<float>(std::max(1, pKF1->mnMaxX));
+    const float height1 = static_cast<float>(std::max(1, pKF1->mnMaxY));
+    const float width2 = static_cast<float>(std::max(1, pKF2->mnMaxX));
+    const float height2 = static_cast<float>(std::max(1, pKF2->mnMaxY));
+    std::vector<LGMatch> matches;
+    {
+        std::lock_guard<std::mutex> lock(LightGlueInferenceMutex());
+        const CachedInputTensors& input1 = GetKeyFrameInputTensors(*pKF1, n1, width1, height1);
+        const CachedInputTensors& input2 = GetKeyFrameInputTensors(*pKF2, n2, width2, height2);
+        matches = matcher_.MatchPrepared(input1.kpts, input1.desc,
+                                         input2.kpts, input2.desc,
+                                         minConf);
+    }
+    lastStats_.lg_raw_matches = static_cast<int>(matches.size());
+
+    std::vector<Candidate> candidates;
+    candidates.reserve(matches.size());
+    for(const LGMatch& m : matches)
+    {
+        if(m.idx0 < 0 || m.idx0 >= n1 || m.idx1 < 0 || m.idx1 >= n2)
+            continue;
+
+        MapPoint* pMP = pKF2->GetMapPoint(m.idx1);
+        if(!pMP || pMP->isBad())
+            continue;
+
+        candidates.push_back(Candidate{m.idx0, pMP, m.score});
+    }
+    lastStats_.mp_valid = static_cast<int>(candidates.size());
+    lastStats_.proj_gate_keep = lastStats_.mp_valid;
+
+    const int assigned = AssignBestUniqueCandidates(candidates, nOut, vpMatches12, vMatchScores);
     lastStats_.one_to_one = assigned;
     return assigned;
 }
@@ -539,12 +620,15 @@ int XFeatLighterGlueMatcher::SearchForTriangulation(KeyFrame* pKF1,
     const float height1 = static_cast<float>(std::max(1, pKF1->mnMaxY));
     const float width2 = static_cast<float>(std::max(1, pKF2->mnMaxX));
     const float height2 = static_cast<float>(std::max(1, pKF2->mnMaxY));
-    const CachedInputTensors& input1 = GetKeyFrameInputTensors(*pKF1, n1, width1, height1);
-    const CachedInputTensors& input2 = GetKeyFrameInputTensors(*pKF2, n2, width2, height2);
-
-    const auto matches = matcher_.MatchPrepared(input1.kpts, input1.desc,
-                                                input2.kpts, input2.desc,
-                                                minConf);
+    std::vector<LGMatch> matches;
+    {
+        std::lock_guard<std::mutex> lock(LightGlueInferenceMutex());
+        const CachedInputTensors& input1 = GetKeyFrameInputTensors(*pKF1, n1, width1, height1);
+        const CachedInputTensors& input2 = GetKeyFrameInputTensors(*pKF2, n2, width2, height2);
+        matches = matcher_.MatchPrepared(input1.kpts, input1.desc,
+                                         input2.kpts, input2.desc,
+                                         minConf);
+    }
     lastStats_.lg_raw_matches = static_cast<int>(matches.size());
 
     Sophus::SE3f T1w = pKF1->GetPose();

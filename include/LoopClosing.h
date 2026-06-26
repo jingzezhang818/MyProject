@@ -70,13 +70,24 @@ public:
     void RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoopKF);
 
     bool isRunningGBA(){
-        unique_lock<std::mutex> lock(mMutexGBA);
-        return mbRunningGBA;
+        if(mMutexGBA.try_lock())
+        {
+            const bool bRunning = mbRunningGBA;
+            mMutexGBA.unlock();
+            return bRunning;
+        }
+        return true;
     }
     bool isFinishedGBA(){
         unique_lock<std::mutex> lock(mMutexGBA);
         return mbFinishedGBA;
     }   
+
+    void RecordXFeatLoopShutdownStatus(bool bLoopCloserNotFinished,
+                                       bool bLoopCloserRunningGBA,
+                                       bool bShutdownTimeout);
+    void PrintXFeatLoopSummary();
+    void RequestShutdownGBAStop();
 
     void RequestFinish();
 
@@ -126,7 +137,8 @@ protected:
     bool DetectAndReffineSim3FromLastKF(KeyFrame* pCurrentKF, KeyFrame* pMatchedKF, g2o::Sim3 &gScw, int &nNumProjMatches,
                                         std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs);
     bool DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, KeyFrame* &pMatchedKF, KeyFrame* &pLastCurrentKF, g2o::Sim3 &g2oScw,
-                                     int &nNumCoincidences, std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs);
+                                     int &nNumCoincidences, std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs,
+                                     bool bUseLightGlueInitialMatches = false);
     bool DetectCommonRegionsFromLastKF(KeyFrame* pCurrentKF, KeyFrame* pMatchedKF, g2o::Sim3 &gScw, int &nNumProjMatches,
                                             std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs);
     int FindMatchesByProjection(KeyFrame* pCurrentKF, KeyFrame* pMatchedKFw, g2o::Sim3 &g2oScw,
@@ -218,6 +230,42 @@ protected:
     bool mbStopGBA;
     std::mutex mMutexGBA;
     std::thread* mpThreadGBA;
+
+    std::mutex mMutexXFeatLoopSummary;
+    int mnXFeatLoopLgCandidatesChecked;
+    int mnXFeatLoopLgCandidateMaxRank;
+    int mnXFeatLoopLgSim3ConvergedCandidates;
+    int mnXFeatLoopLgTotalCalls;
+    int mnXFeatLoopLgAcceptCount;
+    int mnXFeatLoopLgLastAcceptCurrentKF;
+    int mnXFeatLoopLgLastAcceptCandidateKF;
+    int mnXFeatLoopLgLastAcceptMatchedKF;
+    int mnXFeatLoopLgLastAcceptRank;
+    int mnXFeatLoopLgLastAcceptInitialMatches;
+    int mnXFeatLoopLgLastAcceptSim3Inliers;
+    int mnXFeatLoopLgLastAcceptProjOptMatches;
+    int mnXFeatLoopLgLastAcceptCovValid;
+    int mnXFeatLoopLgBestAcceptCurrentKF;
+    int mnXFeatLoopLgBestAcceptCandidateKF;
+    int mnXFeatLoopLgBestAcceptMatchedKF;
+    int mnXFeatLoopLgBestAcceptRank;
+    int mnXFeatLoopLgBestAcceptSim3Inliers;
+    int mnXFeatLoopLgBestAcceptProjOptMatches;
+    int mnXFeatLoopLgBestAcceptCovValid;
+    int mnXFeatLoopCorrectionCount;
+    int mnXFeatLoopLastCorrectionCurrentKF;
+    int mnXFeatLoopLastCorrectionMatchedKF;
+    int mnXFeatLoopLastCorrectionCoincidences;
+    int mnXFeatGbaStartedCount;
+    int mnXFeatGbaOptimizerFinishedCount;
+    int mnXFeatGbaAppliedCount;
+    int mnXFeatGbaAbortedCount;
+    int mnXFeatGbaStopRequestedCount;
+    int mnXFeatLastGbaLoopKF;
+    int mnXFeatLastGbaAbortReason;
+    bool mbXFeatShutdownSawLoopNotFinished;
+    bool mbXFeatShutdownSawGbaRunning;
+    bool mbXFeatShutdownTimeout;
 
     // Fix scale in the stereo/RGB-D case
     bool mbFixScale;

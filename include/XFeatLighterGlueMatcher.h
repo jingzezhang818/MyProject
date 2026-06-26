@@ -47,6 +47,12 @@ public:
                           float minConf,
                           std::vector<float>* vMatchScores = nullptr);
 
+    int SearchByLightGlue(KeyFrame* pKF1,
+                          KeyFrame* pKF2,
+                          std::vector<MapPoint*>& vpMatches12,
+                          float minConf,
+                          std::vector<float>* vMatchScores = nullptr);
+
     int SearchForTriangulation(KeyFrame* pKF1,
                                KeyFrame* pKF2,
                                std::vector<std::pair<size_t, size_t>>& vMatchedPairs,

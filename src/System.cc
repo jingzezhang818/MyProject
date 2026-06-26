@@ -540,20 +540,73 @@ void System::Shutdown()
             usleep(5000);
     }
 
-    // Wait until all thread have effectively stopped
-    while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
+    // Wait until all threads have effectively stopped. Give a running GBA time
+    // to apply its map update, but keep a bounded stop fallback for shutdown.
+    int nShutdownWaitIters = 0;
+    constexpr int kShutdownMaxWaitIters = 6000; // 30 seconds at 5 ms/iter.
+    int nShutdownGbaWaitIters = 0;
+    int nShutdownGbaAbortGraceIters = 0;
+    constexpr int kShutdownGbaMaxWaitIters = 2000; // 10 seconds at 5 ms/iter.
+    constexpr int kShutdownGbaAbortGraceIters = 1000; // 5 seconds at 5 ms/iter.
+    bool bShutdownSawLoopCloserNotFinished = false;
+    bool bShutdownSawGbaRunning = false;
+    bool bShutdownTimeout = false;
+    bool bShutdownGbaStopRequested = false;
+    while(true)
     {
-        if(!mpLocalMapper->isFinished())
+        const bool bLocalMapperFinished = mpLocalMapper->isFinished();
+        const bool bLoopCloserFinished = mpLoopCloser->isFinished();
+        const bool bLoopCloserRunningGBA = mpLoopCloser->isRunningGBA();
+        bShutdownSawLoopCloserNotFinished = bShutdownSawLoopCloserNotFinished || !bLoopCloserFinished;
+        bShutdownSawGbaRunning = bShutdownSawGbaRunning || bLoopCloserRunningGBA;
+        if(bLocalMapperFinished && bLoopCloserFinished && !bLoopCloserRunningGBA)
+            break;
+
+        const bool bPrintWaitStatus = (nShutdownWaitIters++ % 1000) == 0;
+        if(bPrintWaitStatus && !bLocalMapperFinished)
             cout << "mpLocalMapper is not finished" << endl;
-        if(!mpLoopCloser->isFinished())
+        if(bPrintWaitStatus && !bLoopCloserFinished)
             cout << "mpLoopCloser is not finished" << endl;
-        if(mpLoopCloser->isRunningGBA()){
-            cout << "mpLoopCloser is running GBA" << endl;
-            cout << "break anyway..." << endl;
+        if(bPrintWaitStatus && bLoopCloserRunningGBA)
+            cout << "mpLoopCloser is running GBA, waiting..." << endl;
+
+        if(bLoopCloserRunningGBA)
+        {
+            ++nShutdownGbaWaitIters;
+            if(!bShutdownGbaStopRequested &&
+               nShutdownGbaWaitIters >= kShutdownGbaMaxWaitIters)
+            {
+                cout << "[Shutdown] timeout waiting for GBA map update, requesting GBA stop." << endl;
+                bShutdownTimeout = true;
+                bShutdownGbaStopRequested = true;
+                mpLoopCloser->RequestShutdownGBAStop();
+            }
+            else if(bShutdownGbaStopRequested)
+            {
+                ++nShutdownGbaAbortGraceIters;
+                if(nShutdownGbaAbortGraceIters >= kShutdownGbaAbortGraceIters)
+                {
+                    cout << "[Shutdown] timeout waiting for GBA stop, continuing shutdown." << endl;
+                    bShutdownTimeout = true;
+                    break;
+                }
+            }
+        }
+
+        if(nShutdownWaitIters >= kShutdownMaxWaitIters &&
+           bLocalMapperFinished && !bLoopCloserRunningGBA)
+        {
+            cout << "[Shutdown] timeout waiting for LoopClosing, continuing shutdown." << endl;
+            bShutdownTimeout = true;
             break;
         }
+
         usleep(5000);
     }
+    mpLoopCloser->RecordXFeatLoopShutdownStatus(bShutdownSawLoopCloserNotFinished,
+                                                bShutdownSawGbaRunning,
+                                                bShutdownTimeout);
+    mpLoopCloser->PrintXFeatLoopSummary();
 
     if(!mStrSaveAtlasToFile.empty())
     {

@@ -2838,7 +2838,7 @@ void LocalMapping::CreateNewMapPoints()
         std::cout.flags(oldFlags);
         std::cout.precision(oldPrecision);
 
-        if(IsLocalMappingFeatureDiagEnabled())
+        if(IsLocalMappingFeatureDiagEnabled() && IsLocalMappingDeepDiagEnabled())
         {
             for(int bin = 0; bin < kMappingFeatureGridBins; ++bin)
             {
