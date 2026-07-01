@@ -58,6 +58,8 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/thirdparty/
     ${PROJECT_SOURCE_DIR}/thirdparty/g2o/
     ${PROJECT_SOURCE_DIR}/thirdparty/DBoW2/
+    ${PROJECT_SOURCE_DIR}/thirdparty/DBoW3/
+    ${PROJECT_SOURCE_DIR}/thirdparty/DBoW3/src/
     ${PROJECT_SOURCE_DIR}/thirdparty/Sophus/
 )
 
@@ -80,6 +82,7 @@ add_library(${PROJECT_NAME} SHARED
     src/Optimizer.cc
     src/Frame.cc
     src/KeyFrameDatabase.cc
+    src/XFeatKeyFrameDatabase.cc
     src/Sim3Solver.cc
     src/Viewer.cc
     src/ImuTypes.cc
@@ -118,6 +121,7 @@ add_library(${PROJECT_NAME} SHARED
     include/Optimizer.h
     include/Frame.h
     include/KeyFrameDatabase.h
+    include/XFeatKeyFrameDatabase.h
     include/Sim3Solver.h
     include/Viewer.h
     include/ImuTypes.h
@@ -132,6 +136,7 @@ add_library(${PROJECT_NAME} SHARED
     include/SerializationUtils.h
     include/Config.h
     include/Settings.h
+    include/XFeatVocabulary.h
     include/XFeat.h
     include/XFextractor.h
     include/XFeatMatcher.h
@@ -150,6 +155,7 @@ target_link_libraries(${PROJECT_NAME}
 
     ${PROJECT_SOURCE_DIR}/thirdparty/g2o/lib/libg2o${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PROJECT_SOURCE_DIR}/thirdparty/DBoW2/lib/libDBoW2${CMAKE_SHARED_LIBRARY_SUFFIX}
+    ${PROJECT_SOURCE_DIR}/thirdparty/DBoW3/lib/libDBoW3${CMAKE_SHARED_LIBRARY_SUFFIX}
     -lboost_serialization
     -lcrypto
 )
@@ -202,3 +208,15 @@ target_link_libraries(test_xfeat_lighterglue_images_cpp ${PROJECT_NAME})
 add_executable(convert_xfeat_lighterglue_weights_cpp
     tools/convert_xfeat_lighterglue_weights_cpp.cc)
 target_link_libraries(convert_xfeat_lighterglue_weights_cpp ${PROJECT_NAME})
+
+add_executable(export_xfeat_descriptors_euroc
+    tools/export_xfeat_descriptors_euroc.cc)
+target_link_libraries(export_xfeat_descriptors_euroc ${PROJECT_NAME})
+
+add_executable(train_xfeat_vocabulary_dbow3
+    tools/train_xfeat_vocabulary_dbow3.cc)
+target_link_libraries(train_xfeat_vocabulary_dbow3 ${PROJECT_NAME})
+
+add_executable(eval_xfeat_vocabulary_retrieval
+    tools/eval_xfeat_vocabulary_retrieval.cc)
+target_link_libraries(eval_xfeat_vocabulary_retrieval ${PROJECT_NAME})

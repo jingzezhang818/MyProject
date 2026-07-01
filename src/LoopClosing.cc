@@ -33,6 +33,7 @@
 #include<string>
 #include<thread>
 #include<unordered_map>
+#include<utility>
 
 
 namespace ORB_SLAM3
@@ -99,6 +100,39 @@ int GetLoopCandidateCount(const bool bUseLightGlueLoop)
     if(!bUseLightGlueLoop)
         return 3;
     return GetLoopEnvIntInRange("XFEAT_LOOP_CANDIDATES", 10, 1, 100);
+}
+
+bool IsXFeatLoopVocabEnabled()
+{
+    if(std::getenv("USE_ORB") != nullptr)
+        return false;
+    return IsLoopEnvFlagEnabled("XFEAT_USE_XFEAT_VOCAB");
+}
+
+bool IsXFeatLoopVocabConsistencyEnabled()
+{
+    if(std::getenv("USE_ORB") != nullptr)
+        return false;
+    return IsLoopEnvFlagEnabled("XFEAT_LOOP_CONSISTENCY");
+}
+
+int GetXFeatLoopVocabConsistencyThreshold()
+{
+    return GetLoopEnvIntInRange("XFEAT_LOOP_CONSISTENCY_TH", 2, 1, 10);
+}
+
+int GetXFeatLoopVocabConsistencyCovisibles()
+{
+    return GetLoopEnvIntInRange("XFEAT_LOOP_CONSISTENCY_COVISIBLES", 10, 0, 50);
+}
+
+bool ShouldPrintLoopVocabDebug(const unsigned long keyframeId)
+{
+    if(!IsLoopEnvFlagEnabled("XFEAT_DEBUG"))
+        return false;
+
+    const int interval = GetLoopEnvIntInRange("XFEAT_DIAG_INTERVAL", 30, 1, 1000000);
+    return (keyframeId % static_cast<unsigned long>(interval)) == 0UL;
 }
 
 float GetXFeatLightGlueLoopConfidence()
@@ -180,6 +214,21 @@ int AssignLoopLightGlueMatches(const std::vector<LoopLightGlueCandidateMatch>& c
     return assigned;
 }
 
+bool ConsistentGroupsShareKeyFrame(const std::set<KeyFrame*>& a, const std::set<KeyFrame*>& b)
+{
+    if(a.empty() || b.empty())
+        return false;
+
+    const std::set<KeyFrame*>& small = (a.size() < b.size()) ? a : b;
+    const std::set<KeyFrame*>& large = (a.size() < b.size()) ? b : a;
+    for(KeyFrame* pKF : small)
+    {
+        if(pKF && large.count(pKF))
+            return true;
+    }
+    return false;
+}
+
 const char* XFeatGbaAbortReasonName(const int reason)
 {
     switch(reason)
@@ -196,7 +245,8 @@ const char* XFeatGbaAbortReasonName(const int reason)
 
 LoopClosing::LoopClosing(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, const bool bFixScale, const bool bActiveLC):
     mbResetRequested(false), mbResetActiveMapRequested(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas),
-    mpKeyFrameDB(pDB), mpORBVocabulary(pVoc), mpMatchedKF(NULL), mLastLoopKFid(0), mbRunningGBA(false), mbFinishedGBA(true),
+    mpKeyFrameDB(pDB), mpORBVocabulary(pVoc), mpXFeatVocabulary(NULL), mpXFeatKeyFrameDB(NULL),
+    mpMatchedKF(NULL), mLastLoopKFid(0), mbRunningGBA(false), mbFinishedGBA(true),
     mbStopGBA(false), mpThreadGBA(NULL), mbFixScale(bFixScale), mnFullBAIdx(0), mnLoopNumCoincidences(0), mnMergeNumCoincidences(0),
     mbLoopDetected(false), mbMergeDetected(false), mnLoopNumNotFound(0), mnMergeNumNotFound(0), mbActiveLC(bActiveLC)
 {
@@ -276,6 +326,104 @@ LoopClosing::LoopClosing(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pV
     mstrFolderSubTraj = "SubTrajectories/";
     mnNumCorrection = 0;
     mnCorrectionGBA = 0;
+}
+
+void LoopClosing::SetXFeatVocabularyDatabase(XFeatVocabulary* pXFeatVoc,
+                                             XFeatKeyFrameDatabase* pXFeatKFDB)
+{
+    mpXFeatVocabulary = pXFeatVoc;
+    mpXFeatKeyFrameDB = pXFeatKFDB;
+}
+
+void LoopClosing::AddKeyFrameToDatabases(KeyFrame* pKF)
+{
+    if(!pKF)
+        return;
+    mpKeyFrameDB->add(pKF);
+    if(mpXFeatKeyFrameDB)
+        mpXFeatKeyFrameDB->add(pKF);
+}
+
+void LoopClosing::FilterXFeatLoopCandidatesByConsistency(const std::vector<KeyFrame*>& vpLoopCand,
+                                                         std::vector<KeyFrame*>& vpConsistentLoopCand,
+                                                         int& nMaxConsistency,
+                                                         int& nCurrentGroups)
+{
+    vpConsistentLoopCand.clear();
+    nMaxConsistency = 0;
+    nCurrentGroups = 0;
+
+    if(vpLoopCand.empty())
+    {
+        mvXFeatVocabConsistentGroups.clear();
+        return;
+    }
+
+    const int nConsistencyTh = GetXFeatLoopVocabConsistencyThreshold();
+    if(nConsistencyTh <= 1)
+    {
+        vpConsistentLoopCand = vpLoopCand;
+        mvXFeatVocabConsistentGroups.clear();
+        nMaxConsistency = 1;
+        return;
+    }
+
+    const int nCovisibles = GetXFeatLoopVocabConsistencyCovisibles();
+    std::vector<ConsistentGroup> vCurrentConsistentGroups;
+    std::vector<bool> vbConsistentGroup(mvXFeatVocabConsistentGroups.size(), false);
+    std::set<KeyFrame*> spAlreadyAdded;
+
+    for(KeyFrame* pCandidateKF : vpLoopCand)
+    {
+        if(!pCandidateKF || pCandidateKF->isBad())
+            continue;
+
+        std::set<KeyFrame*> spCandidateGroup;
+        spCandidateGroup.insert(pCandidateKF);
+        if(nCovisibles > 0)
+        {
+            const std::vector<KeyFrame*> vpCovisibles =
+                pCandidateKF->GetBestCovisibilityKeyFrames(nCovisibles);
+            for(KeyFrame* pKF : vpCovisibles)
+            {
+                if(pKF && !pKF->isBad())
+                    spCandidateGroup.insert(pKF);
+            }
+        }
+
+        bool bConsistentForSomeGroup = false;
+        int nBestConsistency = 1;
+        for(size_t iG = 0; iG < mvXFeatVocabConsistentGroups.size(); ++iG)
+        {
+            const std::set<KeyFrame*>& spPreviousGroup = mvXFeatVocabConsistentGroups[iG].first;
+            if(!ConsistentGroupsShareKeyFrame(spCandidateGroup, spPreviousGroup))
+                continue;
+
+            bConsistentForSomeGroup = true;
+            const int nCurrentConsistency = mvXFeatVocabConsistentGroups[iG].second + 1;
+            nBestConsistency = std::max(nBestConsistency, nCurrentConsistency);
+            if(!vbConsistentGroup[iG])
+            {
+                vCurrentConsistentGroups.push_back(std::make_pair(spCandidateGroup, nCurrentConsistency));
+                vbConsistentGroup[iG] = true;
+            }
+        }
+
+        if(!bConsistentForSomeGroup)
+        {
+            vCurrentConsistentGroups.push_back(std::make_pair(spCandidateGroup, 1));
+        }
+
+        nMaxConsistency = std::max(nMaxConsistency, nBestConsistency);
+        if(nBestConsistency >= nConsistencyTh && !spAlreadyAdded.count(pCandidateKF))
+        {
+            vpConsistentLoopCand.push_back(pCandidateKF);
+            spAlreadyAdded.insert(pCandidateKF);
+        }
+    }
+
+    nCurrentGroups = static_cast<int>(vCurrentConsistentGroups.size());
+    mvXFeatVocabConsistentGroups = std::move(vCurrentConsistentGroups);
 }
 
 void LoopClosing::RecordXFeatLoopShutdownStatus(const bool bLoopCloserNotFinished,
@@ -610,6 +758,7 @@ void LoopClosing::Run()
                     mvpLoopMPs.clear();
                     mnLoopNumNotFound = 0;
                     mbLoopDetected = false;
+                    mvXFeatVocabConsistentGroups.clear();
                 }
 
             }
@@ -674,7 +823,7 @@ bool LoopClosing::NewDetectCommonRegions()
 
     if(mpLastMap->IsInertial() && !mpLastMap->GetIniertialBA2())
     {
-        mpKeyFrameDB->add(mpCurrentKF);
+        AddKeyFrameToDatabases(mpCurrentKF);
         mpCurrentKF->SetErase();
         return false;
     }
@@ -682,7 +831,7 @@ bool LoopClosing::NewDetectCommonRegions()
     if(mpTracker->mSensor == System::STEREO && mpLastMap->GetAllKeyFrames().size() < 5) //12
     {
         // cout << "LoopClousure: Stereo KF inserted without check: " << mpCurrentKF->mnId << endl;
-        mpKeyFrameDB->add(mpCurrentKF);
+        AddKeyFrameToDatabases(mpCurrentKF);
         mpCurrentKF->SetErase();
         return false;
     }
@@ -690,7 +839,7 @@ bool LoopClosing::NewDetectCommonRegions()
     if(mpLastMap->GetAllKeyFrames().size() < 12)
     {
         // cout << "LoopClousure: Stereo KF inserted without check, map is small: " << mpCurrentKF->mnId << endl;
-        mpKeyFrameDB->add(mpCurrentKF);
+        AddKeyFrameToDatabases(mpCurrentKF);
         mpCurrentKF->SetErase();
         return false;
     }
@@ -807,7 +956,7 @@ bool LoopClosing::NewDetectCommonRegions()
 #ifdef REGISTER_TIMES
         vdEstSim3_ms.push_back(timeEstSim3);
 #endif
-        mpKeyFrameDB->add(mpCurrentKF);
+        AddKeyFrameToDatabases(mpCurrentKF);
         return true;
     }
 
@@ -817,16 +966,101 @@ bool LoopClosing::NewDetectCommonRegions()
     // Extract candidates from the bag of words
     vector<KeyFrame*> vpMergeBowCand, vpLoopBowCand;
     const bool bUseLightGlueLoop = IsXFeatLoopLightGlueEnabled();
+    const bool bUseXFeatVocabLoop = IsXFeatLoopVocabEnabled() &&
+                                    mpXFeatVocabulary &&
+                                    mpXFeatKeyFrameDB;
+    const int nLoopCandidates = GetLoopCandidateCount(bUseLightGlueLoop);
     if(!bMergeDetectedInKF || !bLoopDetectedInKF)
     {
         // Search in BoW
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartQuery = std::chrono::steady_clock::now();
 #endif
-        mpKeyFrameDB->DetectNBestCandidates(mpCurrentKF,
-                                            vpLoopBowCand,
-                                            vpMergeBowCand,
-                                            GetLoopCandidateCount(bUseLightGlueLoop));
+        vector<KeyFrame*> vpOrbLoopBowCand;
+        if(!bMergeDetectedInKF || (!bLoopDetectedInKF && !bUseXFeatVocabLoop))
+        {
+            mpKeyFrameDB->DetectNBestCandidates(mpCurrentKF,
+                                                vpOrbLoopBowCand,
+                                                vpMergeBowCand,
+                                                nLoopCandidates);
+        }
+
+        if(!bLoopDetectedInKF)
+        {
+            if(bUseXFeatVocabLoop)
+            {
+                mpXFeatKeyFrameDB->DetectNBestLoopCandidates(mpCurrentKF,
+                                                             vpLoopBowCand,
+                                                             nLoopCandidates);
+                if(ShouldPrintLoopVocabDebug(mpCurrentKF->mnId))
+                {
+                    const std::vector<XFeatKeyFrameDatabase::CandidateDebugInfo> debugInfo =
+                        mpXFeatKeyFrameDB->GetLastDebugInfo();
+                    std::cout << "[LoopVocab]"
+                              << " source=xfeat_vocab"
+                              << " current_kf=" << mpCurrentKF->mnId
+                              << " requested=" << nLoopCandidates
+                              << " loop_candidates=" << vpLoopBowCand.size()
+                              << " xfeat_words=" << mpCurrentKF->mXFeatBowVec.size()
+                              << " sharing_kfs=" << mpXFeatKeyFrameDB->GetLastSharingWords()
+                              << " max_common_words=" << mpXFeatKeyFrameDB->GetLastMaxCommonWords()
+                              << " min_common_words=" << mpXFeatKeyFrameDB->GetLastMinCommonWords();
+                    const int nPrint = std::min<int>(3, debugInfo.size());
+                    for(int i = 0; i < nPrint; ++i)
+                    {
+                        std::cout << " cand" << i
+                                  << "_kf=" << debugInfo[i].keyframeId
+                                  << " cand" << i
+                                  << "_words=" << debugInfo[i].commonWords
+                                  << " cand" << i
+                                  << "_score=" << debugInfo[i].score
+                                  << " cand" << i
+                                  << "_acc=" << debugInfo[i].accumulatedScore;
+                    }
+                    std::cout << std::endl;
+                }
+            }
+            else
+            {
+                vpLoopBowCand = vpOrbLoopBowCand;
+                if(IsXFeatLoopVocabEnabled() && ShouldPrintLoopVocabDebug(mpCurrentKF->mnId))
+                {
+                    std::cout << "[LoopVocab]"
+                              << " source=orb_vocab"
+                              << " current_kf=" << mpCurrentKF->mnId
+                              << " reason=xfeat_vocab_unavailable"
+                              << " loop_candidates=" << vpLoopBowCand.size()
+                              << std::endl;
+                }
+            }
+
+            if(bUseXFeatVocabLoop && IsXFeatLoopVocabConsistencyEnabled())
+            {
+                const int nRawLoopCandidates = static_cast<int>(vpLoopBowCand.size());
+                int nMaxConsistency = 0;
+                int nCurrentGroups = 0;
+                std::vector<KeyFrame*> vpConsistentLoopBowCand;
+                FilterXFeatLoopCandidatesByConsistency(vpLoopBowCand,
+                                                       vpConsistentLoopBowCand,
+                                                       nMaxConsistency,
+                                                       nCurrentGroups);
+
+                if(ShouldPrintLoopVocabDebug(mpCurrentKF->mnId))
+                {
+                    std::cout << "[LoopVocab][Consistency]"
+                              << " current_kf=" << mpCurrentKF->mnId
+                              << " raw_candidates=" << nRawLoopCandidates
+                              << " passed_candidates=" << vpConsistentLoopBowCand.size()
+                              << " threshold=" << GetXFeatLoopVocabConsistencyThreshold()
+                              << " max_consistency=" << nMaxConsistency
+                              << " current_groups=" << nCurrentGroups
+                              << " covisibles=" << GetXFeatLoopVocabConsistencyCovisibles()
+                              << std::endl;
+                }
+
+                vpLoopBowCand.swap(vpConsistentLoopBowCand);
+            }
+        }
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_EndQuery = std::chrono::steady_clock::now();
 
@@ -877,7 +1111,7 @@ bool LoopClosing::NewDetectCommonRegions()
         vdEstSim3_ms.push_back(timeEstSim3);
 #endif
 
-    mpKeyFrameDB->add(mpCurrentKF);
+    AddKeyFrameToDatabases(mpCurrentKF);
 
     if(mbMergeDetected || mbLoopDetected)
     {
@@ -2952,6 +3186,9 @@ void LoopClosing::ResetIfRequested()
     {
         cout << "Loop closer reset requested..." << endl;
         mlpLoopKeyFrameQueue.clear();
+        if(mpXFeatKeyFrameDB)
+            mpXFeatKeyFrameDB->clear();
+        mvXFeatVocabConsistentGroups.clear();
         mLastLoopKFid=0;  //TODO old variable, it is not use in the new algorithm
         mbResetRequested=false;
         mbResetActiveMapRequested = false;
@@ -2971,6 +3208,9 @@ void LoopClosing::ResetIfRequested()
         }
 
         mLastLoopKFid=mpAtlas->GetLastInitKFid(); //TODO old variable, it is not use in the new algorithm
+        if(mpXFeatKeyFrameDB)
+            mpXFeatKeyFrameDB->clearMap(mpMapToReset);
+        mvXFeatVocabConsistentGroups.clear();
         mbResetActiveMapRequested=false;
 
     }

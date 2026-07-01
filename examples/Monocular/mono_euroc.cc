@@ -108,7 +108,7 @@ int main(int argc, char **argv)
             }
 
             if(imageScale != 1.f)
-            {.
+            {
 
 #ifdef REGISTER_TIMES
     #ifdef COMPILEDWITHC11

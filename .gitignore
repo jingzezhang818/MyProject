@@ -213,3 +213,13 @@ examples/Monocular/SePT01_*.yaml
 
 # Experiment logs
 experiment_logs/
+
+# XFeat vocabulary training artifacts
+Vocabulary/xfeat/descriptors/
+Vocabulary/xfeat/logs/
+Vocabulary/xfeat/models/
+
+# Local tool build outputs
+tools/export_xfeat_descriptors_euroc
+tools/train_xfeat_vocabulary_dbow3
+tools/eval_xfeat_vocabulary_retrieval

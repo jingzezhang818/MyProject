@@ -30,6 +30,14 @@ cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j8
 cd ../../..
 
+# setup DBoW3
+cd thirdparty/DBoW3
+mkdir -p build
+cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j8
+cd ../../..
+
 # setup Sophus
 cd thirdparty/Sophus
 mkdir -p build

@@ -19,6 +19,7 @@
 #include "KeyFrame.h"
 #include "Converter.h"
 #include "ImuTypes.h"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -187,6 +188,41 @@ void KeyFrame::ComputeBoW()
         // We assume the vocabulary tree has 6 levels, change the 4 otherwise
         mpORBvocabulary->transform(vCurrentDesc,mBowVec,mFeatVec,4);
     }
+}
+
+void KeyFrame::ComputeXFeatBoW(const XFeatVocabulary* pXFeatVoc, int maxFeaturesPerKeyFrame)
+{
+    if(!mXFeatBowVec.empty() || !pXFeatVoc || pXFeatVoc->empty())
+        return;
+    if(mDescriptors.empty() || mDescriptors.type() != CV_32F || mDescriptors.cols != 64)
+        return;
+
+    cv::Mat descriptorsForBow;
+    if(maxFeaturesPerKeyFrame <= 0 || mDescriptors.rows <= maxFeaturesPerKeyFrame)
+    {
+        descriptorsForBow = mDescriptors;
+    }
+    else
+    {
+        descriptorsForBow.create(maxFeaturesPerKeyFrame, mDescriptors.cols, mDescriptors.type());
+        if(maxFeaturesPerKeyFrame == 1)
+        {
+            mDescriptors.row(0).copyTo(descriptorsForBow.row(0));
+        }
+        else
+        {
+            const double scale = static_cast<double>(mDescriptors.rows - 1) /
+                                 static_cast<double>(maxFeaturesPerKeyFrame - 1);
+            for(int i = 0; i < maxFeaturesPerKeyFrame; ++i)
+            {
+                const int row = std::min(mDescriptors.rows - 1,
+                                         static_cast<int>(std::lround(i * scale)));
+                mDescriptors.row(row).copyTo(descriptorsForBow.row(i));
+            }
+        }
+    }
+
+    pXFeatVoc->transform(descriptorsForBow, mXFeatBowVec);
 }
 
 void KeyFrame::SetPose(const Sophus::SE3f &Tcw)

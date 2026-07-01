@@ -149,14 +149,14 @@ EuRoC: MH01, MH02, MH03, MH05, V101, V102, V201, V202
 新增离线导出工具，输出每帧或抽样帧的 XFeat descriptors：
 
 ```text
-tools/export_xfeat_descriptors
+tools/export_xfeat_descriptors_euroc
 ```
 
 输入：
 
-- 图像目录或 EuRoC mav0 路径。
+- EuRoC `mav0` 路径。
 - timestamp 文件。
-- 相机 yaml。
+- 相机选择：`cam0` 或 `cam1`。
 - XFeat 权重路径。
 - 采样间隔，例如每 3 或 5 帧导出一次。
 
@@ -165,9 +165,8 @@ tools/export_xfeat_descriptors
 ```text
 vocabulary/xfeat/train/*.yml.gz 或 .bin
 每个样本包含:
-- frame_id / timestamp
+- timestamp
 - image path
-- keypoints: x, y, response, octave
 - descriptors: N x 64 CV_32F
 ```
 
@@ -219,6 +218,18 @@ build 脚本增加 DBoW3 构建
 // include/XFeatVocabulary.h
 typedef DBoW3::Vocabulary XFeatVocabulary;
 ```
+
+当前实现状态：
+
+- 已引入 `thirdparty/DBoW3`，并生成 `thirdparty/DBoW3/lib/libDBoW3.so`。
+- 已新增 `include/XFeatVocabulary.h`。
+- 已在主工程 CMake 中链接 DBoW3。
+- 已新增离线 descriptor 导出工具 `export_xfeat_descriptors_euroc`。
+- 已新增 DBoW3 训练工具 `train_xfeat_vocabulary_dbow3`。
+- 已新增 `KeyFrame::ComputeXFeatBoW()` 和独立的 `mXFeatBowVec`，不覆盖原 ORB BoW。
+- 已新增 `XFeatKeyFrameDatabase`，只负责 XFeat 词袋 loop candidate retrieval。
+- 已在 `System` 中按 `XFEAT_USE_XFEAT_VOCAB=1` / `XFEAT_VOCAB_PATH` 加载 XFeat 词袋。
+- 已在 `LoopClosing` 中接入 XFeat vocab loop candidate source；merge、relocalization 和后端 correction/GBA 仍保持原逻辑。
 
 新增 System 成员：
 
@@ -437,20 +448,21 @@ candidate_source=orb_vocab/xfeat_vocab
 新增：
 
 ```text
-tools/train_xfeat_vocabulary
+tools/train_xfeat_vocabulary_dbow3
 ```
 
 输入：
 
 ```text
---descriptor-list vocabulary/xfeat/train/list.txt
---output Vocabulary/xfeat_float_k10_l6.yml.gz
+Vocabulary/xfeat_float_euroc_k10_l5.dbow3
+vocabulary/xfeat/train/MH01_cam0_step3.yml.gz
+vocabulary/xfeat/train/MH02_cam0_step3.yml.gz
 --k 10
---L 6
---weighting TF_IDF
---scoring L1_NORM
---max-features-per-image 800
---max-images 5000
+--L 5
+--max-features-per-frame 512
+--max-frames 0
+--max-kmeans-iters 20
+--min-changed-ratio 0.001
 ```
 
 DBoW3 默认构造：
@@ -460,6 +472,8 @@ DBoW3::Vocabulary voc(k, L, DBoW3::TF_IDF, DBoW3::L1_NORM);
 voc.create(training_features);
 voc.save(output);
 ```
+
+`--max-kmeans-iters` 和 `--min-changed-ratio` 只影响离线词袋训练阶段，不影响 SLAM 运行时的 XFeat、LightGlue、Sim3 或 GBA。默认值为 `0/0`，保持 DBoW3 原始的严格收敛行为。第一轮大规模训练建议显式使用 `20 / 0.001`，先避免大节点长时间收敛。
 
 ### 参数候选
 
@@ -543,7 +557,168 @@ recall@3 / recall@6 / recall@10 / recall@20
 
 如果 offline retrieval 没有明显改善，不要急着接入 SLAM 主线，应先回到训练数据、k/L、descriptor normalization 检查。
 
+### 当前第一版评估工具
+
+已新增：
+
+```text
+tools/eval_xfeat_vocabulary_retrieval
+```
+
+第一版只评估 XFeat/DBoW3 词袋本身，不进入 SLAM 主流程，不调用 LightGlue、Sim3 或 GBA。它读取 `export_xfeat_descriptors_euroc` 导出的 `xfeat_descriptors_v1` 文件，对每帧生成 BoW，然后按 vocabulary score 排序。
+
+输出重点：
+
+```text
+[XFeatVocabEval][Top]          每个 query 的 top1 / score margin
+[XFeatVocabEval][Summary]      query 数量、平均 top1-top2 / top1-topK margin
+[XFeatVocabEval][Pair]         可选 pair 的 rank 和 score
+[XFeatVocabEval][PairsSummary] 可选 pair 的 recall@3/6/10/20
+```
+
+已增加 GT true-loop 标注评估。工具可读取 EuRoC `state_groundtruth_estimate0/data.csv` 或 TUM 格式轨迹，按同一序列、时间间隔、空间距离和可选朝向差定义 true loop。它输出的是 place recognition 候选召回能力，不代表后续 LightGlue、Sim3、CorrectLoop、GBA 一定成功。
+
+默认 true-loop 定义：
+
+```text
+same sequence
+abs(query_time - target_time) >= 30s
+position distance <= 2.0m
+orientation angle <= 180deg
+```
+
+新增输出：
+
+```text
+[XFeatVocabEval][GTLoad]     每个序列 GT pose 关联数量
+[XFeatVocabEval][GT]         每个有 true-loop query 的 best true-loop rank、top1 是否为 true loop
+[XFeatVocabEval][GTSummary]  recall@3/6/10/20、top1_true_rate、missed_true_loop
+```
+
+这一步用于回答：
+
+```text
+当前词袋是否能把真实回环候选排进 topK？
+top1/top6 里是否经常是几何上并不接近的假候选？
+继续调 k/L/训练迭代是否比直接接入在线 LoopClosing 更值得？
+```
+
+注意：当前 descriptor 文件是按图像帧抽样导出的，不是 SLAM 运行时 KeyFrame dump；历史日志中的 `current_kf/candidate_kf` 不能直接等同于导出文件的 frame index。若要复现某次 `[LoopLG][Accept]` 的 exact KF pair，需要后续增加 keyframe descriptor dump 或整理出可对应到导出帧的 pair 文件。
+
+MH04 单序列快速评估命令：
+
+```bash
+./tools/eval_xfeat_vocabulary_retrieval \
+  Vocabulary/xfeat/models/xfeat_float_euroc_all_k10_l5_f512_i40_r001.dbow3 \
+  Vocabulary/xfeat/descriptors/MH04_cam0_step3.yml.gz \
+  --top-k 20 \
+  --exclude-nearby-frames 200 \
+  --query-step 10 \
+  --max-features-per-frame 512 \
+  --output Vocabulary/xfeat/logs/eval_MH04_xfeat_float_k10_l5_f512_i40_r001.csv \
+  2>&1 | tee Vocabulary/xfeat/logs/eval_MH04_xfeat_float_k10_l5_f512_i40_r001.log
+```
+
+MH04 带 GT true-loop 标注评估命令：
+
+```bash
+./tools/eval_xfeat_vocabulary_retrieval \
+  Vocabulary/xfeat/models/xfeat_float_euroc_all_k10_l5_f512_i150_r001.dbow3 \
+  Vocabulary/xfeat/descriptors/MH04_cam0_step3.yml.gz \
+  --gt "MH04_cam0_step3:/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_04_difficult/mav0/state_groundtruth_estimate0/data.csv" \
+  --top-k 20 \
+  --exclude-nearby-frames 200 \
+  --query-step 10 \
+  --max-features-per-frame 512 \
+  --gt-min-time-gap 30 \
+  --gt-loop-distance 2.0 \
+  --gt-max-time-diff 0.02 \
+  --print-top-rows 0 \
+  --output Vocabulary/xfeat/logs/eval_MH04_xfeat_float_k10_l5_f512_i150_r001_gt.csv \
+  2>&1 | tee Vocabulary/xfeat/logs/eval_MH04_xfeat_float_k10_l5_f512_i150_r001_gt.log
+```
+
+多序列候选排序压力测试命令：
+
+```bash
+./tools/eval_xfeat_vocabulary_retrieval \
+  Vocabulary/xfeat/models/xfeat_float_euroc_all_k10_l5_f512_i40_r001.dbow3 \
+  Vocabulary/xfeat/descriptors/MH01_cam0_step3.yml.gz \
+  Vocabulary/xfeat/descriptors/MH02_cam0_step3.yml.gz \
+  Vocabulary/xfeat/descriptors/MH03_cam0_step3.yml.gz \
+  Vocabulary/xfeat/descriptors/MH04_cam0_step3.yml.gz \
+  Vocabulary/xfeat/descriptors/MH05_cam0_step3.yml.gz \
+  Vocabulary/xfeat/descriptors/V101_cam0_step3.yml.gz \
+  Vocabulary/xfeat/descriptors/V102_cam0_step3.yml.gz \
+  Vocabulary/xfeat/descriptors/V103_cam0_step3.yml.gz \
+  Vocabulary/xfeat/descriptors/V201_cam0_step3.yml.gz \
+  Vocabulary/xfeat/descriptors/V202_cam0_step3.yml.gz \
+  Vocabulary/xfeat/descriptors/V203_cam0_step3.yml.gz \
+  --top-k 20 \
+  --exclude-nearby-frames 200 \
+  --query-step 20 \
+  --max-features-per-frame 512 \
+  --output Vocabulary/xfeat/logs/eval_euroc_all_xfeat_float_k10_l5_f512_i40_r001.csv \
+  2>&1 | tee Vocabulary/xfeat/logs/eval_euroc_all_xfeat_float_k10_l5_f512_i40_r001.log
+```
+
+如果整理了 known-good pair 文件，格式如下。这里的 `local_index` 是 descriptor 文件中的导出帧序号，不是日志里的 KeyFrame id：
+
+```text
+# query target label
+MH04_cam0_step3:270 MH04_cam0_step3:20 accepted_loop_like
+```
+
+则增加：
+
+```bash
+--pairs Vocabulary/xfeat/pairs/MH04_known_good_pairs.txt
+```
+
 ## 阶段 7：完整 SLAM A/B
+
+### 当前在线接入第一阶段
+
+第一阶段已实现运行时接入，但只替换 loop candidate retrieval：
+
+```text
+XFEAT_USE_XFEAT_VOCAB=1
+XFEAT_VOCAB_PATH=Vocabulary/xfeat/models/xfeat_float_euroc_all_k10_l5_f512_i150_r001.dbow3
+```
+
+代码边界：
+
+```text
+System:
+  加载 XFeatVocabulary(DBoW3)
+  创建 XFeatKeyFrameDatabase
+
+KeyFrame:
+  新增 mXFeatBowVec
+  新增 ComputeXFeatBoW()
+
+LoopClosing:
+  XFEAT_USE_XFEAT_VOCAB=1 时从 XFeatKeyFrameDatabase 获取 loop candidates
+  每个 Current KF 入库时同步加入 ORB DB 和 XFeat DB
+  merge candidates 仍使用原 ORB KeyFrameDatabase
+```
+
+保持不变：
+
+```text
+LightGlue loop validation
+Sim3 / projection refinement / OptimizeSim3
+CorrectLoop / GBA
+relocalization
+tracking / local mapping / keyframe insertion
+```
+
+新增日志：
+
+```text
+[XFeatVocab] loaded path=... words=... effective_levels=...
+[LoopVocab] source=xfeat_vocab current_kf=... requested=... loop_candidates=...
+```
 
 ### baseline 命令
 
@@ -589,14 +764,14 @@ XFEAT_LOOP_LG_EXPAND=1 \
 XFEAT_LOOP_LG_EXPAND_COVISIBLES=1 \
 XFEAT_LOOP_LG_MAX_CALLS_PER_KF=12 \
 XFEAT_USE_XFEAT_VOCAB=1 \
-XFEAT_VOCAB_PATH=Vocabulary/xfeat_float_euroc_k10_l6.yml.gz \
+XFEAT_VOCAB_PATH=Vocabulary/xfeat/models/xfeat_float_euroc_all_k10_l5_f512_i150_r001.dbow3 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/EuRoC.yaml \
   "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_04_difficult/mav0" \
   examples/Stereo/EuRoC_TimeStamps/MH04.txt \
   EuRoC_MH_04_difficult_stereo \
-  2>&1 | tee experiment_logs/Stereo/EuRoC/MH_04_difficult/run_MH04_xfeat_vocab_k10_l6.log
+  2>&1 | tee experiment_logs/Stereo/EuRoC/MH_04_difficult/run_MH04_xfeat_vocab_k10_l5_i150.log
 ```
 
 ### 必须分组统计
@@ -640,6 +815,42 @@ tracking lost
 - loop accepted 的 Sim3 初始质量是否仍弱。
 - loop 前 local map 状态是否让 correction 难以收敛。
 - 是否需要 XFeat vocabulary + stricter loop accept policy。
+
+## 2026-06-29：XFeat Vocab 候选一致性过滤
+
+背景：
+
+- XFeat vocabulary 已经能参与 MH04 loop retrieval，但多次运行仍存在 `candidate_rank / sim3_inliers / GBA` 质量波动。
+- Rover-SLAM 的结构说明深度特征词袋可以作为 loop retrieval 前端；SuperPointSLAM/ORB-SLAM2 的经验说明候选不应只按单帧 BoW 排名直接进入几何验证，还需要连续 KF 的共视组一致性。
+- 当前工程已有 ORB-SLAM3 新版的“几何检测后连续验证”，但缺少“BoW candidate 进入 LG/Sim3 前”的 place-recognition consistency。
+
+代码改动：
+
+- 新增默认关闭开关：
+  - `XFEAT_LOOP_CONSISTENCY=1`
+  - `XFEAT_LOOP_CONSISTENCY_TH=2`
+  - `XFEAT_LOOP_CONSISTENCY_COVISIBLES=10`
+- 只在 `XFEAT_USE_XFEAT_VOCAB=1` 的 loop candidate path 生效，不影响 ORBvoc、不影响 merge candidates。
+- `XFeatKeyFrameDatabase` 返回 topN 后，先把每个 candidate 扩成 `candidate + top covisible KFs` 的 group。
+- 当前 group 和上一轮 group 有关键帧重叠时累计 consistency；达到阈值后才进入 `DetectCommonRegionsFromBoW()`，后续仍由 LG、Sim3、projection、OptimizeSim3、CorrectLoop、GBA 验证。
+- 新增低频日志 `[LoopVocab][Consistency]`，只受 `XFEAT_DEBUG=1` 与 `XFEAT_DIAG_INTERVAL` 控制，记录：
+  - `raw_candidates`
+  - `passed_candidates`
+  - `threshold`
+  - `max_consistency`
+  - `current_groups`
+  - `covisibles`
+
+预期：
+
+- 降低单帧偶然候选直接触发 LG/Sim3 的概率。
+- 允许 `XFEAT_LOOP_CANDIDATES` 稍微放宽到 `8~10`，但真实 LG 验证数量由 consistency gate 控制。
+- 如果有效，应表现为 loop 触发时机更稳定、`candidate_rank` 更靠前、弱 `sim3_inliers` loop 减少、RMSE median 比单次 best 更稳定。
+
+回退：
+
+- 不设置 `XFEAT_LOOP_CONSISTENCY` 即恢复原 XFeat vocabulary candidate 行为。
+- 如果 `passed_candidates` 长期为 0，优先把阈值从 `2` 降到 `1` 做链路确认，而不是扩大 LG 负载。
 
 ## 风险与回退
 

@@ -35,7 +35,9 @@
 #include "LocalMapping.h"
 #include "LoopClosing.h"
 #include "KeyFrameDatabase.h"
+#include "XFeatKeyFrameDatabase.h"
 #include "ORBVocabulary.h"
+#include "XFeatVocabulary.h"
 #include "Viewer.h"
 #include "ImuTypes.h"
 #include "Settings.h"
@@ -207,6 +209,8 @@ private:
 
     // KeyFrame database for place recognition (relocalization and loop detection).
     KeyFrameDatabase* mpKeyFrameDatabase;
+    XFeatVocabulary* mpXFeatVocabulary;
+    XFeatKeyFrameDatabase* mpXFeatKeyFrameDatabase;
 
     // Map structure that stores the pointers to all KeyFrames and MapPoints.
     //Map* mpMap;

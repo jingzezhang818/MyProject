@@ -24,6 +24,7 @@
 #include "thirdparty/DBoW2/DBoW2/BowVector.h"
 #include "thirdparty/DBoW2/DBoW2/FeatureVector.h"
 #include "ORBVocabulary.h"
+#include "XFeatVocabulary.h"
 #include "ORBextractor.h"
 #include "Frame.h"
 #include "KeyFrameDatabase.h"
@@ -216,6 +217,7 @@ public:
 
     // Bag of Words Representation
     void ComputeBoW();
+    void ComputeXFeatBoW(const XFeatVocabulary* pXFeatVoc, int maxFeaturesPerKeyFrame = 512);
 
     // Covisibility graph functions
     void AddConnection(KeyFrame* pKF, const int &weight);
@@ -386,6 +388,7 @@ public:
     //BoW
     DBoW2::BowVector mBowVec;
     DBoW2::FeatureVector mFeatVec;
+    DBoW3::BowVector mXFeatBowVec;
 
     // Pose relative to parent (this is computed when bad flag is activated)
     Sophus::SE3f mTcp;

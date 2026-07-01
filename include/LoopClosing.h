@@ -27,6 +27,8 @@
 #include "Tracking.h"
 
 #include "KeyFrameDatabase.h"
+#include "XFeatKeyFrameDatabase.h"
+#include "XFeatVocabulary.h"
 
 #include <boost/algorithm/string.hpp>
 #include <thread>
@@ -57,6 +59,9 @@ public:
     void SetTracker(Tracking* pTracker);
 
     void SetLocalMapper(LocalMapping* pLocalMapper);
+
+    void SetXFeatVocabularyDatabase(XFeatVocabulary* pXFeatVoc,
+                                    XFeatKeyFrameDatabase* pXFeatKFDB);
 
     // Main function
     void Run();
@@ -144,6 +149,11 @@ protected:
     int FindMatchesByProjection(KeyFrame* pCurrentKF, KeyFrame* pMatchedKFw, g2o::Sim3 &g2oScw,
                                 set<MapPoint*> &spMatchedMPinOrigin, vector<MapPoint*> &vpMapPoints,
                                 vector<MapPoint*> &vpMatchedMapPoints);
+    void AddKeyFrameToDatabases(KeyFrame* pKF);
+    void FilterXFeatLoopCandidatesByConsistency(const std::vector<KeyFrame*>& vpLoopCand,
+                                                std::vector<KeyFrame*>& vpConsistentLoopCand,
+                                                int& nMaxConsistency,
+                                                int& nCurrentGroups);
 
 
     void SearchAndFuse(const KeyFrameAndPose &CorrectedPosesMap, vector<MapPoint*> &vpMapPoints);
@@ -173,6 +183,8 @@ protected:
 
     KeyFrameDatabase* mpKeyFrameDB;
     ORBVocabulary* mpORBVocabulary;
+    XFeatVocabulary* mpXFeatVocabulary;
+    XFeatKeyFrameDatabase* mpXFeatKeyFrameDB;
 
     LocalMapping *mpLocalMapper;
 
@@ -188,6 +200,7 @@ protected:
     KeyFrame* mpLastCurrentKF;
     KeyFrame* mpMatchedKF;
     std::vector<ConsistentGroup> mvConsistentGroups;
+    std::vector<ConsistentGroup> mvXFeatVocabConsistentGroups;
     std::vector<KeyFrame*> mvpEnoughConsistentCandidates;
     std::vector<KeyFrame*> mvpCurrentConnectedKFs;
     std::vector<MapPoint*> mvpCurrentMatchedPoints;

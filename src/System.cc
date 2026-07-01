@@ -20,6 +20,7 @@
 
 #include "System.h"
 #include "Converter.h"
+#include <cstdlib>
 #include <thread>
 #include <pangolin/pangolin.h>
 #include <iomanip>
@@ -36,12 +37,33 @@
 
 namespace ORB_SLAM3
 {
+namespace
+{
+
+bool IsSystemEnvFlagEnabled(const char* key)
+{
+    const char* env = std::getenv(key);
+    if(!env)
+        return false;
+    const std::string value(env);
+    return !(value.empty() || value == "0" || value == "false" || value == "FALSE");
+}
+
+std::string GetSystemEnvString(const char* key)
+{
+    const char* env = std::getenv(key);
+    return env ? std::string(env) : std::string();
+}
+
+} // namespace
 
 Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
                const bool bUseViewer, const int initFr, const string &strSequence):
     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
+    mpXFeatVocabulary(static_cast<XFeatVocabulary*>(NULL)),
+    mpXFeatKeyFrameDatabase(static_cast<XFeatKeyFrameDatabase*>(NULL)),
     mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false)
 {
     // Output welcome message
@@ -191,6 +213,30 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     if (mSensor==IMU_STEREO || mSensor==IMU_MONOCULAR || mSensor==IMU_RGBD)
         mpAtlas->SetInertialSensor();
 
+    if(IsSystemEnvFlagEnabled("XFEAT_USE_XFEAT_VOCAB"))
+    {
+        const std::string xfeatVocPath = GetSystemEnvString("XFEAT_VOCAB_PATH");
+        if(xfeatVocPath.empty())
+        {
+            cerr << "[XFeatVocab] XFEAT_USE_XFEAT_VOCAB=1 but XFEAT_VOCAB_PATH is empty" << endl;
+            exit(-1);
+        }
+
+        cout << endl << "[XFeatVocab] Loading XFeat vocabulary: " << xfeatVocPath << endl;
+        mpXFeatVocabulary = new XFeatVocabulary();
+        mpXFeatVocabulary->load(xfeatVocPath);
+        if(mpXFeatVocabulary->empty())
+        {
+            cerr << "[XFeatVocab] failed to load or empty vocabulary: " << xfeatVocPath << endl;
+            exit(-1);
+        }
+        mpXFeatKeyFrameDatabase = new XFeatKeyFrameDatabase(*mpXFeatVocabulary);
+        cout << "[XFeatVocab] loaded path=" << xfeatVocPath
+             << " words=" << mpXFeatVocabulary->size()
+             << " effective_levels=" << mpXFeatVocabulary->getEffectiveLevels()
+             << endl << endl;
+    }
+
     //Create Drawers. These are used by the Viewer
     mpFrameDrawer = new FrameDrawer(mpAtlas);
     mpMapDrawer = new MapDrawer(mpAtlas, strSettingsFile, settings_);
@@ -221,6 +267,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     //Initialize the Loop Closing thread and launch
     // mSensor!=MONOCULAR && mSensor!=IMU_MONOCULAR
     mpLoopCloser = new LoopClosing(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor!=MONOCULAR, activeLC); // mSensor!=MONOCULAR);
+    mpLoopCloser->SetXFeatVocabularyDatabase(mpXFeatVocabulary, mpXFeatKeyFrameDatabase);
     mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
 
     //Set pointers between threads
