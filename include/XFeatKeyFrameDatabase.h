@@ -28,6 +28,24 @@ public:
         int commonWords = 0;
         float score = 0.0f;
         float accumulatedScore = 0.0f;
+        int groupSize = 0;
+    };
+
+    struct LoopCandidateGroupMember
+    {
+        KeyFrame* pKF = nullptr;
+        int commonWords = 0;
+        float score = 0.0f;
+    };
+
+    struct LoopCandidateGroup
+    {
+        KeyFrame* pRepresentative = nullptr;
+        std::vector<KeyFrame*> vpGroupKFs;
+        std::vector<LoopCandidateGroupMember> vMembers;
+        int commonWords = 0;
+        float representativeScore = 0.0f;
+        float groupScore = 0.0f;
     };
 
     XFeatKeyFrameDatabase() = default;
@@ -41,6 +59,11 @@ public:
     void DetectNBestLoopCandidates(KeyFrame* pKF,
                                    std::vector<KeyFrame*>& vpLoopCand,
                                    int nNumCandidates);
+    void DetectLoopCandidateGroups(KeyFrame* pKF,
+                                   std::vector<LoopCandidateGroup>& vLoopGroups);
+    void DetectNBestLoopCandidateGroups(KeyFrame* pKF,
+                                        std::vector<LoopCandidateGroup>& vLoopGroups,
+                                        int nNumCandidates);
 
     std::vector<CandidateDebugInfo> GetLastDebugInfo() const;
     int GetLastMaxCommonWords() const;

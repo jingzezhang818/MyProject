@@ -389,6 +389,7 @@ public:
     DBoW2::BowVector mBowVec;
     DBoW2::FeatureVector mFeatVec;
     DBoW3::BowVector mXFeatBowVec;
+    std::map<DBoW3::WordId, std::vector<unsigned int> > mXFeatWordFeatures;
 
     // Pose relative to parent (this is computed when bad flag is activated)
     Sophus::SE3f mTcp;

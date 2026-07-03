@@ -143,17 +143,14 @@ protected:
                                         std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs);
     bool DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, KeyFrame* &pMatchedKF, KeyFrame* &pLastCurrentKF, g2o::Sim3 &g2oScw,
                                      int &nNumCoincidences, std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs,
-                                     bool bUseLightGlueInitialMatches = false);
+                                     bool bUseLightGlueInitialMatches = false,
+                                     const std::vector<XFeatKeyFrameDatabase::LoopCandidateGroup>* pvXFeatLoopGroups = nullptr);
     bool DetectCommonRegionsFromLastKF(KeyFrame* pCurrentKF, KeyFrame* pMatchedKF, g2o::Sim3 &gScw, int &nNumProjMatches,
                                             std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs);
     int FindMatchesByProjection(KeyFrame* pCurrentKF, KeyFrame* pMatchedKFw, g2o::Sim3 &g2oScw,
                                 set<MapPoint*> &spMatchedMPinOrigin, vector<MapPoint*> &vpMapPoints,
                                 vector<MapPoint*> &vpMatchedMapPoints);
     void AddKeyFrameToDatabases(KeyFrame* pKF);
-    void FilterXFeatLoopCandidatesByConsistency(const std::vector<KeyFrame*>& vpLoopCand,
-                                                std::vector<KeyFrame*>& vpConsistentLoopCand,
-                                                int& nMaxConsistency,
-                                                int& nCurrentGroups);
 
 
     void SearchAndFuse(const KeyFrameAndPose &CorrectedPosesMap, vector<MapPoint*> &vpMapPoints);
@@ -200,7 +197,6 @@ protected:
     KeyFrame* mpLastCurrentKF;
     KeyFrame* mpMatchedKF;
     std::vector<ConsistentGroup> mvConsistentGroups;
-    std::vector<ConsistentGroup> mvXFeatVocabConsistentGroups;
     std::vector<KeyFrame*> mvpEnoughConsistentCandidates;
     std::vector<KeyFrame*> mvpCurrentConnectedKFs;
     std::vector<MapPoint*> mvpCurrentMatchedPoints;

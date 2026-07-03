@@ -29,13 +29,16 @@ int GetEnvIntInRange(const char* name, const int fallback, const int minValue, c
     }
 }
 
-bool AccScoreGreater(const std::pair<float, KeyFrame*>& a, const std::pair<float, KeyFrame*>& b)
+bool LoopGroupGreater(const XFeatKeyFrameDatabase::LoopCandidateGroup& a,
+                      const XFeatKeyFrameDatabase::LoopCandidateGroup& b)
 {
-    if(a.first != b.first)
-        return a.first > b.first;
-    if(!a.second || !b.second)
-        return a.second < b.second;
-    return a.second->mnId < b.second->mnId;
+    if(a.groupScore != b.groupScore)
+        return a.groupScore > b.groupScore;
+    if(a.representativeScore != b.representativeScore)
+        return a.representativeScore > b.representativeScore;
+    if(!a.pRepresentative || !b.pRepresentative)
+        return a.pRepresentative < b.pRepresentative;
+    return a.pRepresentative->mnId < b.pRepresentative->mnId;
 }
 
 } // namespace
@@ -123,7 +126,32 @@ void XFeatKeyFrameDatabase::DetectNBestLoopCandidates(KeyFrame* pKF,
                                                        int nNumCandidates)
 {
     vpLoopCand.clear();
-    if(!mpVoc || !pKF || pKF->isBad() || nNumCandidates <= 0)
+    if(nNumCandidates <= 0)
+        return;
+
+    std::vector<LoopCandidateGroup> vLoopGroups;
+    DetectNBestLoopCandidateGroups(pKF, vLoopGroups, nNumCandidates);
+    vpLoopCand.reserve(vLoopGroups.size());
+    for(const LoopCandidateGroup& group : vLoopGroups)
+    {
+        if(group.pRepresentative)
+            vpLoopCand.push_back(group.pRepresentative);
+    }
+}
+
+void XFeatKeyFrameDatabase::DetectLoopCandidateGroups(KeyFrame* pKF,
+                                                      std::vector<LoopCandidateGroup>& vLoopGroups)
+{
+    vLoopGroups.clear();
+    {
+        std::unique_lock<std::mutex> debugLock(mMutexDebug);
+        mvLastDebugInfo.clear();
+        mnLastMaxCommonWords = 0;
+        mnLastMinCommonWords = 0;
+        mnLastSharingWords = 0;
+    }
+
+    if(!mpVoc || !pKF || pKF->isBad())
         return;
 
     pKF->ComputeXFeatBoW(mpVoc, mnMaxFeaturesPerKeyFrame);
@@ -168,22 +196,19 @@ void XFeatKeyFrameDatabase::DetectNBestLoopCandidates(KeyFrame* pKF,
     int maxCommonWords = 0;
     for(const auto& item : mCommonWords)
         maxCommonWords = std::max(maxCommonWords, item.second);
-    const int minCommonWords = static_cast<int>(maxCommonWords * 0.8f);
+    const int minCommonWords = std::max(static_cast<int>(maxCommonWords * 0.5f), 8);
 
     std::map<KeyFrame*, float> mScore;
-    std::vector<CandidateDebugInfo> debugInfo;
-    debugInfo.reserve(mCommonWords.size());
     for(const auto& item : mCommonWords)
     {
         KeyFrame* pKFi = item.first;
         if(!pKFi || pKFi->mXFeatBowVec.empty())
             continue;
-        if(item.second <= minCommonWords)
+        if(item.second < minCommonWords)
             continue;
 
         const float score = static_cast<float>(mpVoc->score(pKF->mXFeatBowVec, pKFi->mXFeatBowVec));
         mScore[pKFi] = score;
-        debugInfo.push_back(CandidateDebugInfo{pKFi->mnId, item.second, score, score});
     }
 
     if(mScore.empty())
@@ -196,55 +221,108 @@ void XFeatKeyFrameDatabase::DetectNBestLoopCandidates(KeyFrame* pKF,
         return;
     }
 
-    std::vector<std::pair<float, KeyFrame*> > vAccScoreAndMatch;
-    vAccScoreAndMatch.reserve(mScore.size());
+    constexpr int kGroupNeighborCount = 10;
+    constexpr int kGroupNeighborMinWeight = 10;
+    constexpr int kGroupScoreFrameCount = 5;
+    std::map<KeyFrame*, LoopCandidateGroup> mBestGroupByRepresentative;
     for(const auto& item : mScore)
     {
         KeyFrame* pKFi = item.first;
         const float baseScore = item.second;
-        float accScore = baseScore;
-        float bestScore = baseScore;
-        KeyFrame* pBestKF = pKFi;
+        std::map<KeyFrame*, LoopCandidateGroupMember> mMembers;
+        mMembers[pKFi] = LoopCandidateGroupMember{pKFi, mCommonWords[pKFi], baseScore};
 
-        const std::vector<KeyFrame*> vpNeighs = pKFi->GetBestCovisibilityKeyFrames(10);
+        const std::vector<KeyFrame*> vpNeighs = pKFi->GetBestCovisibilityKeyFrames(kGroupNeighborCount);
         for(KeyFrame* pKF2 : vpNeighs)
         {
+            if(!pKF2 || pKFi->GetWeight(pKF2) <= kGroupNeighborMinWeight)
+                continue;
             const auto scoreIt = mScore.find(pKF2);
             if(scoreIt == mScore.end())
                 continue;
-            accScore += scoreIt->second;
-            if(scoreIt->second > bestScore)
-            {
-                bestScore = scoreIt->second;
-                pBestKF = pKF2;
-            }
+            mMembers[pKF2] = LoopCandidateGroupMember{pKF2, mCommonWords[pKF2], scoreIt->second};
         }
-        vAccScoreAndMatch.push_back(std::make_pair(accScore, pBestKF));
-        for(CandidateDebugInfo& info : debugInfo)
+
+        std::vector<LoopCandidateGroupMember> vMembers;
+        vMembers.reserve(mMembers.size());
+        for(const auto& member : mMembers)
+            vMembers.push_back(member.second);
+
+        std::sort(vMembers.begin(), vMembers.end(),
+                  [](const LoopCandidateGroupMember& a, const LoopCandidateGroupMember& b) {
+                      if(a.score != b.score)
+                          return a.score > b.score;
+                      if(a.commonWords != b.commonWords)
+                          return a.commonWords > b.commonWords;
+                      if(!a.pKF || !b.pKF)
+                          return a.pKF < b.pKF;
+                      return a.pKF->mnId < b.pKF->mnId;
+                  });
+
+        if(vMembers.empty() || !vMembers.front().pKF)
+            continue;
+
+        LoopCandidateGroup group;
+        group.pRepresentative = vMembers.front().pKF;
+        group.commonWords = vMembers.front().commonWords;
+        group.representativeScore = vMembers.front().score;
+        group.vMembers = vMembers;
+        const int nScoreFrames = std::min<int>(kGroupScoreFrameCount, vMembers.size());
+        for(int i = 0; i < nScoreFrames; ++i)
         {
-            if(info.keyframeId == pBestKF->mnId)
-            {
-                info.accumulatedScore = std::max(info.accumulatedScore, accScore);
-                break;
-            }
+            group.groupScore += vMembers[i].score;
+            if(vMembers[i].pKF)
+                group.vpGroupKFs.push_back(vMembers[i].pKF);
         }
+
+        auto itGroup = mBestGroupByRepresentative.find(group.pRepresentative);
+        if(itGroup == mBestGroupByRepresentative.end() ||
+           LoopGroupGreater(group, itGroup->second))
+            mBestGroupByRepresentative[group.pRepresentative] = group;
     }
 
-    std::sort(vAccScoreAndMatch.begin(), vAccScoreAndMatch.end(), AccScoreGreater);
+    vLoopGroups.reserve(mBestGroupByRepresentative.size());
+    for(const auto& item : mBestGroupByRepresentative)
+        vLoopGroups.push_back(item.second);
+
+    std::sort(vLoopGroups.begin(), vLoopGroups.end(), LoopGroupGreater);
+
+    if(vLoopGroups.size() > 3 && !vLoopGroups.empty())
+    {
+        const float minGroupScore = vLoopGroups.front().groupScore * 0.5f;
+        vLoopGroups.erase(std::remove_if(vLoopGroups.begin(),
+                                         vLoopGroups.end(),
+                                         [minGroupScore](const LoopCandidateGroup& group) {
+                                             return group.groupScore < minGroupScore;
+                                         }),
+                          vLoopGroups.end());
+    }
 
     std::set<KeyFrame*> spAlreadyAddedKF;
-    vpLoopCand.reserve(static_cast<size_t>(nNumCandidates));
-    for(const std::pair<float, KeyFrame*>& item : vAccScoreAndMatch)
+    std::vector<LoopCandidateGroup> vUniqueGroups;
+    vUniqueGroups.reserve(vLoopGroups.size());
+    for(LoopCandidateGroup& group : vLoopGroups)
     {
-        KeyFrame* pKFi = item.second;
+        KeyFrame* pKFi = group.pRepresentative;
         if(!pKFi || pKFi->isBad() || spAlreadyAddedKF.count(pKFi))
             continue;
-        vpLoopCand.push_back(pKFi);
         spAlreadyAddedKF.insert(pKFi);
-        if(static_cast<int>(vpLoopCand.size()) >= nNumCandidates)
-            break;
+        vUniqueGroups.push_back(group);
     }
+    vLoopGroups.swap(vUniqueGroups);
 
+    std::vector<CandidateDebugInfo> debugInfo;
+    debugInfo.reserve(vLoopGroups.size());
+    for(const LoopCandidateGroup& group : vLoopGroups)
+    {
+        if(!group.pRepresentative)
+            continue;
+        debugInfo.push_back(CandidateDebugInfo{group.pRepresentative->mnId,
+                                               group.commonWords,
+                                               group.representativeScore,
+                                               group.groupScore,
+                                               static_cast<int>(group.vpGroupKFs.size())});
+    }
     std::sort(debugInfo.begin(), debugInfo.end(), [](const CandidateDebugInfo& a,
                                                      const CandidateDebugInfo& b) {
         if(a.accumulatedScore != b.accumulatedScore)
@@ -261,6 +339,19 @@ void XFeatKeyFrameDatabase::DetectNBestLoopCandidates(KeyFrame* pKF,
     mnLastMaxCommonWords = maxCommonWords;
     mnLastMinCommonWords = minCommonWords;
     mnLastSharingWords = static_cast<int>(mCommonWords.size());
+}
+
+void XFeatKeyFrameDatabase::DetectNBestLoopCandidateGroups(KeyFrame* pKF,
+                                                           std::vector<LoopCandidateGroup>& vLoopGroups,
+                                                           int nNumCandidates)
+{
+    vLoopGroups.clear();
+    if(nNumCandidates <= 0)
+        return;
+
+    DetectLoopCandidateGroups(pKF, vLoopGroups);
+    if(static_cast<int>(vLoopGroups.size()) > nNumCandidates)
+        vLoopGroups.resize(static_cast<size_t>(nNumCandidates));
 }
 
 std::vector<XFeatKeyFrameDatabase::CandidateDebugInfo> XFeatKeyFrameDatabase::GetLastDebugInfo() const

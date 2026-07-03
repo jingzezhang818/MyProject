@@ -192,22 +192,28 @@ void KeyFrame::ComputeBoW()
 
 void KeyFrame::ComputeXFeatBoW(const XFeatVocabulary* pXFeatVoc, int maxFeaturesPerKeyFrame)
 {
-    if(!mXFeatBowVec.empty() || !pXFeatVoc || pXFeatVoc->empty())
+    if((!mXFeatBowVec.empty() && !mXFeatWordFeatures.empty()) || !pXFeatVoc || pXFeatVoc->empty())
         return;
     if(mDescriptors.empty() || mDescriptors.type() != CV_32F || mDescriptors.cols != 64)
         return;
 
     cv::Mat descriptorsForBow;
+    std::vector<int> vOriginalRows;
     if(maxFeaturesPerKeyFrame <= 0 || mDescriptors.rows <= maxFeaturesPerKeyFrame)
     {
         descriptorsForBow = mDescriptors;
+        vOriginalRows.reserve(mDescriptors.rows);
+        for(int i = 0; i < mDescriptors.rows; ++i)
+            vOriginalRows.push_back(i);
     }
     else
     {
         descriptorsForBow.create(maxFeaturesPerKeyFrame, mDescriptors.cols, mDescriptors.type());
+        vOriginalRows.reserve(maxFeaturesPerKeyFrame);
         if(maxFeaturesPerKeyFrame == 1)
         {
             mDescriptors.row(0).copyTo(descriptorsForBow.row(0));
+            vOriginalRows.push_back(0);
         }
         else
         {
@@ -218,11 +224,19 @@ void KeyFrame::ComputeXFeatBoW(const XFeatVocabulary* pXFeatVoc, int maxFeatures
                 const int row = std::min(mDescriptors.rows - 1,
                                          static_cast<int>(std::lround(i * scale)));
                 mDescriptors.row(row).copyTo(descriptorsForBow.row(i));
+                vOriginalRows.push_back(row);
             }
         }
     }
 
+    mXFeatBowVec.clear();
+    mXFeatWordFeatures.clear();
     pXFeatVoc->transform(descriptorsForBow, mXFeatBowVec);
+    for(int i = 0; i < descriptorsForBow.rows && i < static_cast<int>(vOriginalRows.size()); ++i)
+    {
+        const DBoW3::WordId wordId = pXFeatVoc->transform(descriptorsForBow.row(i));
+        mXFeatWordFeatures[wordId].push_back(static_cast<unsigned int>(vOriginalRows[i]));
+    }
 }
 
 void KeyFrame::SetPose(const Sophus::SE3f &Tcw)
