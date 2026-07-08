@@ -307,31 +307,152 @@ namespace
         return value;
     }
 
-    bool IsXFeatLocalMapCoreFirstEnabled()
+    bool IsXFeatLocalMapTemporalExpansionLastEnabled()
     {
-        static const bool enabled = IsEnvFlagEnabled("XFEAT_LOCALMAP_CORE_FIRST");
+        static const bool enabled = IsEnvFlagEnabled("XFEAT_LOCALMAP_TEMPORAL_EXPANSION_LAST");
         return enabled;
     }
 
-    int GetXFeatLocalMapCoreFirstMinPrior()
+    int GetXFeatLocalMapTemporalCoreWindow()
     {
         static const int value =
-            GetEnvIntInRange("XFEAT_LOCALMAP_CORE_FIRST_MIN_PRIOR", 120, 0, 10000);
+            GetEnvIntInRange("XFEAT_LOCALMAP_TEMPORAL_CORE_WINDOW", 5, 1, 30);
         return value;
     }
 
-    int GetXFeatLocalMapCoreFirstMinCoreMatches()
+    int GetXFeatLocalMapTemporalMinSupport()
     {
         static const int value =
-            GetEnvIntInRange("XFEAT_LOCALMAP_CORE_FIRST_MIN_CORE_MATCHES", 40, 0, 10000);
+            GetEnvIntInRange("XFEAT_LOCALMAP_TEMPORAL_MIN_SUPPORT", 140, 0, 10000);
         return value;
     }
 
-    int GetXFeatLocalMapCoreFirstMinTotalMatches()
+    enum LocalMapTemporalCoreBin : unsigned char
     {
-        static const int value =
-            GetEnvIntInRange("XFEAT_LOCALMAP_CORE_FIRST_MIN_TOTAL_MATCHES", 160, 0, 10000);
-        return value;
+        kTemporalCoreUnknown = 0,
+        kTemporalCoreStrictCore = 1,
+        kTemporalCoreVotedCore = 2,
+        kTemporalCoreExpansion = 3
+    };
+
+    constexpr int kTemporalCoreBinCount = 4;
+    constexpr int kTemporalCoreStrongVote = 15;
+    constexpr int kTemporalCoreMinLocalObservations = 4;
+
+    const char* LocalMapTemporalCoreBinName(const int bin)
+    {
+        switch(bin)
+        {
+            case kTemporalCoreStrictCore:
+                return "strict_core";
+            case kTemporalCoreVotedCore:
+                return "voted_core";
+            case kTemporalCoreExpansion:
+                return "expansion";
+            case kTemporalCoreUnknown:
+            default:
+                return "unknown";
+        }
+    }
+
+    void AddTemporalCoreKeyFrames(KeyFrame* pStartKF,
+                                  const int maxKeyFrames,
+                                  std::unordered_set<KeyFrame*>& temporalCoreKFs)
+    {
+        int added = 0;
+        for(KeyFrame* pKF = pStartKF; pKF && added < maxKeyFrames; pKF = pKF->mPrevKF)
+        {
+            if(pKF->isBad())
+                continue;
+            if(temporalCoreKFs.insert(pKF).second)
+                ++added;
+        }
+    }
+
+    bool IsObservedByTemporalCoreKF(MapPoint* pMP,
+                                    const std::unordered_set<KeyFrame*>& temporalCoreKFs)
+    {
+        if(!pMP || temporalCoreKFs.empty())
+            return false;
+
+        for(KeyFrame* pKF : temporalCoreKFs)
+        {
+            if(pKF && !pKF->isBad() && pMP->IsInKeyFrame(pKF))
+                return true;
+        }
+        return false;
+    }
+
+    unsigned char ClassifyLocalMapTemporalCoreKF(
+        KeyFrame* pKF,
+        const Tracking::LocalKFProvenance* provenance,
+        const std::unordered_set<KeyFrame*>& temporalCoreKFs)
+    {
+        if(!pKF || pKF->isBad())
+            return kTemporalCoreUnknown;
+
+        if(temporalCoreKFs.find(pKF) != temporalCoreKFs.end())
+            return kTemporalCoreStrictCore;
+
+        if(!provenance)
+            return kTemporalCoreUnknown;
+
+        if(provenance->role == Tracking::LocalKFProvenanceRole::Voted &&
+           provenance->voteCount >= kTemporalCoreStrongVote)
+        {
+            return kTemporalCoreVotedCore;
+        }
+
+        if(provenance->role == Tracking::LocalKFProvenanceRole::Voted ||
+           provenance->role == Tracking::LocalKFProvenanceRole::Reference ||
+           provenance->role == Tracking::LocalKFProvenanceRole::Temporal ||
+           provenance->role == Tracking::LocalKFProvenanceRole::Covis ||
+           provenance->role == Tracking::LocalKFProvenanceRole::ChildParent)
+        {
+            return kTemporalCoreExpansion;
+        }
+
+        return kTemporalCoreUnknown;
+    }
+
+    unsigned char ClassifyLocalMapTemporalCorePoint(
+        MapPoint* pMP,
+        const Tracking::LocalMPProvenance* provenance,
+        const std::unordered_set<KeyFrame*>& temporalCoreKFs)
+    {
+        if(!pMP || pMP->isBad())
+            return kTemporalCoreUnknown;
+
+        if(provenance)
+        {
+            if(provenance->pBestKeyFrame &&
+               temporalCoreKFs.find(provenance->pBestKeyFrame) != temporalCoreKFs.end())
+            {
+                return kTemporalCoreStrictCore;
+            }
+
+            if(provenance->bestRole == Tracking::LocalKFProvenanceRole::Voted &&
+               provenance->bestVoteCount >= kTemporalCoreStrongVote &&
+               provenance->localObservations >= kTemporalCoreMinLocalObservations)
+            {
+                return kTemporalCoreVotedCore;
+            }
+        }
+
+        if(IsObservedByTemporalCoreKF(pMP, temporalCoreKFs))
+            return kTemporalCoreStrictCore;
+
+        if(provenance &&
+           (provenance->bestRole == Tracking::LocalKFProvenanceRole::Voted ||
+            provenance->bestRole == Tracking::LocalKFProvenanceRole::Reference ||
+            provenance->bestRole == Tracking::LocalKFProvenanceRole::Temporal ||
+            provenance->bestRole == Tracking::LocalKFProvenanceRole::Covis ||
+            provenance->bestRole == Tracking::LocalKFProvenanceRole::ChildParent))
+        {
+            return kTemporalCoreExpansion;
+        }
+
+        return kTemporalCoreUnknown;
     }
 
     int GetRuntimeFpsInterval()
@@ -1221,6 +1342,12 @@ namespace
             case kXFeatMatchRelocalization: return "relocalization";
             default: return "unknown";
         }
+    }
+
+    bool IsLocalProjectionMatchSource(const unsigned char source)
+    {
+        return source == kXFeatMatchLocalProjection ||
+               source == kXFeatMatchLocalProjectionLightGlueVerified;
     }
 
     void EnsureXFeatMatchSourceSize(Frame& F)
@@ -9901,6 +10028,104 @@ bool Tracking::TrackLocalMap()
     const float outlier_ratio_after_opt = assoc_after_opt > 0
         ? static_cast<float>(outlier_after_opt) / static_cast<float>(assoc_after_opt)
         : 0.0f;
+    if(mLocalMapTemporalCore.enabled &&
+       mLocalMapTemporalCore.frameId == mCurrentFrame.mnId)
+    {
+        for(int bin = 0; bin < kTemporalCoreBinCount; ++bin)
+        {
+            mLocalMapTemporalCore.optAssoc[bin] = 0;
+            mLocalMapTemporalCore.optInlier[bin] = 0;
+            mLocalMapTemporalCore.optOutlier[bin] = 0;
+        }
+
+        const int nSource =
+            std::min(static_cast<int>(mCurrentFrame.mvpMapPoints.size()),
+                     static_cast<int>(mCurrentFrame.mvXFeatMatchSource.size()));
+        for(int i = 0; i < nSource; ++i)
+        {
+            MapPoint* pMP = mCurrentFrame.mvpMapPoints[static_cast<size_t>(i)];
+            if(!pMP)
+                continue;
+            if(!IsLocalProjectionMatchSource(mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)]))
+                continue;
+
+            unsigned char bin = kTemporalCoreUnknown;
+            const auto itBin = mmLocalMapTemporalCoreBins.find(pMP);
+            if(itBin != mmLocalMapTemporalCoreBins.end())
+                bin = itBin->second;
+            if(bin >= kTemporalCoreBinCount)
+                bin = kTemporalCoreUnknown;
+
+            ++mLocalMapTemporalCore.optAssoc[bin];
+            const bool bOutlier =
+                i < static_cast<int>(mCurrentFrame.mvbOutlier.size()) &&
+                mCurrentFrame.mvbOutlier[static_cast<size_t>(i)];
+            if(bOutlier)
+                ++mLocalMapTemporalCore.optOutlier[bin];
+            else
+                ++mLocalMapTemporalCore.optInlier[bin];
+        }
+
+        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+        {
+            const int prior = mLocalMapTemporalCore.priorAssociations;
+            const int strictProj =
+                mLocalMapTemporalCore.projectionMatch[kTemporalCoreStrictCore];
+            const int votedProj =
+                mLocalMapTemporalCore.projectionMatch[kTemporalCoreVotedCore];
+            const int baseSupport = prior + strictProj + votedProj;
+            const char* expansionLastDecision = mLocalMapTemporalCore.expansionLastUsed
+                ? "fallback_expansion"
+                : "base_only";
+
+            const std::ios::fmtflags oldFlags = std::cout.flags();
+            const std::streamsize oldPrecision = std::cout.precision();
+            std::cout << std::fixed << std::setprecision(6)
+                      << "[TrackLocalMap][TemporalCore]"
+                      << " frame_id=" << mCurrentFrame.mnId
+                      << " temporal_window=" << mLocalMapTemporalCore.temporalWindow
+                      << " local_kfs=" << mLocalMapTemporalCore.localKFs
+                      << " local_kfs_strict_core=" << mLocalMapTemporalCore.localKFsStrictCore
+                      << " local_kfs_voted_core=" << mLocalMapTemporalCore.localKFsVotedCore
+                      << " local_kfs_expansion=" << mLocalMapTemporalCore.localKFsExpansion
+                      << " local_kfs_unknown=" << mLocalMapTemporalCore.localKFsUnknown
+                      << " prior_assoc=" << prior
+                      << " base_support=" << baseSupport
+                      << " expansion_last=" << mLocalMapTemporalCore.expansionLastEnabled
+                      << " expansion_last_decision=" << expansionLastDecision
+                      << " expansion_last_min_support=" << mLocalMapTemporalCore.expansionLastMinSupport
+                      << " expansion_last_deferred=" << mLocalMapTemporalCore.expansionLastDeferred
+                      << " expansion_last_admitted=" << mLocalMapTemporalCore.expansionLastAdmitted
+                      << " expansion_last_suppressed=" << mLocalMapTemporalCore.expansionLastSuppressed;
+
+            auto printBin = [&](const int bin)
+            {
+                const int optAssoc = mLocalMapTemporalCore.optAssoc[bin];
+                const float outlierRatio = optAssoc > 0
+                    ? static_cast<float>(mLocalMapTemporalCore.optOutlier[bin]) /
+                      static_cast<float>(optAssoc)
+                    : 0.0f;
+                const char* prefix = LocalMapTemporalCoreBinName(bin);
+                std::cout << " " << prefix << "_selected=" << mLocalMapTemporalCore.selected[bin]
+                          << " " << prefix << "_already_seen=" << mLocalMapTemporalCore.alreadySeen[bin]
+                          << " " << prefix << "_bad=" << mLocalMapTemporalCore.bad[bin]
+                          << " " << prefix << "_in_frustum=" << mLocalMapTemporalCore.inFrustum[bin]
+                          << " " << prefix << "_admitted=" << mLocalMapTemporalCore.admitted[bin]
+                          << " " << prefix << "_proj_match=" << mLocalMapTemporalCore.projectionMatch[bin]
+                          << " " << prefix << "_opt_assoc=" << optAssoc
+                          << " " << prefix << "_opt_inlier=" << mLocalMapTemporalCore.optInlier[bin]
+                          << " " << prefix << "_opt_outlier=" << mLocalMapTemporalCore.optOutlier[bin]
+                          << " " << prefix << "_opt_outlier_ratio=" << outlierRatio;
+            };
+            printBin(kTemporalCoreStrictCore);
+            printBin(kTemporalCoreVotedCore);
+            printBin(kTemporalCoreExpansion);
+            printBin(kTemporalCoreUnknown);
+            std::cout << std::endl;
+            std::cout.flags(oldFlags);
+            std::cout.precision(oldPrecision);
+        }
+    }
     StereoDepthConstraintStats localStereoAfterOpt;
     AccumulateStereoDepthConstraintStats(mCurrentFrame, mThDepth, true, localStereoAfterOpt);
     RecordTrackLocalMapCloseReuseOutcomes(mCurrentFrame);
@@ -10441,6 +10666,12 @@ bool Tracking::NeedNewKeyFrame()
         (((c1a || c1b || c1cNoClose) && c2NoClose) || c3 || c4);
     const bool bCloseOnlyInsertion =
         bOriginalNeedNewKF && bNeedToInsertClose && !bNeedNewKFWithoutClose;
+
+    const long int framesSinceLastKF =
+        mCurrentFrame.mnId >= mnLastKeyFrameId
+            ? static_cast<long int>(mCurrentFrame.mnId - mnLastKeyFrameId)
+            : -1;
+
     bool bCloseGuardSuppress = false;
     const char* closeGuardReason = "disabled";
     if(!bXFeatKFInsertGuardEnabled)
@@ -10483,10 +10714,6 @@ bool Tracking::NeedNewKeyFrame()
             return;
         if(!ShouldPrintXFeatDebug(mCurrentFrame.mnId))
             return;
-        const long int framesSinceLastKF =
-            mCurrentFrame.mnId >= mnLastKeyFrameId
-                ? static_cast<long int>(mCurrentFrame.mnId - mnLastKeyFrameId)
-                : -1;
 
         std::cout << "[Tracking][KFDecision]"
                   << " frame_id=" << mCurrentFrame.mnId
@@ -10512,14 +10739,17 @@ bool Tracking::NeedNewKeyFrame()
                   << " c4=" << (c4 ? 1 : 0)
                   << " need_new_kf=" << (needNewKF ? 1 : 0)
                   << " decision=" << decision
-                  << " kf_guard_enabled=" << (bXFeatKFInsertGuardEnabled ? 1 : 0)
-                  << " kf_guard_eligible=" << (bXFeatKFInsertGuardEligible ? 1 : 0)
                   << " need_without_close=" << (bNeedNewKFWithoutClose ? 1 : 0)
                   << " close_only_insertion=" << (bCloseOnlyInsertion ? 1 : 0)
-                  << " close_guard_suppressed=" << (bCloseGuardSuppress ? 1 : 0)
-                  << " close_guard_reason=" << closeGuardReason
                   << " c1c_no_close=" << (c1cNoClose ? 1 : 0)
                   << " c2_no_close=" << (c2NoClose ? 1 : 0);
+        if(bXFeatKFInsertGuardEnabled)
+        {
+            std::cout << " kf_guard_enabled=1"
+                      << " kf_guard_eligible=" << (bXFeatKFInsertGuardEligible ? 1 : 0)
+                      << " close_guard_suppressed=" << (bCloseGuardSuppress ? 1 : 0)
+                      << " close_guard_reason=" << closeGuardReason;
+        }
         std::cout << std::endl;
     };
 
@@ -10858,17 +11088,8 @@ void Tracking::SearchLocalPoints()
         : mThDepth;
     const std::string localFoundRatioScope = GetLocalMapFoundRatioScope();
     const bool bUseLightGlueLocalMap = !bUseORB && IsXFeatLightGlueLocalMapEnabled();
-    const bool bUseLocalMapCoreFirst = !bUseORB && IsXFeatLocalMapCoreFirstEnabled();
-    const int coreFirstMinPrior = GetXFeatLocalMapCoreFirstMinPrior();
-    const int coreFirstMinCoreMatches = GetXFeatLocalMapCoreFirstMinCoreMatches();
-    const int coreFirstMinTotalMatches = GetXFeatLocalMapCoreFirstMinTotalMatches();
-    int coreFirstCoreCandidates = 0;
-    int coreFirstExpansionCandidates = 0;
-    int coreFirstExpansionAdmitted = 0;
-    int coreFirstExpansionSuppressed = 0;
-    int coreFirstCoreMatches = 0;
-    int coreFirstExpansionMatches = 0;
-    const char* coreFirstDecision = bUseLocalMapCoreFirst ? "pending" : "disabled";
+    const bool bUseTemporalExpansionLast =
+        !bUseORB && IsXFeatLocalMapTemporalExpansionLastEnabled();
     int localFoundRatioRejectedBySource[kMapPointCreationSourceCount] = {};
     int localFoundRatioRejectedDepthQualified = 0;
     int localFoundRatioRejectedDepthQualifiedBySource[kMapPointCreationSourceCount] = {};
@@ -10935,22 +11156,17 @@ void Tracking::SearchLocalPoints()
     static constexpr int kMappingFeatureReuseCombinedBins = 6;
     std::vector<MapPoint*> vpLocalProjectionMapPoints;
     vpLocalProjectionMapPoints.reserve(mvpLocalMapPoints.size());
-    std::vector<MapPoint*> vpCoreLocalProjectionMapPoints;
-    std::vector<MapPoint*> vpExpansionLocalProjectionMapPoints;
-    if(bUseLocalMapCoreFirst)
-    {
-        vpCoreLocalProjectionMapPoints.reserve(mvpLocalMapPoints.size());
-        vpExpansionLocalProjectionMapPoints.reserve(mvpLocalMapPoints.size() / 2);
-    }
-    struct DeferredLocalProjectionPoint
+    struct TemporalExpansionProjectionCandidate
     {
         MapPoint* pMP = nullptr;
         float depth = std::numeric_limits<float>::quiet_NaN();
     };
-    std::vector<DeferredLocalProjectionPoint> vDeferredExpansionLocalPoints;
-    if(bUseLocalMapCoreFirst)
+    std::vector<TemporalExpansionProjectionCandidate> vTemporalExpansionCandidates;
+    std::vector<MapPoint*> vpTemporalExpansionProjectionMapPoints;
+    if(bUseTemporalExpansionLast)
     {
-        vDeferredExpansionLocalPoints.reserve(mvpLocalMapPoints.size() / 2);
+        vTemporalExpansionCandidates.reserve(mvpLocalMapPoints.size() / 4 + 1);
+        vpTemporalExpansionProjectionMapPoints.reserve(mvpLocalMapPoints.size() / 4 + 1);
     }
     MappingFeatureReuseFunnelStats mappingFeatureGridFunnel[kMappingFeatureReuseGridBins];
     MappingFeatureReuseFunnelStats mappingFeatureOctaveFunnel[kMappingFeatureReuseOctaveBins];
@@ -10965,6 +11181,80 @@ void Tracking::SearchLocalPoints()
         int depthBin = -1;
     };
     std::unordered_map<MapPoint*, ReferenceAssociationTargetBin> referenceAssociationTargets;
+    const bool bUseTemporalCore = !bUseORB && bUseTemporalExpansionLast;
+    std::unordered_set<KeyFrame*> temporalCoreKFs;
+    if(bUseTemporalCore)
+    {
+        mLocalMapTemporalCore = LocalMapTemporalCoreStats();
+        mLocalMapTemporalCore.enabled = true;
+        mLocalMapTemporalCore.frameId = mCurrentFrame.mnId;
+        mLocalMapTemporalCore.temporalWindow =
+            GetXFeatLocalMapTemporalCoreWindow();
+        mLocalMapTemporalCore.priorAssociations = nAlreadyMatched;
+        mLocalMapTemporalCore.expansionLastEnabled = bUseTemporalExpansionLast;
+        mLocalMapTemporalCore.expansionLastMinSupport =
+            GetXFeatLocalMapTemporalMinSupport();
+        mmLocalMapTemporalCoreBins.clear();
+        mmLocalMapTemporalCoreBins.reserve(mvpLocalMapPoints.size());
+
+        AddTemporalCoreKeyFrames(mpLastKeyFrame,
+                                 mLocalMapTemporalCore.temporalWindow,
+                                 temporalCoreKFs);
+        AddTemporalCoreKeyFrames(mCurrentFrame.mpLastKeyFrame,
+                                 mLocalMapTemporalCore.temporalWindow,
+                                 temporalCoreKFs);
+
+        for(KeyFrame* pKF : mvpLocalKeyFrames)
+        {
+            if(!pKF || pKF->isBad())
+                continue;
+
+            const Tracking::LocalKFProvenance* pProvenance = nullptr;
+            const auto itKFProv = mmLocalKFProvenance.find(pKF);
+            if(itKFProv != mmLocalKFProvenance.end() &&
+               itKFProv->second.frameId == mCurrentFrame.mnId)
+            {
+                pProvenance = &itKFProv->second;
+            }
+
+            const unsigned char bin =
+                ClassifyLocalMapTemporalCoreKF(pKF,
+                                               pProvenance,
+                                               temporalCoreKFs);
+            ++mLocalMapTemporalCore.localKFs;
+            if(bin == kTemporalCoreStrictCore)
+                ++mLocalMapTemporalCore.localKFsStrictCore;
+            else if(bin == kTemporalCoreVotedCore)
+                ++mLocalMapTemporalCore.localKFsVotedCore;
+            else if(bin == kTemporalCoreExpansion)
+                ++mLocalMapTemporalCore.localKFsExpansion;
+            else
+                ++mLocalMapTemporalCore.localKFsUnknown;
+        }
+    }
+    else
+    {
+        mLocalMapTemporalCore = LocalMapTemporalCoreStats();
+        mmLocalMapTemporalCoreBins.clear();
+    }
+    auto incrementTemporalCoreBin =
+        [&](int (&values)[kTemporalCoreBinCount], const unsigned char bin)
+    {
+        if(!bUseTemporalCore)
+            return;
+        if(bin < kTemporalCoreBinCount)
+            ++values[bin];
+    };
+    auto lookupTemporalCoreBin =
+        [&](MapPoint* pMP) -> unsigned char
+    {
+        if(!bUseTemporalCore || !pMP)
+            return kTemporalCoreUnknown;
+        const auto it = mmLocalMapTemporalCoreBins.find(pMP);
+        if(it != mmLocalMapTemporalCoreBins.end())
+            return it->second;
+        return kTemporalCoreUnknown;
+    };
     auto referenceAssociationBucket =
         [&](MapPoint* pMP) -> ReferenceAssociationFunnelStats*
     {
@@ -11298,47 +11588,6 @@ void Tracking::SearchLocalPoints()
         return false;
     };
 
-    auto isCoreLocalProjectionPoint =
-        [&](MapPoint* pMP,
-            const float resolvedDepth,
-            const Tracking::LocalMPProvenance* pProvenance) -> bool
-    {
-        if(!bUseLocalMapCoreFirst || !pMP)
-            return true;
-
-        if(!IsCloseReuseTarget(pMP, resolvedDepth))
-            return true;
-
-        const Tracking::LocalKFProvenanceRole role = pProvenance
-            ? pProvenance->bestRole
-            : Tracking::LocalKFProvenanceRole::Unknown;
-        if(role == Tracking::LocalKFProvenanceRole::Reference)
-            return true;
-        if(role == Tracking::LocalKFProvenanceRole::Voted &&
-           pProvenance &&
-           pProvenance->bestVoteCount >= 15 &&
-           pProvenance->localObservations >= 4)
-        {
-            return true;
-        }
-
-        const float foundRatio = pMP->GetFoundRatio();
-        if(pMP->Observations() >= 4 &&
-           std::isfinite(foundRatio) &&
-           foundRatio >= 0.45f)
-        {
-            return true;
-        }
-
-        if(IsLocalProjHistoryTarget(pMP, resolvedDepth))
-        {
-            const int priorityBin = LocalProjPriorityBin(pMP, pProvenance, resolvedDepth);
-            return priorityBin == 1 || priorityBin == 2 || priorityBin == 3;
-        }
-
-        return false;
-    };
-
     auto admitLocalProjectionPoint = [&](MapPoint* pMP,
                                          const float resolvedDepth,
                                          std::vector<MapPoint*>& target)
@@ -11349,6 +11598,8 @@ void Tracking::SearchLocalPoints()
         target.push_back(pMP);
         nToMatch++;
         nLocalInFrustum++;
+        incrementTemporalCoreBin(mLocalMapTemporalCore.admitted,
+                                       lookupTemporalCoreBin(pMP));
         if(CloseReuseFunnelStats* stats = closeReuseBucket(pMP, resolvedDepth))
             stats->admitted++;
         if(ReferenceAssociationFunnelStats* stats = referenceAssociationBucket(pMP))
@@ -11393,6 +11644,24 @@ void Tracking::SearchLocalPoints()
     for(vector<MapPoint*>::iterator vit=mvpLocalMapPoints.begin(), vend=mvpLocalMapPoints.end(); vit!=vend; vit++)
     {
         MapPoint* pMP = *vit;
+        unsigned char temporalCoreBin = kTemporalCoreUnknown;
+        if(bUseTemporalCore && pMP)
+        {
+            const Tracking::LocalMPProvenance* pProvenance = nullptr;
+            const auto itProv = mmLocalMPProvenance.find(pMP);
+            if(itProv != mmLocalMPProvenance.end() &&
+               itProv->second.frameId == mCurrentFrame.mnId)
+            {
+                pProvenance = &itProv->second;
+            }
+            temporalCoreBin =
+                ClassifyLocalMapTemporalCorePoint(pMP,
+                                                  pProvenance,
+                                                  temporalCoreKFs);
+            mmLocalMapTemporalCoreBins[pMP] = temporalCoreBin;
+            incrementTemporalCoreBin(mLocalMapTemporalCore.selected,
+                                           temporalCoreBin);
+        }
         const float selectedDepth = bCollectCloseReuseFunnel
             ? ResolveMapPointQualityDepth(mCurrentFrame, pMP, pMP->mTrackDepth)
             : std::numeric_limits<float>::quiet_NaN();
@@ -11416,6 +11685,8 @@ void Tracking::SearchLocalPoints()
                 referenceStats->alreadySeen++;
             accumulateMappingFeatureReuse(pMP, selectedDepth, &MappingFeatureReuseFunnelStats::alreadySeen);
             nLocalAlreadySeen++;
+            incrementTemporalCoreBin(mLocalMapTemporalCore.alreadySeen,
+                                           temporalCoreBin);
             AccumulateMapPointQuality(mpQualityLocalAlreadySeen,
                                       pMP,
                                       mCurrentFrame,
@@ -11431,6 +11702,8 @@ void Tracking::SearchLocalPoints()
                 referenceStats->bad++;
             accumulateMappingFeatureReuse(pMP, selectedDepth, &MappingFeatureReuseFunnelStats::bad);
             nLocalBad++;
+            incrementTemporalCoreBin(mLocalMapTemporalCore.bad,
+                                           temporalCoreBin);
             continue;
         }
         // Project (this fills MapPoint variables for matching). Record only
@@ -11472,6 +11745,8 @@ void Tracking::SearchLocalPoints()
             if(CloseReuseContributionStats* stats = closeReuseKFContributionBucket(pMP, resolvedDepth))
                 stats->inFrustum++;
             accumulateMappingFeatureReuse(pMP, resolvedDepth, &MappingFeatureReuseFunnelStats::inFrustum);
+            incrementTemporalCoreBin(mLocalMapTemporalCore.inFrustum,
+                                           temporalCoreBin);
 
             const Tracking::LocalMPProvenance* pMotionGuardProvenance = nullptr;
             const auto itMotionGuardProv = mmLocalMPProvenance.find(pMP);
@@ -11590,32 +11865,20 @@ void Tracking::SearchLocalPoints()
                 if(priorityBin >= 0 && priorityBin < kLocalProjPriorityBinCount)
                     triang0To10PriorityCandidate[priorityBin]++;
             }
-            const bool bCoreLocalProjectionPoint =
-                isCoreLocalProjectionPoint(pMP, resolvedDepth, pLocalProvenance);
-            if(bUseLocalMapCoreFirst && !bCoreLocalProjectionPoint)
+            if(bUseTemporalExpansionLast &&
+               (temporalCoreBin == kTemporalCoreExpansion ||
+                temporalCoreBin == kTemporalCoreUnknown))
             {
-                DeferredLocalProjectionPoint deferred;
-                deferred.pMP = pMP;
-                deferred.depth = resolvedDepth;
-                vDeferredExpansionLocalPoints.push_back(deferred);
-                ++coreFirstExpansionCandidates;
+                TemporalExpansionProjectionCandidate candidate;
+                candidate.pMP = pMP;
+                candidate.depth = resolvedDepth;
+                vTemporalExpansionCandidates.push_back(candidate);
+                ++mLocalMapTemporalCore.expansionLastDeferred;
+                continue;
             }
-            else
-            {
-                if(bUseLocalMapCoreFirst)
-                {
-                    ++coreFirstCoreCandidates;
-                    admitLocalProjectionPoint(pMP,
-                                              resolvedDepth,
-                                              vpCoreLocalProjectionMapPoints);
-                }
-                else
-                {
-                    admitLocalProjectionPoint(pMP,
-                                              resolvedDepth,
-                                              vpLocalProjectionMapPoints);
-                }
-            }
+            admitLocalProjectionPoint(pMP,
+                                      resolvedDepth,
+                                      vpLocalProjectionMapPoints);
         }
         else if(selectedStats)
         {
@@ -11629,35 +11892,8 @@ void Tracking::SearchLocalPoints()
         }
     }
 
-    auto admitDeferredExpansionPoints =
-        [&](const std::vector<DeferredLocalProjectionPoint>& deferredPoints)
-    {
-        for(const DeferredLocalProjectionPoint& deferred : deferredPoints)
-        {
-            if(!deferred.pMP || deferred.pMP->isBad())
-                continue;
-            admitLocalProjectionPoint(deferred.pMP,
-                                      deferred.depth,
-                                      vpExpansionLocalProjectionMapPoints);
-            ++coreFirstExpansionAdmitted;
-        }
-    };
-
-    auto suppressDeferredExpansionPoints =
-        [&](const std::vector<DeferredLocalProjectionPoint>& deferredPoints)
-    {
-        for(const DeferredLocalProjectionPoint& deferred : deferredPoints)
-        {
-            if(!deferred.pMP)
-                continue;
-            deferred.pMP->mbTrackInView = false;
-            deferred.pMP->mbTrackInViewR = false;
-            ++coreFirstExpansionSuppressed;
-        }
-    };
-
-    if(nToMatch>0 ||
-       (bUseLocalMapCoreFirst && !vDeferredExpansionLocalPoints.empty()))
+    if(nToMatch > 0 ||
+       (bUseTemporalExpansionLast && !vTemporalExpansionCandidates.empty()))
     {
         const bool bMonocularVisual = (mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
         int th = 1;
@@ -11746,6 +11982,32 @@ void Tracking::SearchLocalPoints()
             projectionStatsTotal.ref_target_assigned += stats.ref_target_assigned;
         };
 
+        auto SuppressTemporalExpansionCandidates = [&]()
+        {
+            for(const TemporalExpansionProjectionCandidate& candidate : vTemporalExpansionCandidates)
+            {
+                MapPoint* pMP = candidate.pMP;
+                if(!pMP)
+                    continue;
+                pMP->mbTrackInView = false;
+                pMP->mbTrackInViewR = false;
+                ++mLocalMapTemporalCore.expansionLastSuppressed;
+            }
+        };
+
+        auto AdmitTemporalExpansionCandidates = [&]()
+        {
+            for(const TemporalExpansionProjectionCandidate& candidate : vTemporalExpansionCandidates)
+            {
+                if(!candidate.pMP)
+                    continue;
+                admitLocalProjectionPoint(candidate.pMP,
+                                          candidate.depth,
+                                          vpTemporalExpansionProjectionMapPoints);
+                ++mLocalMapTemporalCore.expansionLastAdmitted;
+            }
+        };
+
         if(bUseORB)
         {
             ORBmatcher matcher(0.8);
@@ -11753,76 +12015,7 @@ void Tracking::SearchLocalPoints()
         }
         else
         {
-            if(bUseLocalMapCoreFirst)
-            {
-                XFeatMatcher matcher(0.8f, false);
-                if(!vpCoreLocalProjectionMapPoints.empty())
-                {
-                    coreFirstCoreMatches = matcher.SearchByProjection(mCurrentFrame,
-                                                                      vpCoreLocalProjectionMapPoints,
-                                                                      th,
-                                                                      bFarFilter,
-                                                                      thFarPoints,
-                                                                      GetXFeatThHighLocalProjection(),
-                                                                      -1,
-                                                                      true);
-                    matches += coreFirstCoreMatches;
-                    AccumulateProjectionStats(matcher.LastProjectionMapPointStats());
-                }
-
-                const bool bHasAnyExpansion = !vDeferredExpansionLocalPoints.empty();
-                bool bNeedExpansion = bHasAnyExpansion;
-                if(!bHasAnyExpansion)
-                {
-                    coreFirstDecision = "no_expansion";
-                    bNeedExpansion = false;
-                }
-                else if(vpCoreLocalProjectionMapPoints.empty())
-                {
-                    coreFirstDecision = "no_core";
-                }
-                else if(nAlreadyMatched < coreFirstMinPrior)
-                {
-                    coreFirstDecision = "prior_weak";
-                }
-                else if(coreFirstCoreMatches < coreFirstMinCoreMatches)
-                {
-                    coreFirstDecision = "core_weak";
-                }
-                else if(nAlreadyMatched + coreFirstCoreMatches < coreFirstMinTotalMatches)
-                {
-                    coreFirstDecision = "total_weak";
-                }
-                else
-                {
-                    coreFirstDecision = "skip_expansion";
-                    bNeedExpansion = false;
-                }
-
-                if(bNeedExpansion)
-                {
-                    admitDeferredExpansionPoints(vDeferredExpansionLocalPoints);
-                    if(!vpExpansionLocalProjectionMapPoints.empty())
-                    {
-                        coreFirstExpansionMatches =
-                            matcher.SearchByProjection(mCurrentFrame,
-                                                       vpExpansionLocalProjectionMapPoints,
-                                                       th,
-                                                       bFarFilter,
-                                                       thFarPoints,
-                                                       GetXFeatThHighLocalProjection(),
-                                                       -1,
-                                                       false);
-                        matches += coreFirstExpansionMatches;
-                        AccumulateProjectionStats(matcher.LastProjectionMapPointStats());
-                    }
-                }
-                else
-                {
-                    suppressDeferredExpansionPoints(vDeferredExpansionLocalPoints);
-                }
-            }
-            else if(!vpLocalProjectionMapPoints.empty())
+            if(!vpLocalProjectionMapPoints.empty())
             {
                 XFeatMatcher matcher(0.8f, false);
                 matches = matcher.SearchByProjection(mCurrentFrame,
@@ -11834,6 +12027,38 @@ void Tracking::SearchLocalPoints()
                                                      -1,
                                                      true);
                 AccumulateProjectionStats(matcher.LastProjectionMapPointStats());
+            }
+
+            if(bUseTemporalExpansionLast)
+            {
+                const int baseSupport = nAlreadyMatched + matches;
+                if(!vTemporalExpansionCandidates.empty())
+                {
+                    if(baseSupport >= mLocalMapTemporalCore.expansionLastMinSupport)
+                    {
+                        SuppressTemporalExpansionCandidates();
+                    }
+                    else
+                    {
+                        mLocalMapTemporalCore.expansionLastUsed = true;
+                        AdmitTemporalExpansionCandidates();
+                        if(!vpTemporalExpansionProjectionMapPoints.empty())
+                        {
+                            XFeatMatcher matcher(0.8f, false);
+                            const int expansionMatches =
+                                matcher.SearchByProjection(mCurrentFrame,
+                                                           vpTemporalExpansionProjectionMapPoints,
+                                                           th,
+                                                           bFarFilter,
+                                                           thFarPoints,
+                                                           GetXFeatThHighLocalProjection(),
+                                                           -1,
+                                                           true);
+                            matches += expansionMatches;
+                            AccumulateProjectionStats(matcher.LastProjectionMapPointStats());
+                        }
+                    }
+                }
             }
 
             localProjCloseTrackingStereoRejectUr = projectionStatsTotal.close_tracking_stereo_reject_ur;
@@ -12071,6 +12296,8 @@ void Tracking::SearchLocalPoints()
             if(!vProjectionAdded[static_cast<size_t>(i)] || !mCurrentFrame.mvpMapPoints[i])
                 continue;
             MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+            incrementTemporalCoreBin(mLocalMapTemporalCore.projectionMatch,
+                                           lookupTemporalCoreBin(pMP));
             const float resolvedDepth = ResolveMapPointQualityDepth(mCurrentFrame, pMP, pMP->mTrackDepth);
             if(pMP->GetCreationSource() == MapPoint::kCreationSourceTrackingStereo &&
                std::isfinite(resolvedDepth) && resolvedDepth <= mThDepth)
@@ -12150,11 +12377,6 @@ void Tracking::SearchLocalPoints()
             lgLocalVerifyCandidates > 0 ||
             lgLocalMapUpdatedEdgeCandidates > 0 ||
             lgLocalMapUpdatedEdgeConflictUnverified > 0;
-        const bool bHasCoreFirstDiag =
-            bDeepSearchLocalDiag ||
-            bUseLocalMapCoreFirst ||
-            coreFirstExpansionCandidates > 0 ||
-            coreFirstExpansionSuppressed > 0;
 
         if(ShouldPrintXFeatDebug(mCurrentFrame.mnId) && bMotionGuardEnabled)
         {
@@ -12208,21 +12430,6 @@ void Tracking::SearchLocalPoints()
                   << " th=" << thValue
                   << " mode=" << (bUseORB ? "ORBProj" : (bUseLightGlueLocalMap ? "XFeatProj+LightGlueLocal" : "XFeatProj"))
                   << " th_high=" << (bUseORB ? -1.0f : GetXFeatThHighLocalProjection());
-        if(bHasCoreFirstDiag)
-        {
-            std::cout << " localmap_core_first=" << (bUseLocalMapCoreFirst ? 1 : 0)
-                      << " core_first_prior=" << nAlreadyMatched
-                      << " core_first_min_prior=" << coreFirstMinPrior
-                      << " core_first_min_core_matches=" << coreFirstMinCoreMatches
-                      << " core_first_min_total_matches=" << coreFirstMinTotalMatches
-                      << " core_first_core_candidates=" << coreFirstCoreCandidates
-                      << " core_first_expansion_candidates=" << coreFirstExpansionCandidates
-                      << " core_first_expansion_admitted=" << coreFirstExpansionAdmitted
-                      << " core_first_expansion_suppressed=" << coreFirstExpansionSuppressed
-                      << " core_first_core_matches=" << coreFirstCoreMatches
-                      << " core_first_expansion_matches=" << coreFirstExpansionMatches
-                      << " core_first_decision=" << coreFirstDecision;
-        }
         if(bHasLocalFoundRatioSourceDiag)
         {
             std::cout << " local_found_ratio_rejected_depth_qualified=" << localFoundRatioRejectedDepthQualified

@@ -308,8 +308,38 @@ public:
     };
 
 protected:
+    struct LocalMapTemporalCoreStats
+    {
+        bool enabled = false;
+        long unsigned int frameId = 0;
+        int temporalWindow = 0;
+        int localKFs = 0;
+        int localKFsStrictCore = 0;
+        int localKFsVotedCore = 0;
+        int localKFsExpansion = 0;
+        int localKFsUnknown = 0;
+        int priorAssociations = 0;
+        bool expansionLastEnabled = false;
+        bool expansionLastUsed = false;
+        int expansionLastMinSupport = 0;
+        int expansionLastDeferred = 0;
+        int expansionLastAdmitted = 0;
+        int expansionLastSuppressed = 0;
+        int selected[4] = {};
+        int alreadySeen[4] = {};
+        int bad[4] = {};
+        int inFrustum[4] = {};
+        int admitted[4] = {};
+        int projectionMatch[4] = {};
+        int optAssoc[4] = {};
+        int optInlier[4] = {};
+        int optOutlier[4] = {};
+    };
+
     std::unordered_map<KeyFrame*, LocalKFProvenance> mmLocalKFProvenance;
     std::unordered_map<MapPoint*, LocalMPProvenance> mmLocalMPProvenance;
+    std::unordered_map<MapPoint*, unsigned char> mmLocalMapTemporalCoreBins;
+    LocalMapTemporalCoreStats mLocalMapTemporalCore;
     int mnLocalMapVotedKFCandidates = 0;
     int mnLocalMapVotedKFKept = 0;
     int mnLocalMapVotedKFVisibilityKept = 0;
