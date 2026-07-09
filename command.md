@@ -949,36 +949,8 @@ evo_traj tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.t
 
 日志阅读层级：
 
-- 默认摘要：`XFEAT_DEBUG=1` 时重点看 `[SearchLocalPoints]`、`[TrackLocalMap][Diag]`、`[TrackLocalMap][SourceError]`、`[TrackLocalMap][SourceMPJointError]`、`[TrackLocalMap][InlierMix]`、`[LocalMapping][LongWeakMP]`、`[PoseOptimization][Weight]`
-- 扩展细节：需要抽样看深度/质量分桶时，再临时加 `XFEAT_DIAG_FEATURE_DISTRIBUTION=1`，重点看 `[SearchLocalPoints][MPQuality]`、`[TrackLocalMap][MPQuality]`、`[TrackLocalMap][StereoDepth]`、`[TrackLocalMap][SourceDepthError]`、`[TrackLocalMap][MPSourceDepthError]`、`[LocalMapping][LongWeakMPQuality]`、`[LocalMapping][LongWeakMPSource]`
-
-`map_hygiene`：
-
-```bash
-mkdir -p experiment_logs/Stereo/SePT/SePT01
-XFEAT_DEBUG_MATCHER_VERBOSE=1 \
-XFEAT_DEBUG=1 \
-XFEAT_DIAG_INTERVAL=30 \
-XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
-XFEAT_USE_LIGHTGLUE_MOTION=1 \
-XFEAT_LOCALMAP_FOUND_RATIO_GATE=1 \
-XFEAT_LOCALMAP_FOUND_RATIO_MIN=0.25 \
-XFEAT_LOCALMAP_FOUND_RATIO_MIN_DEPTH=-1 \
-XFEAT_LOCALMAP_FOUND_RATIO_SCOPE=triang_only \
-XFEAT_LOCALMAP_LONG_WEAK_MP_CULL=1 \
-XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_AGE_KF=10 \
-XFEAT_LOCALMAP_LONG_WEAK_MP_MAX_FOUND_RATIO=0.25 \
-XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_DEPTH=-1 \
-XFEAT_LOCALMAP_LONG_WEAK_MP_SCOPE=triang_only \
-XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL=5 \
-./examples/Stereo/stereo_euroc \
-  Vocabulary/ORBvoc.txt \
-  examples/Stereo/SePT01.yaml \
-  /mnt/d/data_set/SePT01/mav0 \
-  examples/Stereo/SePT01_TimeStamps/times.txt \
-  SePT01_stereo \
-  2>&1 | tee experiment_logs/Stereo/SePT/SePT01/run_SePT01_stereo_local_fr_depth_longweak.log
-```
+- 默认摘要：`XFEAT_DEBUG=1` 时重点看 `[SearchLocalPoints]`、`[TrackLocalMap][TemporalCore]`、`[TrackLocalMap][SourceError]`、`[TrackLocalMap][InlierMix]`
+- 扩展细节：需要追查结构或联合来源时，再临时加 `XFEAT_DIAG_DEEP=1`，其中包括 `[TrackLocalMap][KFStructure]`、`[TrackLocalMap][SourceMPJointError]` 和各类 funnel 日志
 
 `local_proj_precision`（close tracking-stereo geometry screening + close/mid stereo cost volume / coarse-to-fine refinement / LR-aware sigma modeling，命令不变，无新增环境变量）：
 
@@ -990,16 +962,6 @@ XFEAT_DEBUG=1 \
 XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 XFEAT_USE_LIGHTGLUE_MOTION=1 \
-XFEAT_LOCALMAP_FOUND_RATIO_GATE=1 \
-XFEAT_LOCALMAP_FOUND_RATIO_MIN=0.25 \
-XFEAT_LOCALMAP_FOUND_RATIO_MIN_DEPTH=-1 \
-XFEAT_LOCALMAP_FOUND_RATIO_SCOPE=triang_only \
-XFEAT_LOCALMAP_LONG_WEAK_MP_CULL=1 \
-XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_AGE_KF=10 \
-XFEAT_LOCALMAP_LONG_WEAK_MP_MAX_FOUND_RATIO=0.25 \
-XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_DEPTH=-1 \
-XFEAT_LOCALMAP_LONG_WEAK_MP_SCOPE=triang_only \
-XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL=5 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/SePT01.yaml \
@@ -1026,16 +988,9 @@ XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL=5 \
 | `XFEAT_DIAG_GRID_ROWS` | 诊断空间网格行数 | `6` | `[2,64]` | `src/Tracking.cc:125-146` |
 | `XFEAT_FPS` / `SLAM_FPS` | RuntimeFPS 日志 | 关 | — | `src/Tracking.cc:148-152` |
 | `XFEAT_FPS_INTERVAL` / `SLAM_FPS_INTERVAL` | RuntimeFPS 输出间隔 | `30` | `[1,1000]` | `src/Tracking.cc:154-176` |
-| `XFEAT_LOCALMAP_FOUND_RATIO_GATE` | `SearchLocalPoints` 中启用 LocalMap found-ratio gate | 关 | — | `src/Tracking.cc` |
-| `XFEAT_LOCALMAP_FOUND_RATIO_MIN` | LocalMap found-ratio gate 最小阈值 | `0.25` | `[0,1]` | `src/Tracking.cc` |
-| `XFEAT_LOCALMAP_FOUND_RATIO_MIN_DEPTH` | LocalMap found-ratio gate 最小深度阈值；`<=0` 时复用当前帧 `mThDepth` | `-1` | `[-1,10000]` | `src/Tracking.cc` |
-| `XFEAT_LOCALMAP_FOUND_RATIO_SCOPE` | LocalMap found-ratio gate 作用范围；`triang_only`/`all` | `triang_only` | — | `src/Tracking.cc` |
-| `XFEAT_LOCALMAP_LONG_WEAK_MP_CULL` | 在 LocalMapping 中启用长期弱点地图点清理 | 关 | — | `src/LocalMapping.cc` |
-| `XFEAT_LOCALMAP_LONG_WEAK_MP_SCOPE` | 长期弱点清理作用范围；`triang_only`/`all` | `triang_only` | — | `src/LocalMapping.cc` |
-| `XFEAT_LOCALMAP_LONG_WEAK_MP_MAX_FOUND_RATIO` | 长期弱点清理的最大 found-ratio 阈值 | `0.25` | `[0,1]` | `src/LocalMapping.cc` |
-| `XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_DEPTH` | 长期弱点清理最小深度阈值；`<=0` 时复用 `mThDepth` | `-1` | `[-1,10000]` | `src/LocalMapping.cc` |
-| `XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_AGE_KF` | 长期弱点清理最小关键帧年龄 | `10` | `[1,1000000]` | `src/LocalMapping.cc` |
-| `XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL` | 长期弱点清理执行间隔（keyframe） | `5` | `[1,1000000]` | `src/LocalMapping.cc` |
+| `XFEAT_LOCALMAP_TEMPORAL_EXPANSION_LAST` | strict/voted base 先匹配，支撑不足时再引入 expansion | 关 | — | `src/Tracking.cc` |
+| `XFEAT_LOCALMAP_TEMPORAL_MIN_SUPPORT` | LocalMap primary/base 支撑阈值；primary/base 足够时跳过 secondary 或 expansion，不足时作为 fallback 判断阈值 | `140` | `[0,10000]` | `src/Tracking.cc` |
+| `XFEAT_LOCALMAP_PRIMARY_FIRST` | 在 temporal base 内优先投影 strict-continuous MapPoint；motion 正常且 primary support 达阈值时跳过 secondary | 关 | — | `src/Tracking.cc` |
 | `XFEAT_LOCALMAP_TRIANG_PO_WEIGHT` | 对 `local_proj + local_mapping_triangulation + far` 观测在 PoseOptimization 中做额外降权；`1.0` 为关闭。当前实验已验证收益有限 | `1.0` | `(0,1]` | `src/Optimizer.cc` |
 | `XFEAT_LOCALMAP_TRIANG_PO_MIN_DEPTH` | 上述降权的最小深度阈值；`<=0` 时复用当前帧 `mThDepth` | `-1` | `[-1,10000]` | `src/Optimizer.cc` |
 
@@ -1128,8 +1083,6 @@ XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL=5 \
 | `XFEAT_LIGHTGLUE_CONF` | LightGlue 匹配最小置信度 | `0.1` | `[0,1]` | `src/Tracking.cc:4347,4736,5796` |
 | `XFEAT_USE_LIGHTGLUE_REF` | TrackReferenceKeyFrame 使用 LightGlue | 关 | — | `src/Tracking.cc:4342-4353` |
 | `XFEAT_USE_LIGHTGLUE_MOTION` | TrackWithMotionModel 使用 LightGlue | 关 | — | `src/Tracking.cc:4717-4745` |
-| `XFEAT_LG_MOTION_POLICY` | 运动模型 LightGlue 策略；`projection_first`/`proj_first` 先跑投影匹配再按阈值回退到 LightGlue | 默认直接 LightGlue | — | `src/Tracking.cc:1092-1103,4718-4733` |
-| `XFEAT_LG_MOTION_FALLBACK_MIN_MATCHES` | `projection_first` 下投影匹配少于该值时回退到 LightGlue | `20` | `[1,1000]` | `src/Tracking.cc:1105-1108,4728-4733` |
 | `XFEAT_LG_MOTION_USE_PROJ_GATE` | LightGlue motion 结果再经过投影半径门控 | 关 | — | `src/XFeatLighterGlueMatcher.cc:490-491` |
 | `XFEAT_USE_LIGHTGLUE_RELOC` | Relocalization 初始候选匹配使用 LightGlue，低匹配或异常回退 XFeatMatcher | 关 | — | `src/Tracking.cc` |
 | `XFEAT_LG_RELOC_FALLBACK_MIN_MATCHES` | Relocalization 中 LightGlue 少于该匹配数时回退 NN | `15` | `[1,1000]` | `src/Tracking.cc` |

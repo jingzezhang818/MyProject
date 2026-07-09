@@ -188,124 +188,10 @@ namespace
         return enabled;
     }
 
-    float GetEnvFloat(const char* key, const float defaultValue, const float minValue, const float maxValue)
-    {
-        const char* env = std::getenv(key);
-        if(!env)
-            return defaultValue;
-
-        try
-        {
-            const float value = std::stof(std::string(env));
-            return std::max(minValue, std::min(maxValue, value));
-        }
-        catch(...)
-        {
-            return defaultValue;
-        }
-    }
-
-    std::string GetEnvLowerString(const char* key, const std::string& defaultValue)
-    {
-        const char* env = std::getenv(key);
-        if(!env)
-            return defaultValue;
-
-        std::string value(env);
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return value;
-    }
-
-    bool IsLocalMapFoundRatioGateEnabled()
-    {
-        static const bool enabled = IsEnvFlagEnabled("XFEAT_LOCALMAP_FOUND_RATIO_GATE");
-        return enabled;
-    }
-
-    float GetLocalMapFoundRatioMin()
-    {
-        static const float minFoundRatio = GetEnvFloat("XFEAT_LOCALMAP_FOUND_RATIO_MIN", 0.25f, 0.0f, 1.0f);
-        return minFoundRatio;
-    }
-
-    float GetLocalMapFoundRatioMinDepth()
-    {
-        static const float minDepth = GetEnvFloat("XFEAT_LOCALMAP_FOUND_RATIO_MIN_DEPTH", -1.0f, -1.0f, 10000.0f);
-        return minDepth;
-    }
-
-    const std::string& GetLocalMapFoundRatioScope()
-    {
-        static const std::string scope = []()
-        {
-            const std::string envScope = GetEnvLowerString("XFEAT_LOCALMAP_FOUND_RATIO_SCOPE", "triang_only");
-            if(envScope == "all")
-                return std::string("all");
-            return std::string("triang_only");
-        }();
-        return scope;
-    }
-
-    bool ShouldGateLocalMapPointByFoundRatio(const MapPoint* pMP)
-    {
-        if(!pMP)
-            return false;
-
-        const std::string& scope = GetLocalMapFoundRatioScope();
-        if(scope == "all")
-            return true;
-
-        return pMP->GetCreationSource() == MapPoint::kCreationSourceLocalMappingTriangulation;
-    }
-
-    bool IsXFeatMotionHealthGuardEnabled()
-    {
-        static const bool enabled = IsEnvFlagEnabled("XFEAT_MOTION_HEALTH_GUARD");
-        return enabled;
-    }
-
-    bool IsXFeatKFInsertGuardEnabled()
-    {
-        static const bool enabled = IsEnvFlagEnabled("XFEAT_KF_INSERT_GUARD");
-        return enabled;
-    }
-
-    int GetXFeatMotionWeakMinInliers()
-    {
-        static const int value = GetEnvIntInRange("XFEAT_MOTION_WEAK_MIN_INLIERS", 80, 0, 10000);
-        return value;
-    }
-
-    int GetXFeatMotionBadMinInliers()
-    {
-        static const int value = GetEnvIntInRange("XFEAT_MOTION_BAD_MIN_INLIERS", 60, 0, 10000);
-        return value;
-    }
-
-    float GetXFeatMotionWeakMaxOutlier()
-    {
-        static const float value = GetEnvFloat("XFEAT_MOTION_WEAK_MAX_OUTLIER", 0.30f, 0.0f, 1.0f);
-        return value;
-    }
-
-    float GetXFeatMotionBadMaxOutlier()
-    {
-        static const float value = GetEnvFloat("XFEAT_MOTION_BAD_MAX_OUTLIER", 0.40f, 0.0f, 1.0f);
-        return value;
-    }
-
-    int GetXFeatMotionGuardMinObs()
-    {
-        static const int value = GetEnvIntInRange("XFEAT_MOTION_GUARD_MIN_OBS", 3, 0, 10000);
-        return value;
-    }
-
-    float GetXFeatMotionGuardMinFoundRatio()
-    {
-        static const float value = GetEnvFloat("XFEAT_MOTION_GUARD_MIN_FOUND_RATIO", 0.35f, 0.0f, 1.0f);
-        return value;
-    }
+    constexpr int kXFeatMotionWeakMinInliers = 80;
+    constexpr int kXFeatMotionBadMinInliers = 60;
+    constexpr float kXFeatMotionWeakMaxOutlier = 0.30f;
+    constexpr float kXFeatMotionBadMaxOutlier = 0.40f;
 
     bool IsXFeatLocalMapTemporalExpansionLastEnabled()
     {
@@ -313,18 +199,17 @@ namespace
         return enabled;
     }
 
-    int GetXFeatLocalMapTemporalCoreWindow()
-    {
-        static const int value =
-            GetEnvIntInRange("XFEAT_LOCALMAP_TEMPORAL_CORE_WINDOW", 5, 1, 30);
-        return value;
-    }
-
     int GetXFeatLocalMapTemporalMinSupport()
     {
         static const int value =
             GetEnvIntInRange("XFEAT_LOCALMAP_TEMPORAL_MIN_SUPPORT", 140, 0, 10000);
         return value;
+    }
+
+    bool IsXFeatLocalMapPrimaryFirstEnabled()
+    {
+        static const bool enabled = IsEnvFlagEnabled("XFEAT_LOCALMAP_PRIMARY_FIRST");
+        return enabled;
     }
 
     enum LocalMapTemporalCoreBin : unsigned char
@@ -336,6 +221,7 @@ namespace
     };
 
     constexpr int kTemporalCoreBinCount = 4;
+    constexpr int kTemporalCoreWindow = 5;
     constexpr int kTemporalCoreStrongVote = 15;
     constexpr int kTemporalCoreMinLocalObservations = 4;
 
@@ -1350,6 +1236,14 @@ namespace
                source == kXFeatMatchLocalProjectionLightGlueVerified;
     }
 
+    bool IsDirectTrackingMatchSource(const unsigned char source)
+    {
+        return source == kXFeatMatchMotionProjection ||
+               source == kXFeatMatchMotionLightGlue ||
+               source == kXFeatMatchReference ||
+               source == kXFeatMatchReferenceLightGlue;
+    }
+
     void EnsureXFeatMatchSourceSize(Frame& F)
     {
         if(static_cast<int>(F.mvXFeatMatchSource.size()) != F.N)
@@ -1965,7 +1859,6 @@ namespace
         int alreadySeen = 0;
         int bad = 0;
         int inFrustum = 0;
-        int foundGateReject = 0;
         int historyGateReject = 0;
         int admitted = 0;
         int projectionMatch = 0;
@@ -1983,7 +1876,6 @@ namespace
         int alreadySeen = 0;
         int bad = 0;
         int inFrustum = 0;
-        int foundGateReject = 0;
         int historyGateReject = 0;
         int admitted = 0;
         int projectionMatch = 0;
@@ -2006,7 +1898,6 @@ namespace
         int alreadySeen = 0;
         int bad = 0;
         int inFrustum = 0;
-        int foundGateReject = 0;
         int historyGateReject = 0;
         int admitted = 0;
         int projectionMatch = 0;
@@ -2147,6 +2038,28 @@ namespace
             mask >>= 1U;
         }
         return count;
+    }
+
+    bool HasContinuousDirectTrackingHistory(MapPoint* pMP,
+                                            const long unsigned int frameId)
+    {
+        if(!pMP)
+            return false;
+
+        const MapPoint::DirectTrackingHistoryStats history =
+            pMP->GetDirectTrackingHistory();
+        const long unsigned int invalidFrame =
+            std::numeric_limits<long unsigned int>::max();
+        if(history.lastInlierFrame == invalidFrame ||
+           frameId < history.lastInlierFrame ||
+           frameId - history.lastInlierFrame > 2)
+        {
+            return false;
+        }
+
+        return CountHistoryBits(history.recentValidMask) >= 2 &&
+               CountHistoryBits(history.recentInlierMask &
+                                history.recentValidMask) >= 2;
     }
 
     bool IsLongLowRelevantLocalMapHistory(const MapPoint::LocalMapVisibilityHistoryStats& stats)
@@ -5905,24 +5818,6 @@ namespace
         return 0.20f;
     }
 
-    bool UseXFeatLightGlueMotionProjectionFirst()
-    {
-        const char* env = std::getenv("XFEAT_LG_MOTION_POLICY");
-        if(!env || env[0] == '\0')
-            return false;
-
-        std::string policy(env);
-        std::transform(policy.begin(), policy.end(), policy.begin(), [](unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-        });
-        return policy == "projection_first" || policy == "proj_first";
-    }
-
-    int GetXFeatLightGlueMotionFallbackMinMatches()
-    {
-        return GetEnvIntInRange("XFEAT_LG_MOTION_FALLBACK_MIN_MATCHES", 20, 1, 1000);
-    }
-
     float GetXFeatThHighRefNNStrict()
     {
         //调试: TrackReferenceKeyFrame 严格NN阈值（默认偏严格，优先精度）。
@@ -9219,10 +9114,6 @@ void Tracking::CheckReplacedInLastFrame()
 
 bool Tracking::TrackReferenceKeyFrame()
 {
-    mbXFeatMotionHealthValid = false;
-    mbXFeatMotionHealthWeak = false;
-    mbXFeatMotionHealthBad = false;
-
     // [XFEAT_FIX_20260414] XFeat path should prefer descriptor NN matching over ORB vocabulary BoW.
     const bool bUseORB = (std::getenv("USE_ORB") != nullptr);
     if(bUseORB)
@@ -9559,15 +9450,11 @@ void Tracking::UpdateLastFrame()
 
 bool Tracking::TrackWithMotionModel()
 {
-    mbXFeatMotionHealthValid = false;
-    mbXFeatMotionHealthWeak = false;
-    mbXFeatMotionHealthBad = false;
-    mnXFeatMotionHealthFrameId = mCurrentFrame.mnId;
-    mnXFeatMotionHealthInliers = 0;
-    mnXFeatMotionHealthAssociations = 0;
-    mXFeatMotionHealthOutlierRatio = 0.0f;
-
     const bool bUseORB = (std::getenv("USE_ORB") != nullptr);
+    mbLastXFeatMotionHealthValid = false;
+    mbLastXFeatMotionHealthWeak = false;
+    mbLastXFeatMotionHealthBad = false;
+    mnLastXFeatMotionHealthFrameId = mCurrentFrame.mnId;
 
     // Update last frame pose according to its reference keyframe
     // Create "visual odometry" points if in Localization Mode
@@ -9628,20 +9515,7 @@ bool Tracking::TrackWithMotionModel()
     else
     {
         const bool bUseLightGlueMotion = IsEnvFlagEnabled("XFEAT_USE_LIGHTGLUE_MOTION");
-        const bool bProjectionFirstLightGlueMotion = bUseLightGlueMotion && UseXFeatLightGlueMotionProjectionFirst();
-        if(bProjectionFirstLightGlueMotion)
-        {
-            XFeatMatcher matcher(0.9f, false);
-            nmatches = matcher.SearchByProjection(mCurrentFrame,
-                                                  mLastFrame,
-                                                  th,
-                                                  mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR,
-                                                  GetXFeatThHighMotionProjection());
-        }
-
-        if(bUseLightGlueMotion &&
-           (!bProjectionFirstLightGlueMotion ||
-            nmatches < GetXFeatLightGlueMotionFallbackMinMatches()))
+        if(bUseLightGlueMotion)
         {
             try
             {
@@ -9662,20 +9536,13 @@ bool Tracking::TrackWithMotionModel()
                           << e.what() << std::endl;
                 bUsedLightGlueMotion = false;
                 vpLightGlueMotionMatches.clear();
-                if(!bProjectionFirstLightGlueMotion)
-                {
-                    fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
-                    ClearXFeatMatchSources(mCurrentFrame);
-                    nmatches = 0;
-                }
-                else
-                {
-                    nmatches = CountAssignedMatches(mCurrentFrame.mvpMapPoints);
-                }
+                fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+                ClearXFeatMatchSources(mCurrentFrame);
+                nmatches = 0;
             }
         }
 
-        if(!bUsedLightGlueMotion && !bProjectionFirstLightGlueMotion)
+        if(!bUsedLightGlueMotion)
         {
             XFeatMatcher matcher(0.9f, false);
             nmatches = matcher.SearchByProjection(mCurrentFrame,
@@ -9798,17 +9665,16 @@ bool Tracking::TrackWithMotionModel()
 
     if(bUsedLightGlueMotion)
     {
-        const int weakMinInliers = GetXFeatMotionWeakMinInliers();
-        const int badMinInliers = GetXFeatMotionBadMinInliers();
-        const float weakMaxOutlier = GetXFeatMotionWeakMaxOutlier();
-        const float badMaxOutlier = GetXFeatMotionBadMaxOutlier();
-        mbXFeatMotionHealthValid = true;
-        mnXFeatMotionHealthFrameId = mCurrentFrame.mnId;
-        mnXFeatMotionHealthInliers = inlier_cnt;
-        mnXFeatMotionHealthAssociations = assoc_cnt;
-        mXFeatMotionHealthOutlierRatio = outlierRatio;
-        mbXFeatMotionHealthWeak = inlier_cnt < weakMinInliers || outlierRatio > weakMaxOutlier;
-        mbXFeatMotionHealthBad = inlier_cnt < badMinInliers || outlierRatio > badMaxOutlier;
+        const bool motionHealthWeak =
+            inlier_cnt < kXFeatMotionWeakMinInliers ||
+            outlierRatio > kXFeatMotionWeakMaxOutlier;
+        const bool motionHealthBad =
+            inlier_cnt < kXFeatMotionBadMinInliers ||
+            outlierRatio > kXFeatMotionBadMaxOutlier;
+        mbLastXFeatMotionHealthValid = true;
+        mbLastXFeatMotionHealthWeak = motionHealthWeak;
+        mbLastXFeatMotionHealthBad = motionHealthBad;
+        mnLastXFeatMotionHealthFrameId = mCurrentFrame.mnId;
 
         if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
         {
@@ -9817,16 +9683,11 @@ bool Tracking::TrackWithMotionModel()
             std::cout << std::fixed << std::setprecision(6)
                       << "[TrackMotion][Health]"
                       << " frame_id=" << mCurrentFrame.mnId
-                      << " guard_enabled=" << (IsXFeatMotionHealthGuardEnabled() ? 1 : 0)
                       << " assoc=" << assoc_cnt
                       << " inliers=" << inlier_cnt
                       << " outlier_ratio=" << outlierRatio
-                      << " weak=" << (mbXFeatMotionHealthWeak ? 1 : 0)
-                      << " bad=" << (mbXFeatMotionHealthBad ? 1 : 0)
-                      << " weak_min_inliers=" << weakMinInliers
-                      << " bad_min_inliers=" << badMinInliers
-                      << " weak_max_outlier=" << weakMaxOutlier
-                      << " bad_max_outlier=" << badMaxOutlier
+                      << " weak=" << (motionHealthWeak ? 1 : 0)
+                      << " bad=" << (motionHealthBad ? 1 : 0)
                       << std::endl;
             std::cout.flags(oldFlags);
             std::cout.precision(oldPrecision);
@@ -9935,19 +9796,22 @@ bool Tracking::TrackLocalMap()
                                           mThDepth);
         }
     }
-    LogTrackLocalMapKFStructureDiagnostics(mCurrentFrame,
-                                           mpReferenceKF,
-                                           mpLastKeyFrame,
-                                           mvpLocalKeyFrames,
-                                           mvpLocalMapPoints,
-                                           mmLocalKFProvenance,
-                                           mmLocalMPProvenance,
-                                           assoc_before_search,
-                                           assoc_before_opt,
-                                           mnLocalMapVotedKFCandidates,
-                                           mnLocalMapVotedKFKept,
-                                           mnLocalMapVotedKFVisibilityKept,
-                                           mThDepth);
+    if(IsXFeatDeepDiagEnabled())
+    {
+        LogTrackLocalMapKFStructureDiagnostics(mCurrentFrame,
+                                               mpReferenceKF,
+                                               mpLastKeyFrame,
+                                               mvpLocalKeyFrames,
+                                               mvpLocalMapPoints,
+                                               mmLocalKFProvenance,
+                                               mmLocalMPProvenance,
+                                               assoc_before_search,
+                                               assoc_before_opt,
+                                               mnLocalMapVotedKFCandidates,
+                                               mnLocalMapVotedKFKept,
+                                               mnLocalMapVotedKFVisibilityKept,
+                                               mThDepth);
+    }
     StereoDepthConstraintStats localStereoBeforeOpt;
     AccumulateStereoDepthConstraintStats(mCurrentFrame, mThDepth, false, localStereoBeforeOpt);
     const Sophus::SE3f TcwPrior = mCurrentFrame.GetPose();
@@ -10031,6 +9895,40 @@ bool Tracking::TrackLocalMap()
     if(mLocalMapTemporalCore.enabled &&
        mLocalMapTemporalCore.frameId == mCurrentFrame.mnId)
     {
+        struct ContinuityPoseStats
+        {
+            int assoc = 0;
+            int inlier = 0;
+            int outlier = 0;
+            int closeInlier = 0;
+            std::vector<int> inlierIndices;
+        };
+        const bool bPrintTemporalCore = ShouldPrintXFeatDebug(mCurrentFrame.mnId);
+        ContinuityPoseStats directStats;
+        ContinuityPoseStats continuousStrictStats;
+        ContinuityPoseStats nonContinuousStrictStats;
+        ContinuityPoseStats votedStats;
+        auto accumulateContinuityStats =
+            [&](ContinuityPoseStats& stats,
+                const int featureIndex,
+                MapPoint* pMP,
+                const bool bOutlier)
+        {
+            ++stats.assoc;
+            if(bOutlier)
+            {
+                ++stats.outlier;
+                return;
+            }
+
+            ++stats.inlier;
+            stats.inlierIndices.push_back(featureIndex);
+            const float depth =
+                ResolveMapPointQualityDepth(mCurrentFrame, pMP, pMP->mTrackDepth);
+            if(std::isfinite(depth) && depth > 0.0f && depth < mThDepth)
+                ++stats.closeInlier;
+        };
+
         for(int bin = 0; bin < kTemporalCoreBinCount; ++bin)
         {
             mLocalMapTemporalCore.optAssoc[bin] = 0;
@@ -10046,7 +9944,14 @@ bool Tracking::TrackLocalMap()
             MapPoint* pMP = mCurrentFrame.mvpMapPoints[static_cast<size_t>(i)];
             if(!pMP)
                 continue;
-            if(!IsLocalProjectionMatchSource(mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)]))
+            const unsigned char matchSource =
+                mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)];
+            const bool bOutlier =
+                i < static_cast<int>(mCurrentFrame.mvbOutlier.size()) &&
+                mCurrentFrame.mvbOutlier[static_cast<size_t>(i)];
+            if(bPrintTemporalCore && IsDirectTrackingMatchSource(matchSource))
+                accumulateContinuityStats(directStats, i, pMP, bOutlier);
+            if(!IsLocalProjectionMatchSource(matchSource))
                 continue;
 
             unsigned char bin = kTemporalCoreUnknown;
@@ -10057,16 +9962,34 @@ bool Tracking::TrackLocalMap()
                 bin = kTemporalCoreUnknown;
 
             ++mLocalMapTemporalCore.optAssoc[bin];
-            const bool bOutlier =
-                i < static_cast<int>(mCurrentFrame.mvbOutlier.size()) &&
-                mCurrentFrame.mvbOutlier[static_cast<size_t>(i)];
             if(bOutlier)
                 ++mLocalMapTemporalCore.optOutlier[bin];
             else
                 ++mLocalMapTemporalCore.optInlier[bin];
+
+            if(bPrintTemporalCore)
+            {
+                if(bin == kTemporalCoreStrictCore)
+                {
+                    if(msLocalMapContinuousDirectPoints.count(pMP) > 0)
+                    {
+                        accumulateContinuityStats(
+                            continuousStrictStats, i, pMP, bOutlier);
+                    }
+                    else
+                    {
+                        accumulateContinuityStats(
+                            nonContinuousStrictStats, i, pMP, bOutlier);
+                    }
+                }
+                else if(bin == kTemporalCoreVotedCore)
+                {
+                    accumulateContinuityStats(votedStats, i, pMP, bOutlier);
+                }
+            }
         }
 
-        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
+        if(bPrintTemporalCore)
         {
             const int prior = mLocalMapTemporalCore.priorAssociations;
             const int strictProj =
@@ -10091,7 +10014,15 @@ bool Tracking::TrackLocalMap()
                       << " local_kfs_unknown=" << mLocalMapTemporalCore.localKFsUnknown
                       << " prior_assoc=" << prior
                       << " base_support=" << baseSupport
-                      << " expansion_last=" << mLocalMapTemporalCore.expansionLastEnabled
+                      << " primary_first=" << mLocalMapTemporalCore.primaryFirstEnabled
+                      << " primary_candidates=" << mLocalMapTemporalCore.primaryCandidates
+                      << " primary_matches=" << mLocalMapTemporalCore.primaryMatches
+                      << " primary_support=" << mLocalMapTemporalCore.primarySupport
+                      << " secondary_candidates=" << mLocalMapTemporalCore.secondaryCandidates
+                      << " secondary_matches=" << mLocalMapTemporalCore.secondaryMatches
+                      << " secondary_suppressed=" << (mLocalMapTemporalCore.secondarySuppressed ? 1 : 0)
+                      << " secondary_suppressed_candidates=" << mLocalMapTemporalCore.secondarySuppressedCandidates;
+            std::cout << " expansion_last=" << mLocalMapTemporalCore.expansionLastEnabled
                       << " expansion_last_decision=" << expansionLastDecision
                       << " expansion_last_min_support=" << mLocalMapTemporalCore.expansionLastMinSupport
                       << " expansion_last_deferred=" << mLocalMapTemporalCore.expansionLastDeferred
@@ -10106,21 +10037,48 @@ bool Tracking::TrackLocalMap()
                       static_cast<float>(optAssoc)
                     : 0.0f;
                 const char* prefix = LocalMapTemporalCoreBinName(bin);
-                std::cout << " " << prefix << "_selected=" << mLocalMapTemporalCore.selected[bin]
-                          << " " << prefix << "_already_seen=" << mLocalMapTemporalCore.alreadySeen[bin]
-                          << " " << prefix << "_bad=" << mLocalMapTemporalCore.bad[bin]
-                          << " " << prefix << "_in_frustum=" << mLocalMapTemporalCore.inFrustum[bin]
-                          << " " << prefix << "_admitted=" << mLocalMapTemporalCore.admitted[bin]
-                          << " " << prefix << "_proj_match=" << mLocalMapTemporalCore.projectionMatch[bin]
+                std::cout << " " << prefix << "_proj_match=" << mLocalMapTemporalCore.projectionMatch[bin]
                           << " " << prefix << "_opt_assoc=" << optAssoc
                           << " " << prefix << "_opt_inlier=" << mLocalMapTemporalCore.optInlier[bin]
                           << " " << prefix << "_opt_outlier=" << mLocalMapTemporalCore.optOutlier[bin]
                           << " " << prefix << "_opt_outlier_ratio=" << outlierRatio;
+                if(IsXFeatDeepDiagEnabled())
+                {
+                    std::cout << " " << prefix << "_selected=" << mLocalMapTemporalCore.selected[bin]
+                              << " " << prefix << "_already_seen=" << mLocalMapTemporalCore.alreadySeen[bin]
+                              << " " << prefix << "_bad=" << mLocalMapTemporalCore.bad[bin]
+                              << " " << prefix << "_in_frustum=" << mLocalMapTemporalCore.inFrustum[bin]
+                              << " " << prefix << "_admitted=" << mLocalMapTemporalCore.admitted[bin];
+                }
             };
             printBin(kTemporalCoreStrictCore);
             printBin(kTemporalCoreVotedCore);
             printBin(kTemporalCoreExpansion);
             printBin(kTemporalCoreUnknown);
+
+            auto printContinuityStats =
+                [&](const char* prefix, const ContinuityPoseStats& stats)
+            {
+                const float outlierRatio = stats.assoc > 0
+                    ? static_cast<float>(stats.outlier) /
+                      static_cast<float>(stats.assoc)
+                    : 0.0f;
+                const FeatureSpatialStats spatial =
+                    ComputeFeatureSpatialStats(mCurrentFrame, stats.inlierIndices);
+                std::cout << " " << prefix << "_assoc=" << stats.assoc
+                          << " " << prefix << "_inlier=" << stats.inlier
+                          << " " << prefix << "_outlier=" << stats.outlier
+                          << " " << prefix << "_outlier_ratio=" << outlierRatio
+                          << " " << prefix << "_inlier_cells=" << spatial.nonEmptyCells
+                          << " " << prefix << "_close_inlier=" << stats.closeInlier;
+            };
+            printContinuityStats("direct", directStats);
+            printContinuityStats("strict_cont", continuousStrictStats);
+            printContinuityStats("strict_noncont", nonContinuousStrictStats);
+            std::cout << " voted_core_inlier_cells="
+                      << ComputeFeatureSpatialStats(
+                             mCurrentFrame, votedStats.inlierIndices).nonEmptyCells
+                      << " voted_core_close_inlier=" << votedStats.closeInlier;
             std::cout << std::endl;
             std::cout.flags(oldFlags);
             std::cout.precision(oldPrecision);
@@ -10133,11 +10091,11 @@ bool Tracking::TrackLocalMap()
     if(ShouldPrintXFeatDebug(mCurrentFrame.mnId))
     {
         LogTrackLocalMapConstraintSourceDiagnostics(mCurrentFrame);
-        LogTrackLocalMapJointSourceDiagnostics(mCurrentFrame);
         LogTrackLocalMapInlierMix(mCurrentFrame);
 
         if(IsXFeatDeepDiagEnabled())
         {
+            LogTrackLocalMapJointSourceDiagnostics(mCurrentFrame);
             LogTrackLocalMapCloseReuseOutcomeDiagnostics(mCurrentFrame);
             LogTrackLocalMapCloseReuseContributionOutcomeDiagnostics(mCurrentFrame, mmLocalMPProvenance);
             LogTrackLocalMapCloseReuseCohortAliveDiagnostics(mCurrentFrame, mpAtlas->GetCurrentMap());
@@ -10170,6 +10128,35 @@ bool Tracking::TrackLocalMap()
         LogTrackLocalMapXFeatMeasurementCalibDiagnostics(mCurrentFrame);
     }
     RecordTrackLocalMapTriangulationLocalProjHistoryOutcomes(mCurrentFrame);
+
+    if(std::getenv("USE_ORB") == nullptr)
+    {
+        std::unordered_map<MapPoint*, bool> directOutcomes;
+        const int nSource =
+            std::min(static_cast<int>(mCurrentFrame.mvpMapPoints.size()),
+                     static_cast<int>(mCurrentFrame.mvXFeatMatchSource.size()));
+        directOutcomes.reserve(static_cast<size_t>(std::max(0, nSource / 4)));
+        for(int i = 0; i < nSource; ++i)
+        {
+            MapPoint* pMP = mCurrentFrame.mvpMapPoints[static_cast<size_t>(i)];
+            if(!pMP ||
+               !IsDirectTrackingMatchSource(
+                   mCurrentFrame.mvXFeatMatchSource[static_cast<size_t>(i)]))
+            {
+                continue;
+            }
+
+            const bool bInlier =
+                i >= static_cast<int>(mCurrentFrame.mvbOutlier.size()) ||
+                !mCurrentFrame.mvbOutlier[static_cast<size_t>(i)];
+            auto inserted = directOutcomes.emplace(pMP, bInlier);
+            if(!inserted.second && bInlier)
+                inserted.first->second = true;
+        }
+        for(const auto& outcome : directOutcomes)
+            outcome.first->RecordDirectTrackingOutcome(
+                mCurrentFrame.mnId, outcome.second);
+    }
 
     mnMatchesInliers = 0;
 
@@ -10462,251 +10449,10 @@ bool Tracking::NeedNewKeyFrame()
 
     const bool bOriginalNeedNewKF = (((c1a||c1b||c1c) && c2)||c3 ||c4);
 
-    struct XFeatKFGuardMetrics
-    {
-        int inlierAssoc = 0;
-        int stableInlierAssoc = 0;
-        int refOverlapInlier = 0;
-        int stableRefOverlapInlier = 0;
-        int nonTrackedCloseHighConf = 0;
-        int trackedCloseCells = 0;
-        int nonTrackedCloseCells = 0;
-        int novelCloseCells = 0;
-        int highConfNovelCloseCells = 0;
-        FeatureSpatialStats inlierSpatial;
-        FeatureSpatialStats stableSpatial;
-        float stableInlierShare = 0.0f;
-        float refOverlapShare = 0.0f;
-        float stableRefOverlapShare = 0.0f;
-        float novelCloseCellShare = 0.0f;
-        bool eligible = false;
-        int weakInlierThreshold = 0;
-        bool weakSupport = false;
-        bool stableSupportOk = false;
-        bool closeCoverageOk = false;
-        bool novelCloseStrong = false;
-        bool closeInsert = false;
-    };
-
-    auto ComputeXFeatKFGuardMetrics = [&]() -> XFeatKFGuardMetrics
-    {
-        XFeatKFGuardMetrics metrics;
-        metrics.eligible =
-            std::getenv("USE_ORB") == nullptr &&
-            (mSensor == System::STEREO || mSensor == System::RGBD);
-        metrics.weakInlierThreshold =
-            std::max(120, static_cast<int>(0.60f * static_cast<float>(nRefMatches)));
-        if(!metrics.eligible && !IsXFeatFeatureDiagEnabled())
-        {
-            return metrics;
-        }
-
-        std::vector<int> inlierIndices;
-        std::vector<int> stableInlierIndices;
-        const int nFramePoints =
-            std::min(mCurrentFrame.N, static_cast<int>(mCurrentFrame.mvpMapPoints.size()));
-        inlierIndices.reserve(static_cast<size_t>(std::max(0, nFramePoints)));
-        stableInlierIndices.reserve(static_cast<size_t>(std::max(0, nFramePoints)));
-
-        for(int i = 0; i < nFramePoints; ++i)
-        {
-            MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
-            if(!pMP || pMP->isBad())
-                continue;
-            if(i < static_cast<int>(mCurrentFrame.mvbOutlier.size()) && mCurrentFrame.mvbOutlier[i])
-                continue;
-
-            ++metrics.inlierAssoc;
-            inlierIndices.push_back(i);
-
-            bool bObservedByReference = false;
-            if(mpReferenceKF)
-            {
-                bObservedByReference = pMP->IsInKeyFrame(mpReferenceKF);
-                if(bObservedByReference)
-                    ++metrics.refOverlapInlier;
-            }
-
-            const float foundRatio = pMP->GetFoundRatio();
-            const bool bStable =
-                pMP->Observations() >= 3 &&
-                std::isfinite(foundRatio) &&
-                foundRatio >= 0.35f;
-            if(bStable)
-            {
-                ++metrics.stableInlierAssoc;
-                stableInlierIndices.push_back(i);
-                if(bObservedByReference)
-                    ++metrics.stableRefOverlapInlier;
-            }
-        }
-
-        metrics.inlierSpatial = ComputeFeatureSpatialStats(mCurrentFrame, inlierIndices);
-        metrics.stableSpatial = ComputeFeatureSpatialStats(mCurrentFrame, stableInlierIndices);
-
-        const int gridCols = GetXFeatFeatureDiagGridCols();
-        const int gridRows = GetXFeatFeatureDiagGridRows();
-        const int gridCells = std::max(1, gridCols * gridRows);
-        std::vector<unsigned char> trackedCloseCell(static_cast<size_t>(gridCells), 0);
-        std::vector<unsigned char> nonTrackedCloseCell(static_cast<size_t>(gridCells), 0);
-        std::vector<unsigned char> highConfNonTrackedCloseCell(static_cast<size_t>(gridCells), 0);
-        const float spanX = std::max(1.0f, mCurrentFrame.mnMaxX - mCurrentFrame.mnMinX);
-        const float spanY = std::max(1.0f, mCurrentFrame.mnMaxY - mCurrentFrame.mnMinY);
-        auto ResolveCell = [&](const int idx) -> int
-        {
-            cv::KeyPoint kp;
-            if(!GetFrameKeyPointByIndex(mCurrentFrame, idx, kp))
-                return -1;
-            const int cellX = ClampInt(
-                static_cast<int>(((kp.pt.x - mCurrentFrame.mnMinX) / spanX) * static_cast<float>(gridCols)),
-                0,
-                gridCols - 1);
-            const int cellY = ClampInt(
-                static_cast<int>(((kp.pt.y - mCurrentFrame.mnMinY) / spanY) * static_cast<float>(gridRows)),
-                0,
-                gridRows - 1);
-            return cellY * gridCols + cellX;
-        };
-
-        const int nLeft = (mCurrentFrame.Nleft == -1) ? mCurrentFrame.N : mCurrentFrame.Nleft;
-        const int nClosePoints = std::min(nLeft, static_cast<int>(mCurrentFrame.mvDepth.size()));
-        for(int i = 0; i < nClosePoints; ++i)
-        {
-            const float depth = mCurrentFrame.mvDepth[i];
-            if(!(std::isfinite(depth) && depth > 0.0f && depth < mThDepth))
-                continue;
-
-            const int cell = ResolveCell(i);
-            if(cell < 0)
-                continue;
-
-            const bool bTracked =
-                i < static_cast<int>(mCurrentFrame.mvpMapPoints.size()) &&
-                mCurrentFrame.mvpMapPoints[i] &&
-                (i >= static_cast<int>(mCurrentFrame.mvbOutlier.size()) || !mCurrentFrame.mvbOutlier[i]);
-            if(bTracked)
-            {
-                trackedCloseCell[static_cast<size_t>(cell)] = 1;
-                continue;
-            }
-
-            nonTrackedCloseCell[static_cast<size_t>(cell)] = 1;
-            const bool bHighConf =
-                i < static_cast<int>(mCurrentFrame.mvStereoBirthQuality.size()) &&
-                mCurrentFrame.mvStereoBirthQuality[static_cast<size_t>(i)] == Frame::kStereoBirthCloseHighConf;
-            if(bHighConf)
-            {
-                ++metrics.nonTrackedCloseHighConf;
-                highConfNonTrackedCloseCell[static_cast<size_t>(cell)] = 1;
-            }
-        }
-
-        for(int cell = 0; cell < gridCells; ++cell)
-        {
-            const bool tracked = trackedCloseCell[static_cast<size_t>(cell)] != 0;
-            const bool nonTracked = nonTrackedCloseCell[static_cast<size_t>(cell)] != 0;
-            const bool highConf = highConfNonTrackedCloseCell[static_cast<size_t>(cell)] != 0;
-            if(tracked)
-                ++metrics.trackedCloseCells;
-            if(nonTracked)
-                ++metrics.nonTrackedCloseCells;
-            if(nonTracked && !tracked)
-                ++metrics.novelCloseCells;
-            if(highConf && !tracked)
-                ++metrics.highConfNovelCloseCells;
-        }
-
-        metrics.stableInlierShare = metrics.inlierAssoc > 0
-            ? static_cast<float>(metrics.stableInlierAssoc) / static_cast<float>(metrics.inlierAssoc)
-            : 0.0f;
-        metrics.refOverlapShare = metrics.inlierAssoc > 0
-            ? static_cast<float>(metrics.refOverlapInlier) / static_cast<float>(metrics.inlierAssoc)
-            : 0.0f;
-        metrics.stableRefOverlapShare = metrics.stableInlierAssoc > 0
-            ? static_cast<float>(metrics.stableRefOverlapInlier) /
-              static_cast<float>(metrics.stableInlierAssoc)
-            : 0.0f;
-        metrics.novelCloseCellShare = metrics.nonTrackedCloseCells > 0
-            ? static_cast<float>(metrics.novelCloseCells) / static_cast<float>(metrics.nonTrackedCloseCells)
-            : 0.0f;
-
-        metrics.weakSupport =
-            mnMatchesInliers < metrics.weakInlierThreshold ||
-            metrics.stableInlierAssoc < 140 ||
-            metrics.stableSpatial.nonEmptyCells < 18;
-        metrics.stableSupportOk =
-            metrics.stableInlierAssoc >= 160 &&
-            metrics.stableSpatial.nonEmptyCells >= 18 &&
-            metrics.stableRefOverlapShare >= 0.70f;
-        metrics.closeCoverageOk =
-            metrics.trackedCloseCells >= 8 || nTrackedClose >= 15;
-        metrics.novelCloseStrong =
-            metrics.highConfNovelCloseCells >= 8 &&
-            metrics.novelCloseCellShare >= 0.50f;
-        metrics.closeInsert =
-            !metrics.closeCoverageOk && metrics.novelCloseStrong;
-
-        return metrics;
-    };
-
-    const XFeatKFGuardMetrics xfeatKfGuard = ComputeXFeatKFGuardMetrics();
-
-    const bool bXFeatKFInsertGuardEnabled = IsXFeatKFInsertGuardEnabled();
-    const bool bXFeatKFInsertGuardEligible =
-        bXFeatKFInsertGuardEnabled && xfeatKfGuard.eligible;
-    const bool c1cNoClose =
-        mSensor!=System::MONOCULAR &&
-        mSensor!=System::IMU_MONOCULAR &&
-        mSensor!=System::IMU_STEREO &&
-        mSensor!=System::IMU_RGBD &&
-        (mnMatchesInliers < nRefMatches * 0.25);
-    const bool c2NoClose =
-        (mnMatchesInliers < nRefMatches * thRefRatio) && mnMatchesInliers > 15;
-    const bool bNeedNewKFWithoutClose =
-        (((c1a || c1b || c1cNoClose) && c2NoClose) || c3 || c4);
-    const bool bCloseOnlyInsertion =
-        bOriginalNeedNewKF && bNeedToInsertClose && !bNeedNewKFWithoutClose;
-
     const long int framesSinceLastKF =
         mCurrentFrame.mnId >= mnLastKeyFrameId
             ? static_cast<long int>(mCurrentFrame.mnId - mnLastKeyFrameId)
             : -1;
-
-    bool bCloseGuardSuppress = false;
-    const char* closeGuardReason = "disabled";
-    if(!bXFeatKFInsertGuardEnabled)
-    {
-        closeGuardReason = "disabled";
-    }
-    else if(!bXFeatKFInsertGuardEligible)
-    {
-        closeGuardReason = "not_eligible";
-    }
-    else if(!bCloseOnlyInsertion)
-    {
-        closeGuardReason = "not_close_only";
-    }
-    else if(c1a)
-    {
-        closeGuardReason = "max_frame";
-    }
-    else if(xfeatKfGuard.weakSupport)
-    {
-        closeGuardReason = "weak_support";
-    }
-    else if(!xfeatKfGuard.stableSupportOk)
-    {
-        closeGuardReason = "unstable_support";
-    }
-    else if(xfeatKfGuard.closeInsert)
-    {
-        closeGuardReason = "novel_close";
-    }
-    else
-    {
-        bCloseGuardSuppress = true;
-        closeGuardReason = "stable_close_only";
-    }
 
     auto LogKFDecision = [&](const bool needNewKF, const char* decision, const bool forceLog = false)
     {
@@ -10739,25 +10485,8 @@ bool Tracking::NeedNewKeyFrame()
                   << " c4=" << (c4 ? 1 : 0)
                   << " need_new_kf=" << (needNewKF ? 1 : 0)
                   << " decision=" << decision
-                  << " need_without_close=" << (bNeedNewKFWithoutClose ? 1 : 0)
-                  << " close_only_insertion=" << (bCloseOnlyInsertion ? 1 : 0)
-                  << " c1c_no_close=" << (c1cNoClose ? 1 : 0)
-                  << " c2_no_close=" << (c2NoClose ? 1 : 0);
-        if(bXFeatKFInsertGuardEnabled)
-        {
-            std::cout << " kf_guard_enabled=1"
-                      << " kf_guard_eligible=" << (bXFeatKFInsertGuardEligible ? 1 : 0)
-                      << " close_guard_suppressed=" << (bCloseGuardSuppress ? 1 : 0)
-                      << " close_guard_reason=" << closeGuardReason;
-        }
-        std::cout << std::endl;
+                  << std::endl;
     };
-
-    if(bOriginalNeedNewKF && bCloseGuardSuppress)
-    {
-        LogKFDecision(false, "close_guard_suppressed", true);
-        return false;
-    }
 
     if(bOriginalNeedNewKF)
     {
@@ -11073,26 +10802,15 @@ void Tracking::SearchLocalPoints()
     int nToMatch=0;
     int nLocalAlreadySeen = 0;
     int nLocalBad = 0;
-    int nLocalFoundRatioRejected = 0;
     int nLocalInFrustum = 0;
     int nLocalTrackInView = 0;
     MapPointQualityStats mpQualityLocalAlreadySeen;
-    MapPointQualityStats mpQualityFoundRatioRejected;
     MapPointQualityStats mpQualityLocalInFrustum;
     MapPointQualityStats mpQualityLocalTrackInView;
     const bool bUseORB = (std::getenv("USE_ORB") != nullptr);
-    const bool bUseLocalFoundRatioGate = IsLocalMapFoundRatioGateEnabled();
-    const float localMinFoundRatio = GetLocalMapFoundRatioMin();
-    const float localMinFoundRatioDepth = GetLocalMapFoundRatioMinDepth() > 0.0f
-        ? GetLocalMapFoundRatioMinDepth()
-        : mThDepth;
-    const std::string localFoundRatioScope = GetLocalMapFoundRatioScope();
     const bool bUseLightGlueLocalMap = !bUseORB && IsXFeatLightGlueLocalMapEnabled();
     const bool bUseTemporalExpansionLast =
         !bUseORB && IsXFeatLocalMapTemporalExpansionLastEnabled();
-    int localFoundRatioRejectedBySource[kMapPointCreationSourceCount] = {};
-    int localFoundRatioRejectedDepthQualified = 0;
-    int localFoundRatioRejectedDepthQualifiedBySource[kMapPointCreationSourceCount] = {};
     int localProjCloseTrackingStereoCandidates = 0;
     int localProjCloseTrackingStereoGeomAccept = 0;
     int localProjCloseTrackingStereoRejectUr = 0;
@@ -11156,18 +10874,26 @@ void Tracking::SearchLocalPoints()
     static constexpr int kMappingFeatureReuseCombinedBins = 6;
     std::vector<MapPoint*> vpLocalProjectionMapPoints;
     vpLocalProjectionMapPoints.reserve(mvpLocalMapPoints.size());
+    std::vector<MapPoint*> vpPrimaryProjectionMapPoints;
+    const bool bUsePrimaryFirst =
+        bUseTemporalExpansionLast && IsXFeatLocalMapPrimaryFirstEnabled();
+    if(bUsePrimaryFirst)
+        vpPrimaryProjectionMapPoints.reserve(mvpLocalMapPoints.size() / 4 + 1);
     struct TemporalExpansionProjectionCandidate
     {
         MapPoint* pMP = nullptr;
         float depth = std::numeric_limits<float>::quiet_NaN();
     };
     std::vector<TemporalExpansionProjectionCandidate> vTemporalExpansionCandidates;
+    std::vector<TemporalExpansionProjectionCandidate> vSecondaryProjectionCandidates;
     std::vector<MapPoint*> vpTemporalExpansionProjectionMapPoints;
     if(bUseTemporalExpansionLast)
     {
         vTemporalExpansionCandidates.reserve(mvpLocalMapPoints.size() / 4 + 1);
         vpTemporalExpansionProjectionMapPoints.reserve(mvpLocalMapPoints.size() / 4 + 1);
     }
+    if(bUsePrimaryFirst)
+        vSecondaryProjectionCandidates.reserve(mvpLocalMapPoints.size() / 2 + 1);
     MappingFeatureReuseFunnelStats mappingFeatureGridFunnel[kMappingFeatureReuseGridBins];
     MappingFeatureReuseFunnelStats mappingFeatureOctaveFunnel[kMappingFeatureReuseOctaveBins];
     MappingFeatureReuseFunnelStats mappingFeatureResponseFunnel[kMappingFeatureReuseResponseBins];
@@ -11188,14 +10914,16 @@ void Tracking::SearchLocalPoints()
         mLocalMapTemporalCore = LocalMapTemporalCoreStats();
         mLocalMapTemporalCore.enabled = true;
         mLocalMapTemporalCore.frameId = mCurrentFrame.mnId;
-        mLocalMapTemporalCore.temporalWindow =
-            GetXFeatLocalMapTemporalCoreWindow();
+        mLocalMapTemporalCore.temporalWindow = kTemporalCoreWindow;
         mLocalMapTemporalCore.priorAssociations = nAlreadyMatched;
+        mLocalMapTemporalCore.primaryFirstEnabled = bUsePrimaryFirst;
         mLocalMapTemporalCore.expansionLastEnabled = bUseTemporalExpansionLast;
         mLocalMapTemporalCore.expansionLastMinSupport =
             GetXFeatLocalMapTemporalMinSupport();
         mmLocalMapTemporalCoreBins.clear();
         mmLocalMapTemporalCoreBins.reserve(mvpLocalMapPoints.size());
+        msLocalMapContinuousDirectPoints.clear();
+        msLocalMapContinuousDirectPoints.reserve(mvpLocalMapPoints.size());
 
         AddTemporalCoreKeyFrames(mpLastKeyFrame,
                                  mLocalMapTemporalCore.temporalWindow,
@@ -11236,6 +10964,7 @@ void Tracking::SearchLocalPoints()
     {
         mLocalMapTemporalCore = LocalMapTemporalCoreStats();
         mmLocalMapTemporalCoreBins.clear();
+        msLocalMapContinuousDirectPoints.clear();
     }
     auto incrementTemporalCoreBin =
         [&](int (&values)[kTemporalCoreBinCount], const unsigned char bin)
@@ -11360,27 +11089,6 @@ void Tracking::SearchLocalPoints()
     if(bUseLightGlueLocalMap)
         localProjectedMapPointIds.reserve(mvpLocalMapPoints.size());
 
-    const bool bMotionGuardEnabled =
-        !bUseORB && IsXFeatMotionHealthGuardEnabled();
-    const bool bMotionGuardActive =
-        bMotionGuardEnabled &&
-        mbXFeatMotionHealthValid &&
-        mnXFeatMotionHealthFrameId == mCurrentFrame.mnId &&
-        (mbXFeatMotionHealthWeak || mbXFeatMotionHealthBad);
-    const int motionGuardMinObs = GetXFeatMotionGuardMinObs();
-    const float motionGuardMinFoundRatio = GetXFeatMotionGuardMinFoundRatio();
-    int motionGuardCandidates = 0;
-    int motionGuardLowRisk = 0;
-    int motionGuardMidRisk = 0;
-    int motionGuardHighRisk = 0;
-    int motionGuardSkipped = 0;
-    int motionGuardSkipLowObs = 0;
-    int motionGuardSkipLowFoundRatio = 0;
-    int motionGuardSkipUnknownSource = 0;
-    int motionGuardSkipWeakProvenance = 0;
-    int motionGuardSkipHistory = 0;
-    int motionGuardSkipOther = 0;
-
     int lgLocalKFsUsed = 0;
     int lgLocalRawMatches = 0;
     int lgLocalMpValid = 0;
@@ -11494,100 +11202,6 @@ void Tracking::SearchLocalPoints()
             (mappingFeatureCombinedFunnel[combinedBin].*field) += 1;
     };
 
-    auto shouldSkipByMotionHealthGuard =
-        [&](MapPoint* pMP,
-            const float resolvedDepth,
-            const Tracking::LocalMPProvenance* pProvenance) -> bool
-    {
-        if(!bMotionGuardActive)
-            return false;
-
-        motionGuardCandidates++;
-
-        bool bHighRisk = false;
-        bool bLowObs = false;
-        bool bLowFoundRatio = false;
-        bool bUnknownSource = false;
-        bool bWeakProvenance = false;
-        bool bHistoryRisk = false;
-
-        if(!pMP)
-        {
-            bHighRisk = true;
-            motionGuardSkipOther++;
-        }
-        else
-        {
-            const int observations = pMP->Observations();
-            bLowObs = observations < motionGuardMinObs;
-
-            const float foundRatio = pMP->GetFoundRatio();
-            bLowFoundRatio =
-                !std::isfinite(foundRatio) ||
-                foundRatio < motionGuardMinFoundRatio;
-
-            bUnknownSource =
-                pMP->GetCreationSource() == MapPoint::kCreationSourceUnknown;
-
-            const Tracking::LocalKFProvenanceRole role = pProvenance
-                ? pProvenance->bestRole
-                : Tracking::LocalKFProvenanceRole::Unknown;
-            bWeakProvenance =
-                role == Tracking::LocalKFProvenanceRole::Temporal ||
-                role == Tracking::LocalKFProvenanceRole::Unknown;
-
-            if(IsLocalProjHistoryTarget(pMP, resolvedDepth))
-            {
-                const MapPoint::LocalProjectionHistoryStats history =
-                    pMP->GetLocalProjectionHistory();
-                const int optOutcomes =
-                    history.optInlierCount + history.optOutlierCount;
-                const int recentValid = CountHistoryBits(history.recentValidMask);
-                bHistoryRisk =
-                    (optOutcomes >= 3 && LocalProjOptOutlierRate(history) > 0.35f) ||
-                    (recentValid >= 3 && LocalProjRecentOutlierRate(history) > 0.40f);
-            }
-
-            bHighRisk =
-                bLowObs ||
-                bLowFoundRatio ||
-                bUnknownSource ||
-                bWeakProvenance ||
-                bHistoryRisk;
-        }
-
-        if(bHighRisk)
-        {
-            motionGuardHighRisk++;
-            motionGuardSkipped++;
-            if(bLowObs)
-                motionGuardSkipLowObs++;
-            if(bLowFoundRatio)
-                motionGuardSkipLowFoundRatio++;
-            if(bUnknownSource)
-                motionGuardSkipUnknownSource++;
-            if(bWeakProvenance)
-                motionGuardSkipWeakProvenance++;
-            if(bHistoryRisk)
-                motionGuardSkipHistory++;
-            return true;
-        }
-
-        const Tracking::LocalKFProvenanceRole role = pProvenance
-            ? pProvenance->bestRole
-            : Tracking::LocalKFProvenanceRole::Unknown;
-        if(role == Tracking::LocalKFProvenanceRole::Reference ||
-           role == Tracking::LocalKFProvenanceRole::Voted)
-        {
-            motionGuardLowRisk++;
-        }
-        else
-        {
-            motionGuardMidRisk++;
-        }
-        return false;
-    };
-
     auto admitLocalProjectionPoint = [&](MapPoint* pMP,
                                          const float resolvedDepth,
                                          std::vector<MapPoint*>& target)
@@ -11659,6 +11273,11 @@ void Tracking::SearchLocalPoints()
                                                   pProvenance,
                                                   temporalCoreKFs);
             mmLocalMapTemporalCoreBins[pMP] = temporalCoreBin;
+            if(temporalCoreBin == kTemporalCoreStrictCore &&
+               HasContinuousDirectTrackingHistory(pMP, mCurrentFrame.mnId))
+            {
+                msLocalMapContinuousDirectPoints.insert(pMP);
+            }
             incrementTemporalCoreBin(mLocalMapTemporalCore.selected,
                                            temporalCoreBin);
         }
@@ -11748,51 +11367,6 @@ void Tracking::SearchLocalPoints()
             incrementTemporalCoreBin(mLocalMapTemporalCore.inFrustum,
                                            temporalCoreBin);
 
-            const Tracking::LocalMPProvenance* pMotionGuardProvenance = nullptr;
-            const auto itMotionGuardProv = mmLocalMPProvenance.find(pMP);
-            if(itMotionGuardProv != mmLocalMPProvenance.end() &&
-               itMotionGuardProv->second.frameId == mCurrentFrame.mnId)
-            {
-                pMotionGuardProvenance = &itMotionGuardProv->second;
-            }
-            if(shouldSkipByMotionHealthGuard(pMP, resolvedDepth, pMotionGuardProvenance))
-            {
-                pMP->mbTrackInView = false;
-                pMP->mbTrackInViewR = false;
-                continue;
-            }
-
-            if(bUseLocalFoundRatioGate)
-            {
-                const bool bGateThisMapPoint = ShouldGateLocalMapPointByFoundRatio(pMP);
-                const float foundRatio = pMP->GetFoundRatio();
-                const bool bDepthQualified = std::isfinite(resolvedDepth) && resolvedDepth > localMinFoundRatioDepth;
-                if(bGateThisMapPoint && std::isfinite(foundRatio) && foundRatio < localMinFoundRatio)
-                {
-                    if(bDepthQualified)
-                    {
-                        if(inFrustumStats)
-                            inFrustumStats->foundGateReject++;
-                        if(referenceStats)
-                            ++referenceStats->foundGateReject;
-                        accumulateMappingFeatureReuse(pMP,
-                                                      resolvedDepth,
-                                                      &MappingFeatureReuseFunnelStats::foundGateReject);
-                        nLocalFoundRatioRejected++;
-                        localFoundRatioRejectedBySource[MapPointCreationSourceIndex(pMP->GetCreationSource())]++;
-                        localFoundRatioRejectedDepthQualified++;
-                        localFoundRatioRejectedDepthQualifiedBySource[MapPointCreationSourceIndex(pMP->GetCreationSource())]++;
-                        AccumulateMapPointQuality(mpQualityFoundRatioRejected,
-                                                  pMP,
-                                                  mCurrentFrame,
-                                                  resolvedDepth,
-                                                  mThDepth);
-                        pMP->mbTrackInView = false;
-                        pMP->mbTrackInViewR = false;
-                        continue;
-                    }
-                }
-            }
             Tracking::LocalKFProvenanceRole localRole = Tracking::LocalKFProvenanceRole::Unknown;
             const Tracking::LocalMPProvenance* pLocalProvenance = nullptr;
             const auto itLocalProv = mmLocalMPProvenance.find(pMP);
@@ -11876,9 +11450,32 @@ void Tracking::SearchLocalPoints()
                 ++mLocalMapTemporalCore.expansionLastDeferred;
                 continue;
             }
-            admitLocalProjectionPoint(pMP,
-                                      resolvedDepth,
-                                      vpLocalProjectionMapPoints);
+            if(bUsePrimaryFirst &&
+               temporalCoreBin == kTemporalCoreStrictCore &&
+               msLocalMapContinuousDirectPoints.count(pMP) > 0)
+            {
+                admitLocalProjectionPoint(pMP,
+                                          resolvedDepth,
+                                          vpPrimaryProjectionMapPoints);
+                ++mLocalMapTemporalCore.primaryCandidates;
+            }
+            else
+            {
+                if(bUsePrimaryFirst)
+                {
+                    TemporalExpansionProjectionCandidate candidate;
+                    candidate.pMP = pMP;
+                    candidate.depth = resolvedDepth;
+                    vSecondaryProjectionCandidates.push_back(candidate);
+                    ++mLocalMapTemporalCore.secondaryCandidates;
+                }
+                else
+                {
+                    admitLocalProjectionPoint(pMP,
+                                              resolvedDepth,
+                                              vpLocalProjectionMapPoints);
+                }
+            }
         }
         else if(selectedStats)
         {
@@ -11893,6 +11490,7 @@ void Tracking::SearchLocalPoints()
     }
 
     if(nToMatch > 0 ||
+       (bUsePrimaryFirst && !vSecondaryProjectionCandidates.empty()) ||
        (bUseTemporalExpansionLast && !vTemporalExpansionCandidates.empty()))
     {
         const bool bMonocularVisual = (mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
@@ -11995,6 +11593,18 @@ void Tracking::SearchLocalPoints()
             }
         };
 
+        auto SuppressDeferredProjectionCandidates =
+            [](const std::vector<TemporalExpansionProjectionCandidate>& candidates)
+        {
+            for(const TemporalExpansionProjectionCandidate& candidate : candidates)
+            {
+                MapPoint* pMP = candidate.pMP;
+                if(!pMP)
+                    continue;
+                pMP->mbTrackInView = false;
+                pMP->mbTrackInViewR = false;
+            }
+        };
         auto AdmitTemporalExpansionCandidates = [&]()
         {
             for(const TemporalExpansionProjectionCandidate& candidate : vTemporalExpansionCandidates)
@@ -12008,6 +11618,18 @@ void Tracking::SearchLocalPoints()
             }
         };
 
+        auto AdmitSecondaryProjectionCandidates = [&]()
+        {
+            for(const TemporalExpansionProjectionCandidate& candidate : vSecondaryProjectionCandidates)
+            {
+                if(!candidate.pMP)
+                    continue;
+                admitLocalProjectionPoint(candidate.pMP,
+                                          candidate.depth,
+                                          vpLocalProjectionMapPoints);
+            }
+        };
+
         if(bUseORB)
         {
             ORBmatcher matcher(0.8);
@@ -12015,17 +11637,66 @@ void Tracking::SearchLocalPoints()
         }
         else
         {
+            // Reserve conflicting keypoints for strict points with recent direct-inlier history.
+            if(bUsePrimaryFirst && !vpPrimaryProjectionMapPoints.empty())
+            {
+                XFeatMatcher matcher(0.8f, false);
+                const int primaryMatches =
+                    matcher.SearchByProjection(mCurrentFrame,
+                                               vpPrimaryProjectionMapPoints,
+                                               th,
+                                               bFarFilter,
+                                               thFarPoints,
+                                               GetXFeatThHighLocalProjection(),
+                                               -1,
+                                               true);
+                matches += primaryMatches;
+                mLocalMapTemporalCore.primaryMatches = primaryMatches;
+                AccumulateProjectionStats(matcher.LastProjectionMapPointStats());
+            }
+
+            const int primarySupport = nAlreadyMatched + matches;
+            if(bUsePrimaryFirst)
+                mLocalMapTemporalCore.primarySupport = primarySupport;
+            const bool bCurrentMotionHealth =
+                mbLastXFeatMotionHealthValid &&
+                mnLastXFeatMotionHealthFrameId == mCurrentFrame.mnId;
+            const bool bPrimarySupportEnough =
+                bUsePrimaryFirst &&
+                bCurrentMotionHealth &&
+                !mbLastXFeatMotionHealthWeak &&
+                !mbLastXFeatMotionHealthBad &&
+                primarySupport >= mLocalMapTemporalCore.expansionLastMinSupport;
+            if(bUsePrimaryFirst && !vSecondaryProjectionCandidates.empty())
+            {
+                if(bPrimarySupportEnough)
+                {
+                    mLocalMapTemporalCore.secondarySuppressed = true;
+                    mLocalMapTemporalCore.secondarySuppressedCandidates =
+                        static_cast<int>(vSecondaryProjectionCandidates.size());
+                    SuppressDeferredProjectionCandidates(vSecondaryProjectionCandidates);
+                }
+                else
+                {
+                    AdmitSecondaryProjectionCandidates();
+                }
+            }
+
             if(!vpLocalProjectionMapPoints.empty())
             {
                 XFeatMatcher matcher(0.8f, false);
-                matches = matcher.SearchByProjection(mCurrentFrame,
-                                                     vpLocalProjectionMapPoints,
-                                                     th,
-                                                     bFarFilter,
-                                                     thFarPoints,
-                                                     GetXFeatThHighLocalProjection(),
-                                                     -1,
-                                                     true);
+                const int secondaryMatches =
+                    matcher.SearchByProjection(mCurrentFrame,
+                                               vpLocalProjectionMapPoints,
+                                               th,
+                                               bFarFilter,
+                                               thFarPoints,
+                                               GetXFeatThHighLocalProjection(),
+                                               -1,
+                                               true);
+                matches += secondaryMatches;
+                if(bUsePrimaryFirst)
+                    mLocalMapTemporalCore.secondaryMatches = secondaryMatches;
                 AccumulateProjectionStats(matcher.LastProjectionMapPointStats());
             }
 
@@ -12356,8 +12027,6 @@ void Tracking::SearchLocalPoints()
             return;
 
         const bool bDeepSearchLocalDiag = IsXFeatDeepDiagEnabled();
-        const bool bHasLocalFoundRatioSourceDiag =
-            bDeepSearchLocalDiag || nLocalFoundRatioRejected > 0;
         const bool bHasLocalKFVisibilityDiag = bDeepSearchLocalDiag;
         const bool bHasTriangHistoryDiag = bDeepSearchLocalDiag;
         const bool bHasTriangVisibilityHistoryDiag = bDeepSearchLocalDiag;
@@ -12378,46 +12047,12 @@ void Tracking::SearchLocalPoints()
             lgLocalMapUpdatedEdgeCandidates > 0 ||
             lgLocalMapUpdatedEdgeConflictUnverified > 0;
 
-        if(ShouldPrintXFeatDebug(mCurrentFrame.mnId) && bMotionGuardEnabled)
-        {
-            std::cout << "[TrackLocalMap][MotionGuard]"
-                      << " frame_id=" << mCurrentFrame.mnId
-                      << " enabled=1"
-                      << " active=" << (bMotionGuardActive ? 1 : 0)
-                      << " health_valid=" << (mbXFeatMotionHealthValid ? 1 : 0)
-                      << " health_frame_id=" << mnXFeatMotionHealthFrameId
-                      << " motion_assoc=" << mnXFeatMotionHealthAssociations
-                      << " motion_inliers=" << mnXFeatMotionHealthInliers
-                      << " motion_outlier_ratio=" << mXFeatMotionHealthOutlierRatio
-                      << " motion_weak=" << (mbXFeatMotionHealthWeak ? 1 : 0)
-                      << " motion_bad=" << (mbXFeatMotionHealthBad ? 1 : 0)
-                      << " min_obs=" << motionGuardMinObs
-                      << " min_found_ratio=" << motionGuardMinFoundRatio
-                      << " candidates=" << motionGuardCandidates
-                      << " low_risk=" << motionGuardLowRisk
-                      << " mid_risk=" << motionGuardMidRisk
-                      << " high_risk=" << motionGuardHighRisk
-                      << " skipped=" << motionGuardSkipped
-                      << " skip_low_obs=" << motionGuardSkipLowObs
-                      << " skip_low_found_ratio=" << motionGuardSkipLowFoundRatio
-                      << " skip_unknown_source=" << motionGuardSkipUnknownSource
-                      << " skip_weak_provenance=" << motionGuardSkipWeakProvenance
-                      << " skip_history=" << motionGuardSkipHistory
-                      << " skip_other=" << motionGuardSkipOther
-                      << std::endl;
-        }
-
         std::cout << "[SearchLocalPoints] frame=" << mCurrentFrame.mnId
                   << " local_mps=" << mvpLocalMapPoints.size()
                   << " already_matched=" << nAlreadyMatched
                   << " bad_already_matched=" << nBadAlreadyMatched
                   << " local_already_seen=" << nLocalAlreadySeen
                   << " local_bad=" << nLocalBad
-                  << " local_found_ratio_gate=" << (bUseLocalFoundRatioGate ? 1 : 0)
-                  << " local_min_found_ratio=" << localMinFoundRatio
-                  << " local_found_ratio_min_depth=" << localMinFoundRatioDepth
-                  << " local_found_ratio_scope=" << localFoundRatioScope
-                  << " local_found_ratio_rejected=" << nLocalFoundRatioRejected
                   << " local_kfs_voted_candidates=" << mnLocalMapVotedKFCandidates
                   << " local_kfs_voted_kept=" << mnLocalMapVotedKFKept
                   << " local_in_frustum=" << nLocalInFrustum
@@ -12430,22 +12065,6 @@ void Tracking::SearchLocalPoints()
                   << " th=" << thValue
                   << " mode=" << (bUseORB ? "ORBProj" : (bUseLightGlueLocalMap ? "XFeatProj+LightGlueLocal" : "XFeatProj"))
                   << " th_high=" << (bUseORB ? -1.0f : GetXFeatThHighLocalProjection());
-        if(bHasLocalFoundRatioSourceDiag)
-        {
-            std::cout << " local_found_ratio_rejected_depth_qualified=" << localFoundRatioRejectedDepthQualified
-                      << " local_found_ratio_rejected_depth_qualified_local_mapping_triangulation="
-                      << localFoundRatioRejectedDepthQualifiedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceLocalMappingTriangulation)]
-                      << " local_found_ratio_rejected_tracking_stereo="
-                      << localFoundRatioRejectedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceTrackingStereo)]
-                      << " local_found_ratio_rejected_local_mapping_triangulation="
-                      << localFoundRatioRejectedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceLocalMappingTriangulation)]
-                      << " local_found_ratio_rejected_mono_init="
-                      << localFoundRatioRejectedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceMonoInit)]
-                      << " local_found_ratio_rejected_stereo_init="
-                      << localFoundRatioRejectedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceStereoInit)]
-                      << " local_found_ratio_rejected_unknown="
-                      << localFoundRatioRejectedBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceUnknown)];
-        }
         if(bHasLocalKFVisibilityDiag)
         {
             std::cout << " local_kfs_voted_visibility_kept=" << mnLocalMapVotedKFVisibilityKept;
@@ -12578,7 +12197,6 @@ void Tracking::SearchLocalPoints()
                   << " mThDepth=" << mThDepth;
         AppendMapPointQualityStats(std::cout, "already", mpQualityAlreadyMatched);
         AppendMapPointQualityStats(std::cout, "seen", mpQualityLocalAlreadySeen);
-        AppendMapPointQualityStats(std::cout, "rejected", mpQualityFoundRatioRejected);
         AppendMapPointQualityStats(std::cout, "frustum", mpQualityLocalInFrustum);
         AppendMapPointQualityStats(std::cout, "trackview", mpQualityLocalTrackInView);
         std::cout << std::endl;
@@ -12599,10 +12217,9 @@ void Tracking::SearchLocalPoints()
                           << " not_in_frustum="
                           << std::max(0, stats.selected - stats.alreadySeen - stats.bad - stats.inFrustum)
                           << " in_frustum=" << stats.inFrustum
-                          << " found_gate_reject=" << stats.foundGateReject
                           << " history_gate_reject=" << stats.historyGateReject
                           << " admission_deferred="
-                          << std::max(0, stats.inFrustum - stats.foundGateReject -
+                          << std::max(0, stats.inFrustum -
                                            stats.historyGateReject - stats.admitted)
                           << " admitted=" << stats.admitted
                           << " projection_match=" << stats.projectionMatch
@@ -12651,7 +12268,6 @@ void Tracking::SearchLocalPoints()
                           << " already_seen=" << stats.alreadySeen
                           << " bad=" << stats.bad
                           << " in_frustum=" << stats.inFrustum
-                          << " found_gate_reject=" << stats.foundGateReject
                           << " history_gate_reject=" << stats.historyGateReject
                           << " admitted=" << stats.admitted
                           << " projection_match=" << stats.projectionMatch
@@ -12698,7 +12314,6 @@ void Tracking::SearchLocalPoints()
                       << " bad=" << stats.bad
                       << " not_in_frustum=" << notInFrustum
                       << " in_frustum=" << stats.inFrustum
-                      << " found_gate_reject=" << stats.foundGateReject
                       << " history_gate_reject=" << stats.historyGateReject
                       << " admitted=" << stats.admitted
                       << " projection_match=" << stats.projectionMatch
@@ -13180,10 +12795,6 @@ void Tracking::UpdateLocalKeyFrames()
 
 bool Tracking::Relocalization()
 {
-    mbXFeatMotionHealthValid = false;
-    mbXFeatMotionHealthWeak = false;
-    mbXFeatMotionHealthBad = false;
-
     Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
     // [XFEAT_RELOC_20260414] ORB keeps BoW pipeline; XFeat avoids BoW dependency in relocalization.
     const bool bUseORB = (std::getenv("USE_ORB") != nullptr);

@@ -29,6 +29,7 @@
 
 #include <opencv2/core/core.hpp>
 #include <cstddef>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -164,6 +165,14 @@ public:
         long unsigned int firstOptOutlierFrame;
     };
 
+    struct DirectTrackingHistoryStats
+    {
+        long unsigned int lastFrame;
+        long unsigned int lastInlierFrame;
+        unsigned int recentValidMask;
+        unsigned int recentInlierMask;
+    };
+
     MapPoint();
 
     MapPoint(const Eigen::Vector3f &Pos, KeyFrame* pRefKF, Map* pMap);
@@ -256,6 +265,8 @@ public:
     void RecordCloseReuseProjectionMatch(const long unsigned int frameId);
     void RecordCloseReuseOutcome(const long unsigned int frameId, const bool bInlier);
     CloseReuseCohortStats GetCloseReuseCohortStats() const;
+    void RecordDirectTrackingOutcome(const long unsigned int frameId, const bool bInlier);
+    DirectTrackingHistoryStats GetDirectTrackingHistory() const;
 
     void PrintObservations();
 
@@ -311,6 +322,12 @@ public:
     long unsigned int mnFirstCloseReuseProjectionMatchFrame;
     long unsigned int mnFirstCloseReuseOptInlierFrame;
     long unsigned int mnFirstCloseReuseOptOutlierFrame;
+    long unsigned int mnLastDirectTrackingFrame =
+        std::numeric_limits<long unsigned int>::max();
+    long unsigned int mnLastDirectTrackingInlierFrame =
+        std::numeric_limits<long unsigned int>::max();
+    unsigned int mDirectTrackingRecentValidMask = 0;
+    unsigned int mDirectTrackingRecentInlierMask = 0;
 
     // Variables used by the tracking
     float mTrackProjX;

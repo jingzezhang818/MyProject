@@ -34,6 +34,7 @@ namespace
 constexpr int kXFeatDescriptorBankSize = 4;
 constexpr unsigned int kLocalProjRecentHistoryMask = 0xffu;
 constexpr unsigned int kLocalMapVisibilityRecentHistoryMask = 0xffu;
+constexpr unsigned int kDirectTrackingRecentHistoryMask = 0xffu;
 constexpr long unsigned int kInvalidLocalProjHistoryFrame =
     std::numeric_limits<long unsigned int>::max();
 
@@ -753,6 +754,35 @@ MapPoint::CloseReuseCohortStats MapPoint::GetCloseReuseCohortStats() const
     stats.firstProjectionMatchFrame = mnFirstCloseReuseProjectionMatchFrame;
     stats.firstOptInlierFrame = mnFirstCloseReuseOptInlierFrame;
     stats.firstOptOutlierFrame = mnFirstCloseReuseOptOutlierFrame;
+    return stats;
+}
+
+void MapPoint::RecordDirectTrackingOutcome(const long unsigned int frameId,
+                                           const bool bInlier)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(mnLastDirectTrackingFrame == frameId)
+        return;
+
+    mnLastDirectTrackingFrame = frameId;
+    if(bInlier)
+        mnLastDirectTrackingInlierFrame = frameId;
+    mDirectTrackingRecentValidMask =
+        ((mDirectTrackingRecentValidMask << 1U) | 1U) &
+        kDirectTrackingRecentHistoryMask;
+    mDirectTrackingRecentInlierMask =
+        ((mDirectTrackingRecentInlierMask << 1U) | (bInlier ? 1U : 0U)) &
+        kDirectTrackingRecentHistoryMask;
+}
+
+MapPoint::DirectTrackingHistoryStats MapPoint::GetDirectTrackingHistory() const
+{
+    unique_lock<mutex> lock(const_cast<MapPoint*>(this)->mMutexFeatures);
+    DirectTrackingHistoryStats stats;
+    stats.lastFrame = mnLastDirectTrackingFrame;
+    stats.lastInlierFrame = mnLastDirectTrackingInlierFrame;
+    stats.recentValidMask = mDirectTrackingRecentValidMask;
+    stats.recentInlierMask = mDirectTrackingRecentInlierMask;
     return stats;
 }
 

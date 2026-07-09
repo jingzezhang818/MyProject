@@ -1,5 +1,12 @@
 # XFeat SLAM nLevels=1 后续工作流计划
 
+> 状态说明（2026-07-09）：本文记录的是阶段性工作流。旧的
+> `XFEAT_MOTION_HEALTH_GUARD`、`XFEAT_KF_INSERT_GUARD` 和 lifecycle
+> expansion guard 已从代码删除；当前保留
+> `XFEAT_LOCALMAP_TEMPORAL_EXPANSION_LAST`。连续 tracking base 统计已经完成，
+> 当前正在验证 `XFEAT_LOCALMAP_PRIMARY_FIRST` 的自适应准入版本。最新实验数据、行为边界和验收条件见
+> `docs/airslam_xfeat_slam_adaptation_direction.md`。
+
 本文档用于指导 `nLevels=1 / octave=0` 之后的实验和代码修改。之前很多实验是在 `nLevels=8` 或仍带 ORB 金字塔尺度语义时完成的；这些结论不能全部丢弃，但需要按当前前端条件重新排序优先级。
 
 ## 总目标
@@ -513,12 +520,45 @@ decision: keep / retry / rollback / next_phase
 
 ## 当前最推荐的下一步
 
-先不要恢复旧 tracklet 线。当前最稳妥的下一步是：
+先不要恢复旧 tracklet 线，也不要回到全局 KF guard。当前日志已经把问题收敛到：
 
 ```text
-阶段 0：重建 nLevels=1 baseline 结构统计
-阶段 1：固定低负载 loop
-阶段 2：实现更保守的 KF guard 或先做 LocalMap admission shadow
+normal 段：direct + strict continuous primary 基本够用
+weak 段：primary support 不足，必须启用 secondary
+已知风险：weak fallback 中 secondary/voted 的外点率偏高，但简单限量会损失必要支撑
 ```
 
-如果阶段 0 的日志显示问题链条和旧日志一致，再进入 LocalMap admission 或 conservative KF guard。若 `nLevels=1` 已经改变了瓶颈，例如 close no_mp 明显下降、local_proj 不再脏，则不要沿旧路线继续。
+因此当前主线是：
+
+```text
+阶段 0：固定 XFeat vocab + LG loop + temporal expansion-last baseline。
+阶段 1：使用 adaptive primary-first 压掉 normal 段不必要 secondary。
+阶段 2：保持前一版 adaptive primary-first，不继续做 secondary hard admission。
+阶段 3：two-stage refined-pose projection 已验证无稳定收益并回退。
+```
+
+本阶段不再做：
+
+- 新的 KF 插入策略。
+- 全局少建点。
+- expansion lifecycle 细分。
+- 单阈值 risk guard。
+- 大量 shadow/audit 诊断。
+
+已验证 `weak fallback secondary admission` 能略降 local projection 外点率，但会减少有效支撑、
+增加关键帧数，RMSE 没有改善，因此已回退。下一步如果继续改 LocalMap，应考虑更结构化的
+二阶段 projection / pose verification，而不是继续增加 source/risk 阈值。
+
+已回退的二阶段实验：
+
+```text
+direct + primary support >= 80
+-> 临时 Frame 上 PoseOptimization
+-> 临时优化 inliers >= 60 时，只回写 pose
+-> secondary / expansion deferred candidates 用新 pose 重新投影
+```
+
+三次实验 RMSE 为 `0.077933 / 0.073675 / 0.098668`，但 1m RPE 和
+`primary_support=80~139` 区间的 local projection 外点率均未优于 adaptive
+primary-first。低 RMSE 不能从日志中归因于二阶段行为，主要仍受 loop/GBA 和运行状态影响。
+实现、环境变量和专用日志字段已经删除。

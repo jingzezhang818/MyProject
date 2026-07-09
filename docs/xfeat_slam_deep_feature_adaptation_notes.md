@@ -1,5 +1,11 @@
 # XFeat SLAM 深度特征适配记录
 
+> 状态说明（2026-07-09）：本文中的 `XFEAT_MOTION_HEALTH_GUARD` 和
+> `XFEAT_KF_INSERT_GUARD` 章节保留为历史实验记录；对应环境变量和行为代码
+> 已删除。`projection_first` 和 LocalMap found-ratio gate 也已从主线清理。
+> 旧 `XFEAT_LOCALMAP_CORE_FIRST` 章节只作为历史实验记录；当前 LocalMap 主线及后续计划以
+> `docs/airslam_xfeat_slam_adaptation_direction.md` 的 2026-07-09 记录为准。
+
 本文档记录近期围绕 XFeat + LightGlue 前端适配 ORB-SLAM3 后端的分析结论和代码改动。目标是避免后续继续在已经验证过的方向上反复调参，也方便修改 `Tracking`、`LoopClosing`、`LocalMapping` 时先对齐当前判断。
 
 ## 当前核心判断
@@ -590,7 +596,8 @@ cap120_2:         expansion matches = 416, active avg = 4.52
 
 ### 回退后的下一步方向
 
-当前推荐回到无 cap 的 `XFEAT_LOCALMAP_CORE_FIRST=1` 作为 baseline。已经验证过的结论是：projection 前数量 cap、post-opt delayed risk guard、core-first admission-stage shadow 都不适合作为当前主线。
+当时阶段曾推荐回到无 cap 的 `XFEAT_LOCALMAP_CORE_FIRST=1` 作为 baseline。按 2026-07-09 后续结果更新：旧 `CORE_FIRST`
+不再作为当前主线；已经验证过的结论是 projection 前数量 cap、post-opt delayed risk guard、core-first admission-stage shadow 都不适合作为当前主线。
 
 优先级 1：loop 质量稳定性
 
@@ -673,7 +680,8 @@ while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
 
 保留的内容：
 
-- `XFEAT_LOCALMAP_CORE_FIRST=1`，这是当前仍有正向迹象的行为分支。
+- `XFEAT_LOCALMAP_CORE_FIRST=1`，这是当时仍有正向迹象的历史行为分支；当前已被 temporal expansion-last
+  和 adaptive primary-first 取代。
 - `[SearchLocalPoints]` 的 core / expansion candidates、matches 和 decision 统计。
 - `[TrackLocalMap][SourceError]`、`[SourceDepthError]`、`[SourceMPJointError]`、`[XFeatMeasurementCalib]`、`[PoseOpt][ResidualCalib]` 等通用诊断。
 
@@ -809,7 +817,8 @@ core-first 历史较好结果：
 
 后续判断：
 
-- 保留 `XFEAT_LOCALMAP_CORE_FIRST=1` 作为当前主线。
+- 该阶段曾保留 `XFEAT_LOCALMAP_CORE_FIRST=1` 作为主线；当前主线已切换到
+  `XFEAT_LOCALMAP_TEMPORAL_EXPANSION_LAST=1` + adaptive `XFEAT_LOCALMAP_PRIMARY_FIRST=1`。
 - 不保留 `XFEAT_LOCALMAP_CORE_AUDIT=1`，避免代码和日志继续膨胀。
 - 不继续沿 delayed risk history guard 方向调阈值。
 - 下一步应继续从 loop 初始质量、LocalMap 结构性筛选、共视候选池规模与来源比例入手。
@@ -1034,3 +1043,113 @@ last_gba_abort_reason=stop_requested
 
 - 如果 `KF600~KF700` 的 NearMiss 多数是 `initial_below`，并且正确历史区域不在候选内，才进入 XFeat 专用 vocabulary / place recognition。
 - 如果 NearMiss 多数已经进入 `sim3_no_converge / proj_below / cov_below`，说明 ORBvoc 已经召回候选，下一步应考虑短窗口 loop hypothesis memory，而不是先训练词袋。
+
+## 2026-07-09：LocalMap weak fallback 收敛结论
+
+在 XFeat 专用词袋、LightGlue loop 和 `nLevels=1` 固定后，最近三次 MH04 运行显示：
+
+- adaptive primary-first 已经能让 normal 段更干净，但这些帧不是主要误差来源。
+- `secondary_suppressed=1` 的帧 local projection 外点率下降，但数量占比小。
+- weak sampled frame 的 APE 明显高于 normal frame，且典型 weak fallback 帧存在
+  `primary_support≈60`、local projection 外点率超过 `40%` 的情况。
+- 继续压 expansion 或恢复 MapPoint lifecycle expansion guard 意义有限，因为 expansion 最脏但占比低。
+- 旧 `risk guard`、old `CORE_FIRST`、KF policy guard 都不再作为当前主线。
+
+曾短期实现以下行为：
+
+```text
+primary support 足够:
+    suppress secondary / expansion
+primary support 不足或 motion weak:
+    secondary 按质量排序并限量准入
+    base 仍不足时才启用 expansion
+```
+
+两次运行结果显示：
+
+```text
+run_MH04_weak_secondary_admission_1.log:
+  local_proj outlier = 18.6%, secondary matches = 4198, KFs = 577
+run_MH04_weak_secondary_admission_2.log:
+  local_proj outlier = 19.6%, secondary matches = 4309, KFs = 572
+```
+
+相比前一版 adaptive primary-first，它略微降低了 `local_proj` 外点率，但减少了 secondary
+有效支撑、增加了 KeyFrame 数量，loop 几何和 RMSE 没有改善。因此该行为已回退。
+
+当前保留的行为仍是：
+
+```text
+primary support 足够:
+    suppress secondary / expansion
+primary support 不足:
+    admit all secondary
+    base 仍不足时才启用 expansion
+```
+
+后续不再继续调 secondary 排序分数、budget 或 source/risk 阈值。如果继续处理 weak 段，应转向
+二阶段 projection / pose verification 或更结构化的局部优化，而不是前置少用点。
+
+### 2026-07-09：Two-stage LocalMap projection 实验与回退
+
+实验曾使用默认关闭开关：
+
+```text
+XFEAT_LOCALMAP_TWO_STAGE=1
+```
+
+目标不是减少 secondary，而是在 weak/fallback 段使用 secondary 之前先细化 pose：
+
+```text
+direct + primary projection
+-> direct + primary support >= 80 时，在 Frame copy 上做 PoseOptimization
+-> 临时优化 inliers >= 60 时，只把 pose 写回 mCurrentFrame
+-> 用新 pose 重新投影 secondary / expansion candidates
+-> 最终仍走正式 TrackLocalMap PoseOptimization
+```
+
+为什么需要 Frame copy：
+
+- `PoseOptimization()` 会改 Frame pose 和 outlier 状态。
+- 第一阶段只想拿一个更准的 pose，不想污染正式 `mCurrentFrame` 的 outlier / match state。
+- 因此只回写 `tmpFrame.GetPose()`。
+
+为什么需要重新 `isInFrustum()`：
+
+- `SearchByProjection()` 依赖 MapPoint 里由 `Frame::isInFrustum()` 写入的投影坐标。
+- 如果 pose refine 后不重新投影，secondary 仍会使用旧 pose 的投影位置，two-stage 不会真正生效。
+
+实验期间 `[TrackLocalMap][TemporalCore]` 增加了：
+
+```text
+two_stage
+two_stage_min_support
+two_stage_min_inliers
+two_stage_support
+two_stage_tried
+two_stage_inliers
+two_stage_accepted
+```
+
+三次 MH04 的 RMSE 为 `0.077933 / 0.073675 / 0.098668`，但进一步对比显示：
+
+- two-stage 在采样帧中分别接受 `48 / 52 / 49` 次，行为确实生效。
+- 临时优化只排除约 2% 的 direct + primary 关联。
+- `primary_support=80~139` 区间的 local projection 外点率约为
+  `21.8% / 21.2% / 21.6%`，与 adaptive primary-first 的 `21.1% / 21.1%`
+  没有实质差异。
+- 三次 1m RPE RMSE 为 `0.033559 / 0.035747 / 0.033863`，也没有优于 adaptive
+  primary-first 的稳定证据。
+- RMSE 差异与 loop 次数、GBA 是否完整应用以及 loop 前地图状态关系更强。
+- `primary_support<80` 的最弱帧不满足二阶段优化条件，核心 weak fallback 问题没有被处理。
+
+结论：two-stage 没有稳定、可测的精度收益。现已删除实现、环境变量和诊断字段，恢复为：
+
+```text
+primary support 足够:
+    suppress secondary
+primary support 不足:
+    admit secondary
+base support 仍不足:
+    admit expansion
+```

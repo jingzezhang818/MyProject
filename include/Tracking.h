@@ -319,6 +319,14 @@ protected:
         int localKFsExpansion = 0;
         int localKFsUnknown = 0;
         int priorAssociations = 0;
+        bool primaryFirstEnabled = false;
+        int primaryCandidates = 0;
+        int secondaryCandidates = 0;
+        int primaryMatches = 0;
+        int secondaryMatches = 0;
+        int primarySupport = 0;
+        bool secondarySuppressed = false;
+        int secondarySuppressedCandidates = 0;
         bool expansionLastEnabled = false;
         bool expansionLastUsed = false;
         int expansionLastMinSupport = 0;
@@ -339,7 +347,12 @@ protected:
     std::unordered_map<KeyFrame*, LocalKFProvenance> mmLocalKFProvenance;
     std::unordered_map<MapPoint*, LocalMPProvenance> mmLocalMPProvenance;
     std::unordered_map<MapPoint*, unsigned char> mmLocalMapTemporalCoreBins;
+    std::unordered_set<MapPoint*> msLocalMapContinuousDirectPoints;
     LocalMapTemporalCoreStats mLocalMapTemporalCore;
+    bool mbLastXFeatMotionHealthValid = false;
+    bool mbLastXFeatMotionHealthWeak = false;
+    bool mbLastXFeatMotionHealthBad = false;
+    long unsigned int mnLastXFeatMotionHealthFrameId = 0;
     int mnLocalMapVotedKFCandidates = 0;
     int mnLocalMapVotedKFKept = 0;
     int mnLocalMapVotedKFVisibilityKept = 0;
@@ -401,13 +414,6 @@ protected:
     //Motion Model
     bool mbVelocity{false};
     Sophus::SE3f mVelocity;
-    bool mbXFeatMotionHealthValid = false;
-    bool mbXFeatMotionHealthWeak = false;
-    bool mbXFeatMotionHealthBad = false;
-    long unsigned int mnXFeatMotionHealthFrameId = 0;
-    int mnXFeatMotionHealthInliers = 0;
-    int mnXFeatMotionHealthAssociations = 0;
-    float mXFeatMotionHealthOutlierRatio = 0.0f;
 
     //Color order (true RGB, false BGR, ignored if grayscale)
     bool mbRGB;
