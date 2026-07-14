@@ -120,11 +120,6 @@ bool ShouldPrintLoopVocabDebug(const unsigned long keyframeId)
     return (keyframeId % static_cast<unsigned long>(interval)) == 0UL;
 }
 
-bool ShouldPrintLoopBestRejectedDebug(const unsigned long keyframeId)
-{
-    return ShouldPrintLoopVocabDebug(keyframeId);
-}
-
 float GetXFeatLightGlueLoopConfidence()
 {
     return GetLoopEnvFloatInRange("XFEAT_LIGHTGLUE_CONF", 0.1f, 0.0f, 1.0f);
@@ -579,49 +574,6 @@ void PrintLoopLightGlueNearMiss(const unsigned long currentKFId,
               << " group_projection_kfs=" << nearMiss.groupProjectionKFs
               << " lg_calls=" << nearMiss.lgCalls
               << " sim3_converged=" << nearMiss.sim3Converged
-              << " sim3_inliers=" << nearMiss.sim3Inliers
-              << " proj_matches=" << nearMiss.projMatches
-              << " opt_matches=" << nearMiss.optMatches
-              << " proj_opt_matches=" << nearMiss.projOptMatches
-              << " cov_valid=" << nearMiss.covValid
-              << " refill_candidates=" << nearMiss.refillCandidates
-              << " refill_added=" << nearMiss.refillAdded
-              << " th_initial=" << nBoWMatches
-              << " th_sim3_ransac=" << nBoWInliers
-              << " th_opt=" << nSim3Inliers
-              << " th_proj=" << nProjMatches
-              << " th_proj_opt=" << nProjOptMatches
-              << " th_cov=3"
-              << std::endl;
-}
-
-void PrintLoopLightGlueBestRejected(const unsigned long currentKFId,
-                                    const LoopLightGlueNearMiss& nearMiss,
-                                    const int nBoWMatches,
-                                    const int nBoWInliers,
-                                    const int nSim3Inliers,
-                                    const int nProjMatches,
-                                    const int nProjOptMatches)
-{
-    if(!nearMiss.valid || nearMiss.sim3Converged == 0)
-        return;
-
-    std::cout << "[LoopLG][BestRejected]"
-              << " current_kf=" << currentKFId
-              << " candidate_kf=" << nearMiss.candidateKF
-              << " candidate_rank=" << nearMiss.candidateRank
-              << " matched_kf=" << nearMiss.matchedKF
-              << " fail_stage=" << nearMiss.failStage
-              << " initial_matches=" << nearMiss.initialMatches
-              << " direct_raw=" << nearMiss.directRaw
-              << " direct_assigned=" << nearMiss.directAssigned
-              << " direct_f_inliers=" << nearMiss.directFInliers
-              << " direct_f_rejects=" << nearMiss.directFRejects
-              << " group_size=" << nearMiss.groupSize
-              << " group_score=" << nearMiss.groupScore
-              << " group_preselect_kfs=" << nearMiss.groupPreselectKFs
-              << " group_projection_kfs=" << nearMiss.groupProjectionKFs
-              << " lg_calls=" << nearMiss.lgCalls
               << " sim3_inliers=" << nearMiss.sim3Inliers
               << " proj_matches=" << nearMiss.projMatches
               << " opt_matches=" << nearMiss.optMatches
@@ -1554,10 +1506,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
     std::vector<MapPoint*> vpBestMatchedMapPoints;
 
     int numCandidates = vpBowCand.size();
-    vector<int> vnStage(numCandidates, 0);
-    vector<int> vnMatchesStage(numCandidates, 0);
     LoopLightGlueNearMiss bestNearMiss;
-    LoopLightGlueNearMiss bestSim3RejectedNearMiss;
     std::unordered_map<KeyFrame*, const XFeatKeyFrameDatabase::LoopCandidateGroup*> mXFeatLoopGroupByKF;
     if(pvXFeatLoopGroups)
     {
@@ -2101,12 +2050,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                             if(bUseLightGlueInitialMatches)
                                 loopNearMiss.covValid = nNumKFs;
 
-                            if(nNumKFs < 3)
-                            {
-                                vnStage[candidateRank] = 8;
-                                vnMatchesStage[candidateRank] = nNumKFs;
-                            }
-                            else if(bUseLightGlueInitialMatches)
+                            if(nNumKFs >= 3 && bUseLightGlueInitialMatches)
                             {
                                 loopNearMiss.failStage = "accepted_candidate";
                                 loopNearMiss.failStageRank = 6;
@@ -2153,11 +2097,6 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
         {
             if(IsBetterLoopLightGlueNearMiss(loopNearMiss, bestNearMiss))
                 bestNearMiss = loopNearMiss;
-            if(loopNearMiss.sim3Converged != 0 &&
-               loopNearMiss.failStageRank < 6 &&
-               IsBetterLoopLightGlueNearMiss(loopNearMiss, bestSim3RejectedNearMiss))
-                bestSim3RejectedNearMiss = loopNearMiss;
-
             unique_lock<mutex> lock(mMutexXFeatLoopSummary);
             ++mnXFeatLoopLgCandidatesChecked;
             mnXFeatLoopLgCandidateMaxRank = std::max(mnXFeatLoopLgCandidateMaxRank, candidateRank);
@@ -2246,30 +2185,10 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                        nProjMatches,
                                        nProjOptMatches);
         }
-        if(bUseLightGlueInitialMatches && !bAccepted && ShouldPrintLoopBestRejectedDebug(mpCurrentKF->mnId))
-        {
-            PrintLoopLightGlueBestRejected(mpCurrentKF->mnId,
-                                           bestSim3RejectedNearMiss,
-                                           nBoWMatches,
-                                           nBoWInliers,
-                                           nSim3Inliers,
-                                           nProjMatches,
-                                           nProjOptMatches);
-        }
         return bAccepted;
     }
     else
     {
-        int maxStage = -1;
-        int maxMatched;
-        for(int i=0; i<vnStage.size(); ++i)
-        {
-            if(vnStage[i] > maxStage)
-            {
-                maxStage = vnStage[i];
-                maxMatched = vnMatchesStage[i];
-            }
-        }
         if(bUseLightGlueInitialMatches && ShouldPrintLoopVocabDebug(mpCurrentKF->mnId))
         {
             PrintLoopLightGlueNearMiss(mpCurrentKF->mnId,
@@ -2279,16 +2198,6 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                        nSim3Inliers,
                                        nProjMatches,
                                        nProjOptMatches);
-        }
-        if(bUseLightGlueInitialMatches && ShouldPrintLoopBestRejectedDebug(mpCurrentKF->mnId))
-        {
-            PrintLoopLightGlueBestRejected(mpCurrentKF->mnId,
-                                           bestSim3RejectedNearMiss,
-                                           nBoWMatches,
-                                           nBoWInliers,
-                                           nSim3Inliers,
-                                           nProjMatches,
-                                           nProjOptMatches);
         }
     }
     return false;

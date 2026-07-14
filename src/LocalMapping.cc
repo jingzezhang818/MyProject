@@ -28,7 +28,6 @@
 
 #include<mutex>
 #include<chrono>
-#include<cctype>
 #include<cstdlib>
 #include<cmath>
 #include<algorithm>
@@ -40,7 +39,6 @@
 #include<set>
 #include<string>
 #include<tuple>
-#include<unordered_set>
 #include<vector>
 
 namespace ORB_SLAM3
@@ -927,163 +925,6 @@ namespace
         return 8;
     }
 
-    float GetLocalMappingEnvFloat(const char* key,
-                                  const float defaultValue,
-                                  const float minValue,
-                                  const float maxValue)
-    {
-        const char* env = std::getenv(key);
-        if(!env)
-            return defaultValue;
-
-        try
-        {
-            const float value = std::stof(std::string(env));
-            return std::max(minValue, std::min(maxValue, value));
-        }
-        catch(...)
-        {
-            return defaultValue;
-        }
-    }
-
-    int GetLocalMappingEnvInt(const char* key,
-                              const int defaultValue,
-                              const int minValue,
-                              const int maxValue)
-    {
-        const char* env = std::getenv(key);
-        if(!env)
-            return defaultValue;
-
-        try
-        {
-            const int value = std::stoi(std::string(env));
-            return std::max(minValue, std::min(maxValue, value));
-        }
-        catch(...)
-        {
-            return defaultValue;
-        }
-    }
-
-    std::string GetLocalMappingEnvLowerString(const char* key, const std::string& defaultValue)
-    {
-        const char* env = std::getenv(key);
-        if(!env)
-            return defaultValue;
-
-        std::string value(env);
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return value;
-    }
-
-    bool IsLongWeakMapPointCullingEnabled()
-    {
-        static const bool enabled = IsLocalMappingEnvFlagEnabled("XFEAT_LOCALMAP_LONG_WEAK_MP_CULL");
-        return enabled;
-    }
-
-    const std::string& GetLongWeakMapPointCullingScope()
-    {
-        static const std::string scope = []()
-        {
-            const std::string envScope =
-                GetLocalMappingEnvLowerString("XFEAT_LOCALMAP_LONG_WEAK_MP_SCOPE", "triang_only");
-            if(envScope == "all")
-                return std::string("all");
-            return std::string("triang_only");
-        }();
-        return scope;
-    }
-
-    float GetLongWeakMapPointCullingMaxFoundRatio()
-    {
-        static const float value =
-            GetLocalMappingEnvFloat("XFEAT_LOCALMAP_LONG_WEAK_MP_MAX_FOUND_RATIO", 0.25f, 0.0f, 1.0f);
-        return value;
-    }
-
-    float GetLongWeakMapPointCullingMinDepth()
-    {
-        static const float value =
-            GetLocalMappingEnvFloat("XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_DEPTH", -1.0f, -1.0f, 10000.0f);
-        return value;
-    }
-
-    int GetLongWeakMapPointCullingMinAgeKf()
-    {
-        static const int value =
-            GetLocalMappingEnvInt("XFEAT_LOCALMAP_LONG_WEAK_MP_MIN_AGE_KF", 10, 1, 1000000);
-        return value;
-    }
-
-    int GetLongWeakMapPointCullingInterval()
-    {
-        static const int value =
-            GetLocalMappingEnvInt("XFEAT_LOCALMAP_LONG_WEAK_MP_INTERVAL", 5, 1, 1000000);
-        return value;
-    }
-
-    bool ShouldConsiderLongWeakMapPoint(const MapPoint* pMP, const std::string& scope)
-    {
-        if(!pMP)
-            return false;
-        if(scope == "all")
-            return true;
-        return pMP->GetCreationSource() == MapPoint::kCreationSourceLocalMappingTriangulation;
-    }
-
-    float ResolveMapPointDepthInKeyFrame(KeyFrame* pKF, MapPoint* pMP)
-    {
-        if(!pKF || !pMP)
-            return -1.0f;
-
-        const Eigen::Vector3f x3Dc = pKF->GetPose() * pMP->GetWorldPos();
-        const float z = x3Dc(2);
-        if(std::isfinite(z) && z > 0.0f)
-            return z;
-        return -1.0f;
-    }
-
-    struct LongWeakMapPointQualityStats
-    {
-        int total = 0;
-        ScalarDistributionStats obs;
-        ScalarDistributionStats foundRatio;
-        ScalarDistributionStats depth;
-        ScalarDistributionStats age;
-    };
-
-    void AccumulateLongWeakMapPointQualityStats(LongWeakMapPointQualityStats& stats,
-                                                MapPoint* pMP,
-                                                const long unsigned int currentKfId,
-                                                const float resolvedDepth)
-    {
-        if(!pMP)
-            return;
-
-        stats.total++;
-        const int ageKf = std::max(0,
-                                   static_cast<int>(currentKfId) -
-                                   std::max(0, static_cast<int>(pMP->mnFirstKFid)));
-        AccumulateScalarDistribution(stats.obs, static_cast<float>(pMP->Observations()), false);
-        AccumulateScalarDistribution(stats.foundRatio, pMP->GetFoundRatio(), false);
-        AccumulateScalarDistribution(stats.depth, resolvedDepth, true);
-        AccumulateScalarDistribution(stats.age, static_cast<float>(ageKf), false);
-    }
-
-    void AppendLongWeakMapPointQualityStats(std::ostream& os,
-                                            const char* prefix,
-                                            const LongWeakMapPointQualityStats& stats)
-    {
-        os << " " << prefix << "_total=" << stats.total;
-        AppendScalarDistributionStats(os, (std::string(prefix) + "_obs").c_str(), stats.obs, false);
-        AppendScalarDistributionStats(os, (std::string(prefix) + "_found").c_str(), stats.foundRatio, false);
-        AppendScalarDistributionStats(os, (std::string(prefix) + "_depth").c_str(), stats.depth, true);
-        AppendScalarDistributionStats(os, (std::string(prefix) + "_age").c_str(), stats.age, false);
-    }
 }
 
 LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName):
@@ -1162,7 +1003,6 @@ void LocalMapping::Run()
             {
                 // Find more matches in neighbor keyframes and fuse point duplications
                 SearchInNeighbors();
-                CullLongLivedWeakMapPoints();
             }
 
 #ifdef REGISTER_TIMES
@@ -1182,7 +1022,6 @@ void LocalMapping::Run()
             {
                 if(mpAtlas->KeyFramesInMap()>2)
                 {
-
                     if(mbInertial && mpCurrentKeyFrame->GetMap()->isImuInitialized())
                     {
                         float dist = (mpCurrentKeyFrame->mPrevKF->GetCameraCenter() - mpCurrentKeyFrame->GetCameraCenter()).norm() +
@@ -1211,7 +1050,6 @@ void LocalMapping::Run()
                         Optimizer::LocalBundleAdjustment(mpCurrentKeyFrame,&mbAbortBA, mpCurrentKeyFrame->GetMap(),num_FixedKF_BA,num_OptKF_BA,num_MPs_BA,num_edges_BA);
                         b_doneLBA = true;
                     }
-
                 }
 #ifdef REGISTER_TIMES
                 std::chrono::steady_clock::time_point time_EndLBA = std::chrono::steady_clock::now();
@@ -1298,7 +1136,6 @@ void LocalMapping::Run()
                     }
                 }
             }
-
 #ifdef REGISTER_TIMES
             vdLBASync_ms.push_back(timeKFCulling_ms);
             vdKFCullingSync_ms.push_back(timeKFCulling_ms);
@@ -1511,150 +1348,6 @@ void LocalMapping::MapPointCulling()
         std::cout.precision(oldPrecision);
     }
 }
-
-void LocalMapping::CullLongLivedWeakMapPoints()
-{
-    if(!IsLongWeakMapPointCullingEnabled() || !mpCurrentKeyFrame || !mpTracker)
-        return;
-    if(CheckNewKeyFrames())
-        return;
-
-    const long unsigned int currentKfId = mpCurrentKeyFrame->mnId;
-    const int interval = GetLongWeakMapPointCullingInterval();
-    if(interval > 1 && (currentKfId % static_cast<long unsigned int>(interval)) != 0)
-        return;
-
-    const std::string& scope = GetLongWeakMapPointCullingScope();
-    const float maxFoundRatio = GetLongWeakMapPointCullingMaxFoundRatio();
-    const float configuredMinDepth = GetLongWeakMapPointCullingMinDepth();
-    const float minDepth = configuredMinDepth > 0.0f ? configuredMinDepth : mpTracker->GetDepthThreshold();
-    const int minAgeKf = GetLongWeakMapPointCullingMinAgeKf();
-    const bool bPrintDiag = ShouldPrintLocalMappingXFeatDebug(currentKfId);
-
-    std::vector<KeyFrame*> vpCandidateKFs;
-    vpCandidateKFs.reserve(mbMonocular ? 31u : 11u);
-    std::unordered_set<long unsigned int> seenKfIds;
-    seenKfIds.reserve(mbMonocular ? 31u : 11u);
-    auto addCandidateKF = [&](KeyFrame* pKF)
-    {
-        if(!pKF || pKF->isBad())
-            return;
-        if(!seenKfIds.insert(pKF->mnId).second)
-            return;
-        vpCandidateKFs.push_back(pKF);
-    };
-
-    addCandidateKF(mpCurrentKeyFrame);
-    const int nn = mbMonocular ? 30 : 10;
-    const std::vector<KeyFrame*> vpNeighKFs = mpCurrentKeyFrame->GetBestCovisibilityKeyFrames(nn);
-    for(KeyFrame* pKF : vpNeighKFs)
-        addCandidateKF(pKF);
-
-    std::vector<MapPoint*> vpCandidates;
-    vpCandidates.reserve(vpCandidateKFs.size() * 200);
-    std::unordered_set<long unsigned int> seenMpIds;
-    seenMpIds.reserve(vpCandidateKFs.size() * 200);
-    for(KeyFrame* pKF : vpCandidateKFs)
-    {
-        const std::vector<MapPoint*> vpMapPoints = pKF->GetMapPointMatches();
-        for(MapPoint* pMP : vpMapPoints)
-        {
-            if(!pMP || pMP->isBad())
-                continue;
-            if(!seenMpIds.insert(pMP->mnId).second)
-                continue;
-            vpCandidates.push_back(pMP);
-        }
-    }
-
-    LongWeakMapPointQualityStats candidateStats;
-    LongWeakMapPointQualityStats culledStats;
-    int candidateBySource[kMapPointCreationSourceCount] = {};
-    int culledBySource[kMapPointCreationSourceCount] = {};
-
-    for(MapPoint* pMP : vpCandidates)
-    {
-        const float resolvedDepth = ResolveMapPointDepthInKeyFrame(mpCurrentKeyFrame, pMP);
-        const int sourceIdx = static_cast<int>(MapPointCreationSourceIndex(pMP->GetCreationSource()));
-
-        if(ShouldConsiderLongWeakMapPoint(pMP, scope))
-        {
-            candidateBySource[sourceIdx]++;
-            if(bPrintDiag)
-                AccumulateLongWeakMapPointQualityStats(candidateStats, pMP, currentKfId, resolvedDepth);
-        }
-
-        if(!ShouldConsiderLongWeakMapPoint(pMP, scope))
-            continue;
-
-        const int ageKf = std::max(0,
-                                   static_cast<int>(currentKfId) -
-                                   std::max(0, static_cast<int>(pMP->mnFirstKFid)));
-        const float foundRatio = pMP->GetFoundRatio();
-        if(ageKf < minAgeKf)
-            continue;
-        if(!std::isfinite(foundRatio) || foundRatio >= maxFoundRatio)
-            continue;
-        if(!std::isfinite(resolvedDepth) || resolvedDepth <= minDepth)
-            continue;
-
-        culledBySource[sourceIdx]++;
-        if(bPrintDiag)
-            AccumulateLongWeakMapPointQualityStats(culledStats, pMP, currentKfId, resolvedDepth);
-        pMP->SetBadFlag();
-    }
-
-    if(!bPrintDiag)
-        return;
-
-    const std::ios::fmtflags oldFlags = std::cout.flags();
-    const std::streamsize oldPrecision = std::cout.precision();
-    std::cout << std::fixed << std::setprecision(6)
-              << "[LocalMapping][LongWeakMP]"
-              << " kf_id=" << currentKfId
-              << " interval=" << interval
-              << " scope=" << scope
-              << " max_found_ratio=" << maxFoundRatio
-              << " min_depth=" << minDepth
-              << " min_age_kf=" << minAgeKf
-              << " candidate_kfs=" << vpCandidateKFs.size()
-              << " unique_candidates=" << vpCandidates.size()
-              << " scoped_candidates=" << candidateStats.total
-              << " culled=" << culledStats.total
-              << " candidate_local_mapping_triangulation="
-              << candidateBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceLocalMappingTriangulation)]
-              << " culled_local_mapping_triangulation="
-              << culledBySource[MapPointCreationSourceIndex(MapPoint::kCreationSourceLocalMappingTriangulation)]
-              << std::endl;
-
-    if(IsLocalMappingFeatureDiagEnabled())
-    {
-        std::cout << std::fixed << std::setprecision(6)
-                  << "[LocalMapping][LongWeakMPQuality]"
-                  << " kf_id=" << currentKfId;
-        AppendLongWeakMapPointQualityStats(std::cout, "candidate", candidateStats);
-        AppendLongWeakMapPointQualityStats(std::cout, "culled", culledStats);
-        std::cout << std::endl;
-
-        for(size_t i = 0; i < kMapPointCreationSourceCount; ++i)
-        {
-            if(candidateBySource[i] <= 0 && culledBySource[i] <= 0)
-                continue;
-            const MapPoint::CreationSource source = static_cast<MapPoint::CreationSource>(i);
-            std::cout << std::fixed << std::setprecision(6)
-                      << "[LocalMapping][LongWeakMPSource]"
-                      << " kf_id=" << currentKfId
-                      << " source=" << MapPointCreationSourceName(source)
-                      << " candidates=" << candidateBySource[i]
-                      << " culled=" << culledBySource[i]
-                      << std::endl;
-        }
-    }
-
-    std::cout.flags(oldFlags);
-    std::cout.precision(oldPrecision);
-}
-
 
 void LocalMapping::CreateNewMapPoints()
 {

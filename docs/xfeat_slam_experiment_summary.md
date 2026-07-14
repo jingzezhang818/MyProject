@@ -2,6 +2,12 @@
 
 本文档用于记录已经验证过的改动方向、主要日志结论和后续决策边界，避免在同一类 gate、budget、阈值和 shadow diagnostic 里反复兜圈子。
 
+> 状态说明（2026-07-14）：当前稳定 checkpoint 以 `84c49af` 的运行行为为边界，并保留其后的
+> 纯冗余清理。`KFStructure`、`SourceMPJointError`、`LocalBA SourceDepthError`、funnel/cohort、
+> LBA stall/zero-iteration 统计和 Hybrid Temporal LBA 均为历史实验，不在当前运行路径中。
+> 当前 loop 默认启用，正式命令见 `command.md`；loop 结构与历史结果见
+> `docs/loop_module_current_direction.md`。
+
 ## 当前保留基线
 
 当前相对安全的主线应理解为：
@@ -12,7 +18,17 @@
 - `XFeatMatcher::SearchByProjection()` 保留 `local_mapping_triangulation && 0 < depth <= 10m && proj_norm > 1.0` outside gate。
 - Rover-style backend contract 默认关闭：默认应看到 `rover_backend=0`、`level_gate=1`；只有显式 `XFEAT_ENABLE_ROVER_BACKEND=1` 时才跑 Rover A/B。
 - `LocalMapping.cc` 中 mapping probation、pending tracklet、mapping feature budget/repeatability、close/mid pair-selection 等实验行为已从源码主路径清理。
-- 保留结构诊断和 shadow diagnostics，但不要默认启用已经证明不稳定的真实行为。
+- 当前只保留能直接解释 tracking 和 loop 结果的紧凑诊断；历史 heavy shadow diagnostics 已从
+  Tracking 主路径删除。
+- 稳定 LocalMap 主线为 `XFEAT_LOCALMAP_TEMPORAL_EXPANSION_LAST=1` + adaptive
+  `XFEAT_LOCALMAP_PRIMARY_FIRST=1`，阈值保持 `140`；不恢复 weak-secondary、two-stage、risk/lifecycle
+  guard 或 AirSLAM KF policy。
+- loop 主线为 XFeat DBoW3 retrieval + LightGlue/F-RANSAC + Sim3/projection + CorrectLoop/GBA；
+  不恢复 PnP fallback、多窗口 LG 或候选一致性规则叠加。
+- 该主线曾在 MH04 得到 `0.071038` 和 `0.070169` 的单次 APE RMSE，但多次运行仍有异步地图和
+  loop/GBA 带来的波动，因此这些数值是 best run，不是 checkpoint 的重复性保证。
+- no-loop LBA 诊断和 Hybrid Temporal LBA 没有形成稳定 RMSE 收益，现已从代码、环境变量和常驻
+  日志中移除；实验事实保留在 AirSLAM 方向文档中作为历史记录。
 
 ### 2026-06-08 代码收敛边界
 

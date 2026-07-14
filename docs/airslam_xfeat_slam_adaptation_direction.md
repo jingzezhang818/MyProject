@@ -4,9 +4,10 @@
 
 ## 当前主线索引
 
-截至 2026-07-09，后续实验以本文末尾的“连续性三次实验结论”和
-“primary-first 自适应准入”为当前状态。前文 lifecycle、risk guard、KF policy 等内容保留为
-历史分析，不代表仍在代码中启用。
+截至 2026-07-14，稳定 checkpoint 恢复为 `84c49af` 的运行行为，并保留之后完成的纯冗余清理。
+前文 lifecycle、risk guard、KF policy、PnP loop、LBA zero-iteration 诊断和 Hybrid Temporal LBA
+均作为历史分析保留，不代表仍在代码中启用。当前 loop 默认开启；正式配置见 `command.md` 和
+`docs/loop_module_current_direction.md`。
 
 当前 LocalMap 主线只有两层行为：
 
@@ -21,7 +22,8 @@ temporal expansion-last
 - `XFEAT_LOCALMAP_PRIMARY_FIRST=1`：base 内 strict continuous 先投影；motion 正常且 `direct + primary`
   达到 `XFEAT_LOCALMAP_TEMPORAL_MIN_SUPPORT` 时，跳过 remaining strict/voted secondary。
 - primary-first 第一版只做排序，实验显示 secondary 仍大量进入优化，因此已升级为自适应准入。
-- 高体量结构/联合来源诊断只在 `XFEAT_DIAG_DEEP=1` 时输出。
+- 旧的高体量结构、联合来源、funnel、cohort 诊断已经从 Tracking 主路径删除；常规实验不要再设置
+  `XFEAT_DIAG_DEEP=1`。
 
 ## 背景
 
@@ -941,12 +943,12 @@ expansion：继续作为最后 fallback
 - `XFEAT_LOCALMAP_FOUND_RATIO_GATE` 及三个配套参数、拒绝统计。单一 found-ratio admission
   没有形成稳定 RMSE 收益，也与当前连续性主线重复。
 
-默认日志收敛为：
+当时默认日志曾收敛为：
 
 - 保留 `[TrackMotion][Health]`、`[SearchLocalPoints]`、`[TrackLocalMap][TemporalCore]`、
   `[TrackLocalMap][SourceError]`、`[TrackLocalMap][InlierMix]`。
-- `[TrackLocalMap][KFStructure]` 和 `[TrackLocalMap][SourceMPJointError]` 只在
-  `XFEAT_DIAG_DEEP=1` 时输出。
+- `[TrackLocalMap][KFStructure]`、`[TrackLocalMap][SourceMPJointError]` 以及同类细分日志后来已被删除，
+  不再作为当前诊断入口。
 - TemporalCore 默认只打印 projection/optimization 结果；selected/already-seen/frustum/admitted
   funnel 只在 deep 模式打印。
 
@@ -1180,3 +1182,306 @@ two_stage_accepted
 
 因此低 RMSE 主要不能归因于 two-stage，而是受到 loop/GBA 和运行状态影响。该逻辑、环境变量和
 诊断字段已删除，当前代码回到 adaptive primary-first。
+
+## 2026-07-10：Loop 当前决策
+
+Loop 模块的历史实验已经足够多，当前不再在本文件继续堆叠分支。固定基线、Sim3 输入结论、
+PnP 实验回退和后续工作流统一记录在 `loop_module_current_direction.md`。
+
+## 2026-07-13：固定随机种子后的波动归因
+
+在 `System.RandomSeed: 0` 下分别进行了五次 loop-enabled 和五次 no-loop MH04 对照。
+
+loop-enabled 的 APE RMSE 为：
+
+```text
+0.081785 / 0.125803 / 0.139279 / 0.109221 / 0.124398
+```
+
+no-loop 的 APE RMSE 为：
+
+```text
+0.101133 / 0.106037 / 0.151744 / 0.128429 / 0.117641
+```
+
+两组的 1 m RPE 都集中在约 `0.033~0.035`，而 APE 仍有明显波动。loop-enabled 五次均有
+有效 loop 和 GBA 应用，no-loop 五次没有候选、loop 或 GBA。因此当前波动不能继续只归因于：
+
+- Sim3/RANSAC 随机采样；
+- 是否检测到 loop；
+- GBA 是否应用。
+
+更可能的来源是 Tracking 与 LocalMapping 的异步调度造成不同的长期地图状态：
+
+```text
+关键帧到达 LocalMapping 的时机
+-> LBA 启动、被新关键帧中断或真正应用的差异
+-> observation 外点清理和 MapPoint 修正差异
+-> 共视图、后续 LocalMap 与关键帧决策逐渐分叉
+-> 局部 RPE 接近，但全局 APE 累积结果不同
+```
+
+no-loop 最差运行在后半段误差明显增大，但这只说明分叉已经累积到尾段，不能直接证明
+`frame 1000~2032` 的场景本身是根因。下一步应从全序列寻找最好/最差运行首次出现
+KF 数量、LBA 状态或地图修正差异的位置。
+
+### 本轮代码整理
+
+删除旧的 `XFEAT_LOCALMAP_LONG_WEAK_MP_CULL` 行为和 `[LocalMapping][LongWeakMP]` 日志。该实验是
+默认关闭的全局弱点删除规则，与当前“先定位异步地图分叉、不再调 admission 阈值”的目标冲突。
+
+保留已有且仍有解释力的诊断：
+
+- `KFDecision`：关键帧插入原因；
+- `RecentMP`：新建 MapPoint 的近期剔除；
+- `TemporalCore`：primary/secondary/expansion 的实际支撑；
+- `[LocalMapping][LBA]`：LBA 是否应用、图规模和删除 observation 总量。
+
+新增两类行为中立诊断：
+
+```text
+[LocalMapping][LBA]
+  sampled KF 的 applied / interrupted / skipped 状态、优化图规模、
+  删除 observation 数
+
+[LocalMapping][Summary]
+  全程 KF 队列峰值、LBA 启动/应用/中断/跳过次数、平均图规模、
+  最终 MapPoint 质量和 creation source 分布
+```
+
+这些统计不改变 BA 迭代、关键帧插入、MapPoint 创建/剔除、LocalMap admission 或 loop 行为。
+
+### 下一步工作流
+
+1. 保持 `System.RandomSeed: 0` 和 `loopClosing: 0`，用同一配置运行 3 次。
+2. 比较 `[LocalMapping][Summary]` 中 LBA 应用率、中断率、队列峰值、删 observation 数和点修正量。
+3. 用 sampled `[LocalMapping][LBA]` 与 `KFDecision` 寻找最好/最差运行的首次分叉 KF，而不是只看尾段。
+4. 只有证据显示某一类 LBA 中断、图规模或 MapPoint source 持续对应坏运行，才对该环节做最小行为修改。
+
+## 2026-07-13：三次 no-loop 深度诊断结果与日志收敛
+
+固定 `System.RandomSeed: 0`、关闭 loop 后，三次 MH04 的结果为：
+
+| 运行 | APE RMSE | 1 m RPE RMSE | 最终 KFs |
+|---|---:|---:|---:|
+| run1 | 0.164022 | 0.033783 | 602 |
+| run2 | 0.136830 | 0.033939 | 616 |
+| run3 | 0.158995 | 0.033824 | 614 |
+
+三次在约 frame 1400 前的累计趋势接近，主要分叉出现在后半段。该区间同时包含暗光、低纹理金属、
+运动模糊、反光重复管道和近景遮挡，因此场景是触发条件；但相同输入下各次恶化程度不同，说明异步
+LocalMapping/LBA 形成的地图状态决定了风险是否持续累积，不能把问题简单归因于某一帧段。
+
+LBA 汇总：
+
+| 运行 | started/applied | interrupted | skipped_queue | erased observations |
+|---|---:|---:|---:|---:|
+| run1 | 625/611 | 91 | 102 | 63621 |
+| run2 | 627/606 | 86 | 118 | 47677 |
+| run3 | 638/617 | 93 | 111 | 54441 |
+
+本组三次中，APE 排序与 LBA 删除 observation 总量一致，但样本数只有三次，这只是值得继续验证的
+相关性，不是因果结论。run3 在 frame 约 1629 的 LBA 使用 9384 条 edge 并一次删除 514 条
+observation，随后轨迹明显恶化；这类事件比全程平均 local projection outlier 更有定位价值。
+
+另外，三次采样统计中 motion LG 外点率约 0.9%，local projection 约 18.4% 到 21.4%；最好 run2
+反而具有最高的聚合 local projection 外点率。因此“继续压低全程平均 local_proj outlier”不能作为
+下一步单独目标，关键是异常场景下 observation 清理、MapPoint 修正和后续地图状态是否发生分叉。
+
+### 本轮代码清理
+
+- 删除旧的 Tracking 大型结构、source/depth 联合、funnel、cohort、MapPoint quality 和 matcher-quality
+  分桶打印，以及对应的纯统计调用。
+- 删除已经没有输出消费者的 `MappingFeatureReuseFunnel` 累计，避免调试关闭后仍做无效统计。
+- 停止记录只服务于已删除 cohort 日志的 close-reuse 首次事件和 LocalMap visibility 历史；保留会参与
+  admission 的 local projection inlier/outlier history。
+- 删除默认关闭且实验收益不足的 `XFEAT_LOCALMAP_LONG_WEAK_MP_CULL` 行为和配套环境变量。
+- 删除逐 source/depth 单元输出的 `[LocalBA][SourceDepthError]`，改为单条 LBA 事件摘要。
+- 修正 `[LocalMapping][LBA]` 中 `mps=0` 的统计错误，实际记录参与优化的 MapPoint 数。
+- 普通 LBA 只按 `XFEAT_DIAG_INTERVAL` 采样；未应用 LBA 和一次删除至少 `500` 条 observation
+  的高影响事件强制打印，正常提前收敛和一般 partial interruption 不再逐次打印。
+- `[LocalMapping][Summary]` 在 shutdown 时输出全程汇总。
+
+清理不改变 BA 迭代、关键帧决策、MapPoint 创建/剔除、LocalMap admission、LightGlue 或 loop 阈值。
+后续常规诊断只需要 `XFEAT_DEBUG=1 XFEAT_DIAG_INTERVAL=30`，不要再默认打开
+`XFEAT_DIAG_FEATURE_DISTRIBUTION` 或 `XFEAT_DIAG_DEEP`。
+
+## 2026-07-13：LBA 零轮提交确认与修复
+
+加入实际迭代数诊断后的 MH04 no-loop 运行结果为：
+
+```text
+APE RMSE=0.137767 m
+1 m RPE RMSE=0.036103 m
+final KFs=628
+LBA started/applied/not_applied=675/664/11
+LBA zero/partial/full=19/191/454
+```
+
+19 次零轮 LBA 全部满足：
+
+```text
+performed_iterations=0
+abort_after_optimize=1
+queue_after=1
+map_update_applied=1
+```
+
+这些事件直接删除了 `29412` 条 KeyFrame-MapPoint observation，占本次全部 LBA 删除量 `70029` 的
+`42.0%`；其中 `17/19` 次单次删除至少 `1000` 条。事件集中在 frame `756~826`、`1031~1032`、
+`1546~1636` 和 `1725`，与此前大规模 observation 删除区间一致。
+
+191 次部分轮不能整体视为异常：其中 `157` 次 `abort_after_optimize=0`，是 Levenberg 自身满足停止
+条件；只有 `34` 次由新关键帧中断。因此修复边界不能扩大到所有 `<10` 轮。
+
+确认的竞态链路为：
+
+```text
+优化前 stop 检查通过
+-> Tracking 插入新 KF，mbAbortBA=true
+-> g2o 在第一轮前退出并返回 0
+-> 旧路径继续读取尚未由本轮优化计算的 edge chi2
+-> 删除 observation 并写回未变化的顶点
+```
+
+原生 ORB-SLAM3 和 Rover-SLAM 也保留“忽略 `optimize(10)` 返回值”的结构；这是上游在正常负载下
+不易暴露的竞态。XFeat 的关键帧/MapPoint 密度和 LBA 图规模增大了触发窗口。
+
+### 当前代码边界
+
+- 检查 `optimizer.initializeOptimization()` 返回值。
+- 捕获 `optimizer.optimize(10)` 的实际迭代数。
+- `performed_iterations <= 0` 时在读取 edge chi2、删除 observation 和写回地图之前返回。
+- 完成至少一轮的部分优化保持原行为。
+- 删除已经完成定位任务的 MapPoint correction 统计及逐点距离计算。
+- 正常提前收敛和已应用的部分轮恢复按 `XFEAT_DIAG_INTERVAL` 采样；只对未应用和一次删除至少 `500`
+  条 observation 的高影响事件强制打印。
+- 保留 `lba_zero_iter / lba_partial_iter / lba_full_iter / lba_avg_iterations` 汇总，用于验证 guard。
+
+### 三次 guard 验证结果
+
+三次固定 seed、no-loop 运行中，所有零轮事件均被正确丢弃：
+
+| 运行 | zero_iter | zero_iter 删除 observation | started/applied/not_applied | 最终 KFs/MPs |
+|---|---:|---:|---:|---:|
+| run1 | 13 | 0 | 729/656/73 | 646/25140 |
+| run2 | 11 | 0 | 638/612/26 | 614/23894 |
+| run3 | 14 | 0 | 636/608/28 | 611/23810 |
+
+run1 没有保存轨迹。run2/run3 的 APE RMSE 分别为 `0.147155 / 0.126347 m`，1 m RPE
+分别为 `0.036129 / 0.036061 m`。因此零轮 guard 已修复地图一致性错误，但没有证明存在稳定的 APE
+正收益：它阻止错误提交，并没有补做被中断的优化。
+
+run1 进入了明显更密集的地图分支，LBA 应用率为 `90.0%`，而 run2/run3 约为 `95.9% / 95.6%`；
+同时 run1 多插入约 64 个 KF、多保留约 1200 个 MapPoint。下一阶段的可检验假设由“零轮错误提交”
+收敛为“密集插帧区间是否让有效 LBA 长时间得不到应用”。
+
+### 该阶段诊断边界（后续已收敛）
+
+- 实验阶段只验证零轮 guard，没有把防护扩大到完成至少一轮的 partial LBA。
+- `[LocalMapping][LBA]` 只输出 `status / iterations / queue / graph size / erased_observations`。
+- 删除重复的 `event / abort_before / abort_after / map_update_applied` 字段和 `lba_events` 汇总。
+- 汇总保留 `lba_pre_opt_abort`，用于把图构建期间收到新 KF 的提前中断与零轮退出分开。
+- 当时新增了 `lba_stalls_ge3 / lba_max_no_apply_kfs / start_frame / end_frame`，用于表示地图具备
+  LBA 条件后连续处理 KF、但没有一次成功应用 LBA 的最长区间；后续三次运行未显示它与 APE
+  排序有稳定对应关系，因此这些字段现已删除。
+- 该统计不改变 LBA 调度、关键帧决策、MapPoint 创建/剔除、LocalMap 或 loop 行为，也不新增环境变量。
+
+这一轮仍保持固定 seed 和 no-loop，用于判断最长 starvation 区间是否稳定对应最终 KF/MP 膨胀和较差
+APE。结果不支持继续围绕 stall 长度增加调度规则。
+
+## 2026-07-14：Hybrid Temporal LBA A/B 与回退
+
+### 为什么转向 LBA 窗口
+
+固定 seed、no-loop 的后续三次运行中，传统共视 LBA 图仍然很大且运行间变化明显：
+
+| 运行 | 平均优化 KFs | 平均固定 KFs | 平均 MPs | 平均 edges | interrupted/not-applied |
+|---|---:|---:|---:|---:|---:|
+| run1 | 30.08 | 40.31 | 1568 | 11505 | 79/44 |
+| run2 | 28.07 | 37.27 | 1488 | 10560 | 57/28 |
+| run3 | 28.23 | 40.38 | 1494 | 10589 | 53/20 |
+
+采样中还出现过 `optimized_kfs=55, mps=2447, edges=19723` 的大图。XFeat 的密集 MapPoint 和共视
+关系会让“当前 KF 的全部共视 KF”成为一个较大且随地图关联变化的自由优化窗口。现有日志没有证明
+图越大就一定越差，也没有证明 LBA 中断是唯一根因；因此本次只做可回退的窗口 A/B，不改迭代数、
+观测边、鲁棒核、外点删除、关键帧插入或 Tracking admission。
+
+AirSLAM 的启发不是照搬 track-id 地图结构，而是让在线局部优化以最近时序帧为稳定主体，再用少量强
+共视帧补充几何约束。当前 ORB-SLAM3 图中的其他 MapPoint 观测 KF 仍作为固定边界，因此历史地图约束
+没有被删除，只是不再让大量历史共视 KF 同时自由调整。
+
+### 历史实验实现
+
+实验版本默认关闭时完全保留原共视 LBA。设置：
+
+```text
+XFEAT_LOCAL_BA_HYBRID_TEMPORAL=1
+```
+
+后，且仅在 XFeat 非惯性路径中，LBA 自由关键帧窗口改为：
+
+```text
+current KF
++ previous 4 temporal KFs
++ up to 3 strongest covisible KFs not already selected
+```
+
+这些 KF 观测到的 MapPoint 进入优化；观察这些 MapPoint、但不属于自由窗口的有效 KF 继续作为固定
+边界。BA 仍请求 10 轮，零轮结果仍不提交，完成至少一轮的 partial 结果仍保持原行为。
+
+没有新增可调数量参数，避免继续堆叠环境变量。`[LocalMapping][LBA]` 只增加：
+
+```text
+window, temporal_kfs, covisible_kfs
+```
+
+汇总只增加 `lba_window`。已经不能解释 APE 排序的 starvation streak 字段已删除。
+
+### PRIMARY_FIRST 的保留结论
+
+`XFEAT_LOCALMAP_PRIMARY_FIRST` 不删除。历史日志证明它在真正抑制 secondary 的 normal frame 中，能把
+local projection 外点率由约 `13.8%~18.0%` 降到约 `8.0%~15.5%`。但它覆盖的帧有限，尚未证明能
+稳定降低全局 APE。失败的是 weak-secondary 限量/排序和 two-stage 等后续实验，不等同于
+adaptive primary-first 本身无效。
+
+该 A/B 固定保留的 Tracking 配置为：
+
+```text
+XFEAT_LOCALMAP_TEMPORAL_EXPANSION_LAST=1
+XFEAT_LOCALMAP_PRIMARY_FIRST=1
+XFEAT_LOCALMAP_TEMPORAL_MIN_SUPPORT=140
+```
+
+这样 Hybrid LBA A/B 只改变 LocalMapping 的优化窗口，不同时改变 Tracking 输入。
+
+### 验收边界
+
+固定 `System.RandomSeed: 0`、`loopClosing: 0`，baseline 与 Hybrid 各运行至少三次，比较 median：
+
+- APE/RPE，而不是单次最好值；
+- `lba_avg_optimized_kfs / mps / edges` 是否明显下降；
+- `lba_applied / not_applied / zero_iter` 是否改善且零轮仍不提交；
+- final KFs/MPs 是否出现异常膨胀；
+- `erased_observations` 是否因窗口变化出现异常突增。
+
+只有 Hybrid 的 median APE/RPE 不退化、图规模更稳定且至少三次不出现新的地图异常，才考虑保留为
+默认 XFeat 路径。若仅降低算力但精度退化，或结果仍由单次低值支撑，应回到共视 LBA，不再继续叠加
+窗口规则。
+
+### 实验结果与当前处理
+
+两次原共视 LBA 的 APE RMSE 为 `0.195185 / 0.147488`，最终 KF 数为 `606 / 623`；两次 Hybrid
+Temporal LBA 的 APE RMSE 为 `0.148194 / 0.185988`，最终 KF 数为 `692 / 682`。Hybrid 没有改善
+两次结果的中位趋势，反而使最终 KF 数平均增加约 `11.8%`、MapPoint 数平均增加约 `10.8%`。
+
+因此当前 checkpoint 已删除：
+
+- `XFEAT_LOCAL_BA_HYBRID_TEMPORAL` 环境变量和窗口分支；
+- `LocalBAStats` 实验接口；
+- `[LocalMapping][LBA]`、`[LocalMapping][Summary]` 及配套累计字段；
+- 固定 seed/no-loop 的实验配置。
+
+Local BA 恢复 `84c49af` 的 ORB-SLAM3 共视窗口和原 10 轮调用语义。零轮 guard 虽揭示了一个值得
+记录的中断现象，但没有带来稳定精度收益，且不属于取得 `0.071038 / 0.070169` best run 时的代码
+边界，因此本次稳定 checkpoint 不携带该后续行为。

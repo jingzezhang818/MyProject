@@ -312,20 +312,24 @@ evo_traj tum experiment_logs/Monocular/EuRoC/MH_04_difficult/CameraTrajectory_Eu
 
 ```bash
 mkdir -p experiment_logs/Stereo/EuRoC/MH_04_difficult
-XFEAT_DIAG_FEATURE_DISTRIBUTION=1 \
-XFEAT_DIAG_INTERVAL=30 \
 XFEAT_LIGHTGLUE_WEIGHT=./weights/xfeat_lighterglue_matcher_cpp.pt \
 XFEAT_USE_LIGHTGLUE_MOTION=1 \
 XFEAT_USE_LIGHTGLUE_TRIANG=1 \
 XFEAT_USE_LIGHTGLUE_REF=1 \
-XFEAT_USE_LIGHTGLUE_RELOC=1 \
+XFEAT_USE_LIGHTGLUE_LOOP=1 \
+XFEAT_USE_XFEAT_VOCAB=1 \
+XFEAT_VOCAB_PATH=Vocabulary/xfeat/models/xfeat_float_euroc_all_k10_l5_f512_i150_r001.dbow3 \
+XFEAT_VOCAB_MAX_FEATURES_PER_KF=512 \
+XFEAT_LOCALMAP_TEMPORAL_EXPANSION_LAST=1 \
+XFEAT_LOCALMAP_PRIMARY_FIRST=1 \
+XFEAT_LOCALMAP_TEMPORAL_MIN_SUPPORT=140 \
 ./examples/Stereo/stereo_euroc \
   Vocabulary/ORBvoc.txt \
   examples/Stereo/EuRoC.yaml \
   "/mnt/d/data_set/EuRoc Wav Dataset/machine_hall/MH_04_difficult/mav0" \
   examples/Stereo/EuRoC_TimeStamps/MH04.txt \
   EuRoC_MH_04_difficult_stereo \
-  2>&1 | tee experiment_logs/Stereo/EuRoC/MH_04_difficult/run_EuRoC_MH_04_difficult_stereo.log
+  2>&1 | tee experiment_logs/Stereo/EuRoC/MH_04_difficult/run_MH04_stable_xfeat_loop.log
 ```
 
 格式转换命令：
@@ -949,8 +953,11 @@ evo_traj tum experiment_logs/Stereo/SePT/SePT01/CameraTrajectory_SePT01_stereo.t
 
 日志阅读层级：
 
-- 默认摘要：`XFEAT_DEBUG=1` 时重点看 `[SearchLocalPoints]`、`[TrackLocalMap][TemporalCore]`、`[TrackLocalMap][SourceError]`、`[TrackLocalMap][InlierMix]`
-- 扩展细节：需要追查结构或联合来源时，再临时加 `XFEAT_DIAG_DEEP=1`，其中包括 `[TrackLocalMap][KFStructure]`、`[TrackLocalMap][SourceMPJointError]` 和各类 funnel 日志
+- 常规基线不打开调试变量。专项诊断时使用 `XFEAT_DEBUG=1 XFEAT_DIAG_INTERVAL=30`，重点看
+  `[SearchLocalPoints]`、`[TrackLocalMap][TemporalCore]`、`[TrackLocalMap][SourceError]`、
+  `[TrackLocalMap][InlierMix]`、`[LoopLG][Accept]` 和 `[LoopLG][Summary]`。
+- 旧的 `KFStructure`、`SourceMPJointError`、source/depth 多维分桶和 funnel/cohort 日志已经删除。
+  常规运行不要设置 `XFEAT_DIAG_DEEP` 或 `XFEAT_DIAG_FEATURE_DISTRIBUTION`。
 
 `local_proj_precision`（close tracking-stereo geometry screening + close/mid stereo cost volume / coarse-to-fine refinement / LR-aware sigma modeling，命令不变，无新增环境变量）：
 
@@ -982,7 +989,8 @@ XFEAT_USE_LIGHTGLUE_MOTION=1 \
 |---|---|---|---|---|
 | `USE_ORB` | 切换到 ORB 前端 | 未设置 | — | `src/Tracking.cc:2328-2350` |
 | `XFEAT_DEBUG` | 全局调试输出（高频） | 关 | — | `src/Tracking.cc:65-69`, `src/Frame.cc:43-53` |
-| `XFEAT_DIAG_FEATURE_DISTRIBUTION` | 扩展细节诊断日志；关闭时保留摘要，开启时再打印质量/深度分桶 | 关 | — | `src/Tracking.cc:72-77,3322-3327` |
+| `XFEAT_DIAG_FEATURE_DISTRIBUTION` | 旧的特征分布/三角化专项诊断；仅离线排查特征创建问题时临时使用，常规实验关闭 | 关 | — | `src/Tracking.cc`, `src/LocalMapping.cc` |
+| `XFEAT_DIAG_DEEP` | 旧专项诊断的附加细节；不再启用已删除的 TrackLocalMap 多维日志，常规实验关闭 | 关 | — | `src/Tracking.cc`, `src/LocalMapping.cc` |
 | `XFEAT_DIAG_INTERVAL` | 诊断日志间隔帧数 | `1` | `[1,500]` | `src/Tracking.cc:79-99` |
 | `XFEAT_DIAG_GRID_COLS` | 诊断空间网格列数 | `8` | `[2,64]` | `src/Tracking.cc:102-123` |
 | `XFEAT_DIAG_GRID_ROWS` | 诊断空间网格行数 | `6` | `[2,64]` | `src/Tracking.cc:125-146` |

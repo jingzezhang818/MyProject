@@ -230,114 +230,6 @@ const char* LocalBADepthBinName(const size_t bin)
     }
 }
 
-float ResolveKeyFrameMapPointDepth(KeyFrame* pKF, MapPoint* pMP)
-{
-    if(!pKF || !pMP)
-        return std::numeric_limits<float>::quiet_NaN();
-
-    const Eigen::Vector3f x3Dc = pKF->GetPose() * pMP->GetWorldPos();
-    const float depth = x3Dc(2);
-    if(!std::isfinite(depth) || depth <= 0.0f)
-        return std::numeric_limits<float>::quiet_NaN();
-    return depth;
-}
-
-bool ShouldPrintLocalBASourceDepthDiag(const long unsigned int kfId)
-{
-    return IsEnvFlagEnabled("XFEAT_DEBUG") &&
-           IsEnvFlagEnabled("XFEAT_DIAG_FEATURE_DISTRIBUTION") &&
-           IsEnvFlagEnabled("XFEAT_DIAG_DEEP") &&
-           (kfId == 0 || (kfId % static_cast<long unsigned int>(GetXFeatDiagInterval())) == 0);
-}
-
-struct LocalBASourceDepthStats
-{
-    int edges = 0;
-    int outlierEdges = 0;
-    double chi2Sum = 0.0;
-    std::vector<float> chi2Values;
-    std::set<MapPoint*> mapPoints;
-};
-
-using LocalBASourceDepthStatsGrid =
-    std::array<std::array<LocalBASourceDepthStats, kLocalBADepthBinCount>, kLocalBASourceCount>;
-
-void AccumulateLocalBASourceDepthStats(LocalBASourceDepthStatsGrid& stats,
-                                       KeyFrame* pMainKF,
-                                       KeyFrame* pEdgeKF,
-                                       MapPoint* pMP,
-                                       const float chi2,
-                                       const float threshold,
-                                       const bool bDepthPositive)
-{
-    const MapPoint::CreationSource source = pMP ? pMP->GetCreationSource()
-                                                : MapPoint::kCreationSourceUnknown;
-    const size_t sourceIdx = MapPointCreationSourceIndex(source);
-
-    float depth = ResolveKeyFrameMapPointDepth(pMainKF, pMP);
-    if(!std::isfinite(depth))
-        depth = ResolveKeyFrameMapPointDepth(pEdgeKF, pMP);
-    const size_t depthIdx = static_cast<size_t>(LocalBADepthBinIndex(depth));
-
-    LocalBASourceDepthStats& cell = stats[sourceIdx][depthIdx];
-    cell.edges++;
-    if(chi2 > threshold || !bDepthPositive)
-        cell.outlierEdges++;
-    if(std::isfinite(chi2))
-    {
-        cell.chi2Sum += static_cast<double>(chi2);
-        cell.chi2Values.push_back(chi2);
-    }
-    if(pMP)
-        cell.mapPoints.insert(pMP);
-}
-
-float LocalBAChi2P90(std::vector<float> values)
-{
-    if(values.empty())
-        return -1.0f;
-
-    std::sort(values.begin(), values.end());
-    const size_t idx = std::min(values.size() - 1,
-                                static_cast<size_t>(std::ceil(0.9 * static_cast<double>(values.size()))) - 1);
-    return values[idx];
-}
-
-void PrintLocalBASourceDepthStats(const long unsigned int kfId,
-                                  const LocalBASourceDepthStatsGrid& stats)
-{
-    for(size_t sourceIdx = 0; sourceIdx < kLocalBASourceCount; ++sourceIdx)
-    {
-        const MapPoint::CreationSource source = static_cast<MapPoint::CreationSource>(sourceIdx);
-        for(size_t depthIdx = 0; depthIdx < kLocalBADepthBinCount; ++depthIdx)
-        {
-            const LocalBASourceDepthStats& cell = stats[sourceIdx][depthIdx];
-            if(cell.edges == 0)
-                continue;
-
-            const float outlierRatio = static_cast<float>(cell.outlierEdges) /
-                                       static_cast<float>(std::max(1, cell.edges));
-            const float chi2Avg = cell.chi2Values.empty()
-                                      ? -1.0f
-                                      : static_cast<float>(cell.chi2Sum /
-                                                           static_cast<double>(cell.chi2Values.size()));
-            const float chi2P90 = LocalBAChi2P90(cell.chi2Values);
-
-            std::cout << "[LocalBA][SourceDepthError]"
-                      << " kf_id=" << kfId
-                      << " source=" << MapPointCreationSourceName(source)
-                      << " depth_bin=" << LocalBADepthBinName(depthIdx)
-                      << " edges=" << cell.edges
-                      << " outlier_edges=" << cell.outlierEdges
-                      << " outlier_ratio=" << outlierRatio
-                      << " chi2_avg=" << chi2Avg
-                      << " chi2_p90=" << chi2P90
-                      << " mp_count=" << cell.mapPoints.size()
-                      << std::endl;
-        }
-    }
-}
-
 float GetLocalMapTriangPoseWeight()
 {
     static const float weight = []() -> float
@@ -1889,7 +1781,9 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     return nInitialCorrespondences-nBad;
 }
 
-void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap, int& num_fixedKF, int& num_OptKF, int& num_MPs, int& num_edges)
+void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap,
+                                      int& num_fixedKF, int& num_OptKF,
+                                      int& num_MPs, int& num_edges)
 {
     // Local KeyFrames: First Breath Search from Current Keyframe
     list<KeyFrame*> lLocalKeyFrames;
@@ -2188,8 +2082,6 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
 
     vector<pair<KeyFrame*,MapPoint*> > vToErase;
     vToErase.reserve(vpEdgesMono.size()+vpEdgesBody.size()+vpEdgesStereo.size());
-    const bool bPrintLocalBASourceDepthDiag = ShouldPrintLocalBASourceDepthDiag(pKF->mnId);
-    LocalBASourceDepthStatsGrid localBASourceDepthStats;
 
     // Check inlier observations       
     for(size_t i=0, iend=vpEdgesMono.size(); i<iend;i++)
@@ -2200,13 +2092,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         if(pMP->isBad())
             continue;
 
-        const float chi2 = e->chi2();
-        const bool bDepthPositive = e->isDepthPositive();
-        if(bPrintLocalBASourceDepthDiag)
-            AccumulateLocalBASourceDepthStats(localBASourceDepthStats, pKF, vpEdgeKFMono[i],
-                                              pMP, chi2, 5.991f, bDepthPositive);
-
-        if(chi2>5.991 || !bDepthPositive)
+        if(e->chi2()>5.991 || !e->isDepthPositive())
         {
             KeyFrame* pKFi = vpEdgeKFMono[i];
             vToErase.push_back(make_pair(pKFi,pMP));
@@ -2221,13 +2107,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         if(pMP->isBad())
             continue;
 
-        const float chi2 = e->chi2();
-        const bool bDepthPositive = e->isDepthPositive();
-        if(bPrintLocalBASourceDepthDiag)
-            AccumulateLocalBASourceDepthStats(localBASourceDepthStats, pKF, vpEdgeKFBody[i],
-                                              pMP, chi2, 5.991f, bDepthPositive);
-
-        if(chi2>5.991 || !bDepthPositive)
+        if(e->chi2()>5.991 || !e->isDepthPositive())
         {
             KeyFrame* pKFi = vpEdgeKFBody[i];
             vToErase.push_back(make_pair(pKFi,pMP));
@@ -2242,22 +2122,12 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         if(pMP->isBad())
             continue;
 
-        const float chi2 = e->chi2();
-        const bool bDepthPositive = e->isDepthPositive();
-        if(bPrintLocalBASourceDepthDiag)
-            AccumulateLocalBASourceDepthStats(localBASourceDepthStats, pKF, vpEdgeKFStereo[i],
-                                              pMP, chi2, 7.815f, bDepthPositive);
-
-        if(chi2>7.815 || !bDepthPositive)
+        if(e->chi2()>7.815 || !e->isDepthPositive())
         {
             KeyFrame* pKFi = vpEdgeKFStereo[i];
             vToErase.push_back(make_pair(pKFi,pMP));
         }
     }
-
-    if(bPrintLocalBASourceDepthDiag)
-        PrintLocalBASourceDepthStats(pKF->mnId, localBASourceDepthStats);
-
 
     // Get Map Mutex
     unique_lock<mutex> lock(pMap->mMutexMapUpdate);
@@ -2268,6 +2138,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         {
             KeyFrame* pKFi = vToErase[i].first;
             MapPoint* pMPi = vToErase[i].second;
+
             pKFi->EraseMapPointMatch(pMPi);
             pMPi->EraseObservation(pKFi);
         }

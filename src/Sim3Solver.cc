@@ -131,6 +131,15 @@ void Sim3Solver::SetRansacParameters(double probability, int minInliers, int max
 
     mvbInliersi.resize(N);
 
+    // Avoid invalid RANSAC probability arithmetic when the candidate cannot
+    // provide the requested number of 3D-3D correspondences.
+    if(N < mRansacMinInliers)
+    {
+        mRansacMaxIts = 0;
+        mnIterations = 0;
+        return;
+    }
+
     // Adjust Parameters according to number of correspondences
     float epsilon = (float)mRansacMinInliers/N;
 
